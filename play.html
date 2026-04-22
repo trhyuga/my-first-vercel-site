@@ -307,19 +307,45 @@
       requestAnimationFrame(() => { frame.srcdoc = prepareCode(code); });
     });
 
-    closeBtn.addEventListener('click', () => {
+    closeBtn.addEventListener('click', async () => {
+      await exitFullscreen();
       runner.classList.remove('active');
       runner.classList.remove('maximized');
       frame.srcdoc = '';
     });
 
-    maxBtn.addEventListener('click', () => {
+    function isFullscreen() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+
+    async function enterFullscreen() {
+      const req = runner.requestFullscreen || runner.webkitRequestFullscreen;
+      if (!req) return;
+      try { await req.call(runner); } catch (e) {}
+    }
+
+    async function exitFullscreen() {
+      if (!isFullscreen()) return;
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (!exit) return;
+      try { await exit.call(document); } catch (e) {}
+    }
+
+    maxBtn.addEventListener('click', async () => {
       runner.classList.add('maximized');
+      await enterFullscreen();
     });
 
-    exitMaxBtn.addEventListener('click', () => {
+    exitMaxBtn.addEventListener('click', async () => {
+      await exitFullscreen();
       runner.classList.remove('maximized');
     });
+
+    function onFsChange() {
+      if (!isFullscreen()) runner.classList.remove('maximized');
+    }
+    document.addEventListener('fullscreenchange', onFsChange);
+    document.addEventListener('webkitfullscreenchange', onFsChange);
 
     pasteBtn.addEventListener('click', async () => {
       if (!navigator.clipboard || !navigator.clipboard.readText) {
