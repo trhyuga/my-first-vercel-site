@@ -2,84 +2,191 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
   <title>ひゅうがのページ</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
     body {
-      font-family: 'Helvetica Neue', Arial, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
       background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
       min-height: 100vh;
+      min-height: 100dvh;
+      color: white;
+      -webkit-font-smoothing: antialiased;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+    .container {
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 2rem 1rem 1.5rem;
+    }
+    .hero {
+      text-align: center;
+      margin-bottom: 1.75rem;
+    }
+    .avatar {
+      width: 72px; height: 72px; border-radius: 50%;
+      background: linear-gradient(135deg, #f093fb, #f5576c);
+      margin: 0 auto 0.75rem;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.9rem;
+    }
+    h1 {
+      font-size: 1.8rem; margin-bottom: 0.25rem;
+      background: linear-gradient(135deg, #f093fb, #f5576c);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    p.subtitle { font-size: 0.9rem; opacity: 0.55; }
+
+    .tools-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      opacity: 0.5;
+      margin-bottom: 0.75rem;
+      padding-left: 0.25rem;
+    }
+    .tools {
+      display: flex;
+      flex-direction: column;
+      gap: 0.9rem;
+      margin-bottom: 2rem;
+    }
+    .tool {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 1.1rem 1.2rem;
+      border-radius: 18px;
+      text-decoration: none;
+      color: white;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      transition: transform 0.12s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+      position: relative;
+      overflow: hidden;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .tool::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: var(--tint);
+      opacity: 0.13;
+      pointer-events: none;
+    }
+    .tool:active {
+      transform: scale(0.98);
+    }
+    .tool:hover {
+      border-color: rgba(255,255,255,0.25);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    }
+    .tool .icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 14px;
+      background: var(--tint);
       display: flex;
       align-items: center;
       justify-content: center;
-      color: white;
+      font-size: 1.8rem;
+      flex-shrink: 0;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.25);
     }
-    .container { text-align: center; padding: 2rem; }
-    .avatar {
-      width: 100px; height: 100px; border-radius: 50%;
-      background: linear-gradient(135deg, #f093fb, #f5576c);
-      margin: 0 auto 1.5rem;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 2.5rem;
+    .tool .body {
+      flex: 1;
+      min-width: 0;
     }
-    h1 {
-      font-size: 2.5rem; margin-bottom: 0.5rem;
-      background: linear-gradient(135deg, #f093fb, #f5576c);
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    .tool .title {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 0.2rem;
     }
-    p.subtitle { font-size: 1.1rem; opacity: 0.7; margin-bottom: 2rem; }
-    .card {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 16px; padding: 1.5rem 2rem;
-      max-width: 400px; margin: 0 auto 2rem;
-      backdrop-filter: blur(10px);
+    .tool .desc {
+      font-size: 0.82rem;
+      opacity: 0.7;
+      line-height: 1.45;
     }
-    .card p { font-size: 1rem; line-height: 1.8; opacity: 0.85; }
+    .tool .arrow {
+      font-size: 1.4rem;
+      opacity: 0.5;
+      flex-shrink: 0;
+    }
+    .tool.pink { --tint: linear-gradient(135deg, #f093fb, #f5576c); }
+    .tool.blue { --tint: linear-gradient(135deg, #4facfe, #00f2fe); }
+
+    .about {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 1rem 1.2rem;
+      margin-bottom: 1rem;
+      text-align: center;
+    }
+    .about p {
+      font-size: 0.85rem;
+      line-height: 1.65;
+      opacity: 0.75;
+    }
+    .badges {
+      text-align: center;
+      margin-bottom: 1.5rem;
+    }
     .badge {
       display: inline-block;
       background: linear-gradient(135deg, #f093fb, #f5576c);
-      color: white; padding: 0.4rem 1rem;
-      border-radius: 999px; font-size: 0.85rem; font-weight: bold; margin: 0.3rem;
-    }
-    .cta {
-      display: inline-block;
-      margin: 0.5rem 0.3rem;
-      padding: 0.9rem 1.6rem;
-      background: linear-gradient(135deg, #f093fb, #f5576c);
       color: white;
-      text-decoration: none;
+      padding: 0.3rem 0.85rem;
       border-radius: 999px;
+      font-size: 0.72rem;
       font-weight: bold;
-      font-size: 0.95rem;
-      box-shadow: 0 4px 14px rgba(245,87,108,0.35);
+      margin: 0.2rem;
+      opacity: 0.8;
     }
-    .cta.alt {
-      background: linear-gradient(135deg, #4facfe, #00f2fe);
-      color: #0b3a5e;
-      box-shadow: 0 4px 14px rgba(79,172,254,0.35);
-    }
-    .cta-row { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.4rem; align-items: center; }
-    .footer { margin-top: 2rem; opacity: 0.4; font-size: 0.8rem; }
+    .footer { text-align: center; opacity: 0.3; font-size: 0.75rem; }
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="avatar">🌊</div>
-    <h1>ひゅうが</h1>
-    <p class="subtitle">My first Vercel site</p>
-    <div class="card">
-      <p>GitHubとVercelを連携して、<br>初めてデプロイしたページです！</p>
+    <div class="hero">
+      <div class="avatar">🌊</div>
+      <h1>ひゅうが</h1>
+      <p class="subtitle">My first Vercel site</p>
     </div>
-    <div>
+
+    <p class="tools-label">ツール</p>
+    <div class="tools">
+      <a class="tool pink" href="./play.html">
+        <div class="icon">🎮</div>
+        <div class="body">
+          <div class="title">HTMLゲームランナー</div>
+          <div class="desc">AIが書いたHTMLを貼り付けてスマホで即プレイ。履歴・お気に入り・デバッグログ付き</div>
+        </div>
+        <span class="arrow">›</span>
+      </a>
+      <a class="tool blue" href="./bg-remove/">
+        <div class="icon">🎨</div>
+        <div class="body">
+          <div class="title">背景透過ツール</div>
+          <div class="desc">画像をアップするだけで背景を自動除去、透過PNGとしてダウンロード</div>
+        </div>
+        <span class="arrow">›</span>
+      </a>
+    </div>
+
+    <div class="about">
+      <p>GitHubとVercelを連携して<br>初めてデプロイしたページです!</p>
+    </div>
+    <div class="badges">
       <span class="badge">GitHub</span>
       <span class="badge">Vercel</span>
       <span class="badge">HTML</span>
-    </div>
-    <div class="cta-row">
-      <a class="cta" href="./play.html">🎮 HTMLゲームランナー</a>
-      <a class="cta alt" href="./bg-remove/">🎨 背景透過ツール</a>
     </div>
     <p class="footer">Deployed with Vercel 🚀</p>
   </div>
