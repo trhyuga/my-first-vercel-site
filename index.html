@@ -45,16 +45,22 @@
     }
     .cta {
       display: inline-block;
-      margin-top: 1.5rem;
-      padding: 0.9rem 1.8rem;
+      margin: 0.5rem 0.3rem;
+      padding: 0.9rem 1.6rem;
       background: linear-gradient(135deg, #f093fb, #f5576c);
       color: white;
       text-decoration: none;
       border-radius: 999px;
       font-weight: bold;
-      font-size: 1rem;
+      font-size: 0.95rem;
       box-shadow: 0 4px 14px rgba(245,87,108,0.35);
     }
+    .cta.alt {
+      background: linear-gradient(135deg, #4facfe, #00f2fe);
+      color: #0b3a5e;
+      box-shadow: 0 4px 14px rgba(79,172,254,0.35);
+    }
+    .cta-row { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.4rem; align-items: center; }
     .footer { margin-top: 2rem; opacity: 0.4; font-size: 0.8rem; }
   </style>
 </head>
@@ -71,8 +77,9 @@
       <span class="badge">Vercel</span>
       <span class="badge">HTML</span>
     </div>
-    <div>
-      <a class="cta" href="./play.html">🎮 HTMLゲームランナーを開く</a>
+    <div class="cta-row">
+      <a class="cta" href="./play.html">🎮 HTMLゲームランナー</a>
+      <a class="cta alt" href="./bg-remove/">🎨 背景透過ツール</a>
     </div>
     <p class="footer">Deployed with Vercel 🚀</p>
   </div>
