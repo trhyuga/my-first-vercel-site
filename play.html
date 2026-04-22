@@ -152,6 +152,30 @@
       background: white;
       display: block;
     }
+    .runner.maximized .runner-header { display: none; }
+    .exit-max {
+      position: fixed;
+      top: calc(env(safe-area-inset-top) + 0.4rem);
+      right: calc(env(safe-area-inset-right) + 0.4rem);
+      z-index: 20;
+      display: none;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: white;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      font-size: 1rem;
+      padding: 0;
+      line-height: 1;
+      -webkit-tap-highlight-color: transparent;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .exit-max:active { transform: scale(0.92); }
+    .runner.maximized .exit-max { display: flex; align-items: center; justify-content: center; }
   </style>
 </head>
 <body>
@@ -185,6 +209,7 @@
     <div class="runner-header">
       <span class="title">実行中</span>
       <div class="actions">
+        <button class="btn-secondary" id="maximize">⤢ 最大化</button>
         <button class="btn-secondary" id="reload">🔄 再実行</button>
         <button class="btn-secondary" id="close">✕ 閉じる</button>
       </div>
@@ -195,6 +220,7 @@
       allow="accelerometer; gyroscope; autoplay; fullscreen; gamepad"
       allowfullscreen
     ></iframe>
+    <button class="exit-max" id="exitMax" aria-label="最大化を解除">⤡</button>
   </div>
 
   <script>
@@ -204,6 +230,8 @@
     const clearBtn = document.getElementById('clear');
     const closeBtn = document.getElementById('close');
     const reloadBtn = document.getElementById('reload');
+    const maxBtn = document.getElementById('maximize');
+    const exitMaxBtn = document.getElementById('exitMax');
     const runner = document.getElementById('runner');
     const frame = document.getElementById('frame');
 
@@ -281,7 +309,16 @@
 
     closeBtn.addEventListener('click', () => {
       runner.classList.remove('active');
+      runner.classList.remove('maximized');
       frame.srcdoc = '';
+    });
+
+    maxBtn.addEventListener('click', () => {
+      runner.classList.add('maximized');
+    });
+
+    exitMaxBtn.addEventListener('click', () => {
+      runner.classList.remove('maximized');
     });
 
     pasteBtn.addEventListener('click', async () => {
