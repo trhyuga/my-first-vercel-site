@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>画像→PDF | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-green">🖼️ 画像→PDF</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="image/*" multiple hidden />
+      <div class="icon">🖼️</div>
+      <p><b>タップで画像を複数選択</b></p>
+      <p class="sub">JPG / PNG / WebP など、ドラッグ&ドロップ対応</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="field">
+        <label>ページサイズ</label>
+        <select id="pageSize">
+          <option value="fit">画像サイズに合わせる</option>
+          <option value="A4P" selected>A4 縦</option>
+          <option value="A4L">A4 横</option>
+          <option value="Letter">Letter</option>
+          <option value="B5P">B5 縦</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>余白</label>
+        <select id="margin">
+          <option value="0">なし</option>
+          <option value="10" selected>少なめ (10mm)</option>
+          <option value="20">標準 (20mm)</option>
+          <option value="30">広め (30mm)</option>
+        </select>
+      </div>
+      <div class="thumb-grid" id="grid"></div>
+      <div class="field">
+        <label for="fname">出力ファイル名</label>
+        <input type="text" id="fname" value="images" />
+      </div>
+      <button class="btn-primary green" id="run">📄 PDFを作成してダウンロード</button>
+      <button class="btn-secondary" id="clear">クリア</button>
+    </div>
+
+    <div id="msg"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+
+    const SIZES = {
+      A4P: [595.28, 841.89],
+      A4L: [841.89, 595.28],
+      Letter: [612, 792],
+      B5P: [498.89, 708.66],
+    };
+
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const grid = document.getElementById('grid');
+    const fname = document.getElementById('fname');
+    const msg = document.getElementById('msg');
+
+    const images = []; // {file, dataUrl}
+
+    function render() {
+      grid.innerHTML = '';
+      images.forEach((im, i) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'thumb';
+        const img = new Image();
+        img.src = im.dataUrl;
+        wrap.appendChild(img);
+        const num = document.createElement('div');
+        num.className = 'num'; num.textContent = i + 1;
+        wrap.appendChild(num);
+        const del = document.createElement('button');
+        del.className = 'del'; del.textContent = '✕';
+        del.addEventListener('click', (e) => { e.stopPropagation(); images.splice(i, 1); render(); });
+        wrap.appendChild(del);
+        grid.appendChild(wrap);
+      });
+      controls.style.display = images.length ? 'flex' : 'none';
+    }
+
+    bindDropzone(dz, fi, async (fs) => {
+      for (const f of fs) {
+        if (!f.type.startsWith('image/')) continue;
+        const dataUrl = await new Promise((r) => {
+          const fr = new FileReader();
+          fr.onload = () => r(fr.result);
+          fr.readAsDataURL(f);
+        });
+        images.push({ file: f, dataUrl });
+      }
+      render();
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      images.length = 0; render(); clearBox(msg);
+    });
+
+    async function fileToBytes(file) {
+      return new Uint8Array(await file.arrayBuffer());
+    }
+
+    document.getElementById('run').addEventListener('click', async () => {
+      if (!images.length) { showError(msg, '画像を1枚以上選んでください'); return; }
+      const runBtn = document.getElementById('run');
+      runBtn.disabled = true;
+      const orig = runBtn.textContent;
+      runBtn.textContent = '処理中...';
+      try {
+        const doc = await PDFLib.PDFDocument.create();
+        const sizeKey = document.getElementById('pageSize').value;
+        const marginMm = parseFloat(document.getElementById('margin').value);
+        const marginPt = marginMm / 25.4 * 72;
+
+        for (const im of images) {
+          const bytes = await fileToBytes(im.file);
+          let embed;
+          if (im.file.type === 'image/png' || /\.png$/i.test(im.file.name)) {
+            embed = await doc.embedPng(bytes);
+          } else if (im.file.type === 'image/jpeg' || /\.jpe?g$/i.test(im.file.name)) {
+            embed = await doc.embedJpg(bytes);
+          } else {
+            // Convert via canvas to jpeg
+            const dataUrl = im.dataUrl;
+            const img = await new Promise((r) => { const x = new Image(); x.onload = () => r(x); x.src = dataUrl; });
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+            canvas.getContext('2d').drawImage(img, 0, 0);
+            const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95));
+            embed = await doc.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+          }
+
+          let pageW, pageH;
+          if (sizeKey === 'fit') {
+            pageW = embed.width; pageH = embed.height;
+          } else {
+            [pageW, pageH] = SIZES[sizeKey];
+          }
+          const page = doc.addPage([pageW, pageH]);
+          if (sizeKey === 'fit') {
+            page.drawImage(embed, { x: 0, y: 0, width: pageW, height: pageH });
+          } else {
+            const innerW = pageW - marginPt * 2;
+            const innerH = pageH - marginPt * 2;
+            const scale = Math.min(innerW / embed.width, innerH / embed.height);
+            const w = embed.width * scale;
+            const h = embed.height * scale;
+            page.drawImage(embed, { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h });
+          }
+        }
+        download(new Blob([await doc.save()], { type: 'application/pdf' }), safeFilename(fname.value, 'images') + '.pdf');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = orig;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>パスワード保護 | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-orange">🔒 パスワード保護</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="application/pdf" hidden />
+      <div class="icon">🔒</div>
+      <p><b>タップしてPDFを選択</b></p>
+      <p class="sub">パスワードで暗号化します</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="file-item">
+        <span class="name" id="srcName"></span>
+        <span class="size" id="srcSize"></span>
+      </div>
+      <div class="field">
+        <label for="pw">パスワード(閲覧用)</label>
+        <input type="password" id="pw" autocomplete="new-password" placeholder="8文字以上推奨" />
+      </div>
+      <div class="field">
+        <label for="pw2">確認用もう一度</label>
+        <input type="password" id="pw2" autocomplete="new-password" />
+      </div>
+      <div class="field">
+        <label>権限制限</label>
+        <div class="radio-row">
+          <label><input type="checkbox" id="noPrint"><span>🚫 印刷禁止</span></label>
+          <label><input type="checkbox" id="noCopy"><span>🚫 コピー禁止</span></label>
+          <label><input type="checkbox" id="noEdit"><span>🚫 編集禁止</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label for="fname">出力ファイル名</label>
+        <input type="text" id="fname" value="protected" />
+      </div>
+      <button class="btn-primary orange" id="run">🔒 暗号化してダウンロード</button>
+      <button class="btn-secondary" id="clear">別のPDFを選ぶ</button>
+    </div>
+
+    <div id="msg"></div>
+    <p class="info-hint">処理は端末内で完結します。パスワードを忘れると復元できませんのでご注意ください。</p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@cantoo/pdf-lib@2.3.0/dist/pdf-lib.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const srcName = document.getElementById('srcName');
+    const srcSize = document.getElementById('srcSize');
+    const fname = document.getElementById('fname');
+    const msg = document.getElementById('msg');
+
+    let bytes = null;
+
+    bindDropzone(dz, fi, async (fs) => {
+      const f = fs[0]; if (!f) return;
+      bytes = new Uint8Array(await f.arrayBuffer());
+      srcName.textContent = f.name;
+      srcSize.textContent = fmtSize(f.size);
+      fname.value = safeFilename(f.name.replace(/\.pdf$/i, '') + '_protected', 'protected');
+      clearBox(msg);
+      dz.style.display = 'none';
+      controls.style.display = 'flex';
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      bytes = null;
+      dz.style.display = 'block';
+      controls.style.display = 'none';
+      clearBox(msg);
+    });
+
+    document.getElementById('run').addEventListener('click', async () => {
+      if (!bytes) return;
+      const pw = document.getElementById('pw').value;
+      const pw2 = document.getElementById('pw2').value;
+      if (!pw) { showError(msg, 'パスワードを入力してください'); return; }
+      if (pw !== pw2) { showError(msg, '確認用パスワードが一致しません'); return; }
+
+      const runBtn = document.getElementById('run');
+      runBtn.disabled = true;
+      const orig = runBtn.textContent;
+      runBtn.textContent = '暗号化中...';
+      clearBox(msg);
+      try {
+        const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const permissions = {};
+        if (document.getElementById('noPrint').checked) { permissions.printing = false; permissions.printingHighQuality = false; }
+        else { permissions.printing = 'highResolution'; }
+        if (document.getElementById('noCopy').checked) permissions.copying = false;
+        if (document.getElementById('noEdit').checked) { permissions.modifying = false; permissions.annotating = false; permissions.fillingForms = false; permissions.documentAssembly = false; permissions.contentAccessibility = false; }
+
+        await doc.encrypt({
+          userPassword: pw,
+          ownerPassword: pw,
+          permissions,
+        });
+        const out = await doc.save();
+        download(new Blob([out], { type: 'application/pdf' }), safeFilename(fname.value, 'protected') + '.pdf');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = orig;
+      }
+    });
+  </script>
+</body>
+</html>

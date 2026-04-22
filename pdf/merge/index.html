@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>結合 | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-pink">🧩 PDF結合</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="application/pdf" multiple hidden />
+      <div class="icon">📑</div>
+      <p><b>タップしてPDFを複数選択</b></p>
+      <p class="sub">または ドラッグ&ドロップ・複数ファイル対応</p>
+    </div>
+
+    <div class="file-list" id="list"></div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="field">
+        <label for="fname">出力ファイル名</label>
+        <input type="text" id="fname" value="merged" />
+      </div>
+      <button class="btn-primary" id="run">🧩 結合してダウンロード</button>
+      <button class="btn-secondary" id="clear">クリア</button>
+    </div>
+
+    <div id="msg"></div>
+    <p class="info-hint">上から順番に結合されます。並び替えは ↑ ↓ ボタンで。</p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const list = document.getElementById('list');
+    const controls = document.getElementById('controls');
+    const runBtn = document.getElementById('run');
+    const clearBtn = document.getElementById('clear');
+    const msg = document.getElementById('msg');
+    const fname = document.getElementById('fname');
+
+    const files = [];
+
+    function render() {
+      list.innerHTML = '';
+      files.forEach((f, i) => {
+        const row = document.createElement('div');
+        row.className = 'file-item';
+        row.innerHTML = `
+          <span class="name">${i + 1}. ${escapeHtml(f.name)}</span>
+          <span class="size">${fmtSize(f.size)}</span>
+          <div class="acts">
+            <button data-act="up" ${i === 0 ? 'disabled' : ''}>↑</button>
+            <button data-act="down" ${i === files.length - 1 ? 'disabled' : ''}>↓</button>
+            <button data-act="del">✕</button>
+          </div>`;
+        row.addEventListener('click', (e) => {
+          const act = e.target.dataset.act;
+          if (act === 'up' && i > 0) { [files[i - 1], files[i]] = [files[i], files[i - 1]]; render(); }
+          if (act === 'down' && i < files.length - 1) { [files[i], files[i + 1]] = [files[i + 1], files[i]]; render(); }
+          if (act === 'del') { files.splice(i, 1); render(); }
+        });
+        list.appendChild(row);
+      });
+      controls.style.display = files.length ? 'flex' : 'none';
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+
+    bindDropzone(dz, fi, (fs) => {
+      fs.filter(f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name))
+        .forEach(f => files.push(f));
+      render();
+    });
+
+    clearBtn.addEventListener('click', () => { files.length = 0; render(); clearBox(msg); });
+
+    runBtn.addEventListener('click', async () => {
+      if (files.length < 2) { showError(msg, '2つ以上のPDFを選択してください'); return; }
+      clearBox(msg);
+      runBtn.disabled = true;
+      runBtn.textContent = '処理中...';
+      try {
+        const out = await PDFLib.PDFDocument.create();
+        for (const f of files) {
+          const bytes = new Uint8Array(await f.arrayBuffer());
+          const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+          const pages = await out.copyPages(src, src.getPageIndices());
+          pages.forEach(p => out.addPage(p));
+        }
+        const blob = new Blob([await out.save()], { type: 'application/pdf' });
+        download(blob, safeFilename(fname.value, 'merged') + '.pdf');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = '🧩 結合してダウンロード';
+      }
+    });
+  </script>
+</body>
+</html>

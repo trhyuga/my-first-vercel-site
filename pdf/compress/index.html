@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>圧縮 | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-orange">🗜️ PDF圧縮</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="application/pdf" hidden />
+      <div class="icon">🗜️</div>
+      <p><b>タップしてPDFを選択</b></p>
+      <p class="sub">各ページを画像化してPDFに再構築します</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="file-item">
+        <span class="name" id="srcName"></span>
+        <span class="size" id="srcSize"></span>
+      </div>
+      <div class="field">
+        <label>圧縮レベル</label>
+        <div class="radio-row">
+          <label><input type="radio" name="level" value="high"><span>🌙 高圧縮<br><small>DPI=96 Q=0.55</small></span></label>
+          <label><input type="radio" name="level" value="med" checked><span>⚖️ 標準<br><small>DPI=150 Q=0.75</small></span></label>
+          <label><input type="radio" name="level" value="low"><span>✨ 高画質<br><small>DPI=200 Q=0.88</small></span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label for="fname">出力ファイル名</label>
+        <input type="text" id="fname" value="compressed" />
+      </div>
+      <button class="btn-primary orange" id="run">🗜️ 圧縮してダウンロード</button>
+      <button class="btn-secondary" id="clear">別のPDFを選ぶ</button>
+      <div class="progress" id="prog" style="display:none;">
+        <span id="progText">準備中...</span>
+        <div class="progress-bar"><span id="progBar" style="width:0%"></span></div>
+      </div>
+    </div>
+
+    <div id="msg"></div>
+    <p class="info-hint">テキストPDFは少ししか小さくならない場合があります。画像主体・スキャン系のPDFで特に効果が出ます。</p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs } = PDFApp;
+    setupPdfJs();
+
+    const LEVELS = {
+      high: { dpi: 96, quality: 0.55 },
+      med:  { dpi: 150, quality: 0.75 },
+      low:  { dpi: 200, quality: 0.88 },
+    };
+
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const srcName = document.getElementById('srcName');
+    const srcSize = document.getElementById('srcSize');
+    const fname = document.getElementById('fname');
+    const msg = document.getElementById('msg');
+    const prog = document.getElementById('prog');
+    const progText = document.getElementById('progText');
+    const progBar = document.getElementById('progBar');
+
+    let bytes = null;
+
+    bindDropzone(dz, fi, async (fs) => {
+      const f = fs[0]; if (!f) return;
+      bytes = new Uint8Array(await f.arrayBuffer());
+      srcName.textContent = f.name;
+      srcSize.textContent = fmtSize(f.size);
+      fname.value = safeFilename(f.name.replace(/\.pdf$/i, '') + '_compressed', 'compressed');
+      clearBox(msg);
+      dz.style.display = 'none';
+      controls.style.display = 'flex';
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      bytes = null;
+      dz.style.display = 'block';
+      controls.style.display = 'none';
+      clearBox(msg);
+      prog.style.display = 'none';
+    });
+
+    function setProgress(pct, text) {
+      prog.style.display = 'block';
+      progText.textContent = text;
+      progBar.style.width = pct + '%';
+    }
+
+    document.getElementById('run').addEventListener('click', async () => {
+      if (!bytes) return;
+      const level = LEVELS[document.querySelector('input[name="level"]:checked').value];
+      const runBtn = document.getElementById('run');
+      runBtn.disabled = true;
+      const origLabel = runBtn.textContent;
+      runBtn.textContent = '処理中...';
+      clearBox(msg);
+      try {
+        const src = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+        const n = src.numPages;
+        const out = await PDFLib.PDFDocument.create();
+        const scale = level.dpi / 72;
+
+        for (let i = 1; i <= n; i++) {
+          setProgress(Math.round((i - 1) / n * 100), `ページ ${i}/${n} を処理中...`);
+          const page = await src.getPage(i);
+          const vp = page.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.ceil(vp.width);
+          canvas.height = Math.ceil(vp.height);
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: ctx, viewport: vp }).promise;
+          const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', level.quality));
+          const jpgBytes = new Uint8Array(await blob.arrayBuffer());
+          const jpg = await out.embedJpg(jpgBytes);
+          const pageOut = out.addPage([canvas.width, canvas.height]);
+          pageOut.drawImage(jpg, { x: 0, y: 0, width: canvas.width, height: canvas.height });
+        }
+
+        setProgress(100, '保存中...');
+        const outBytes = await out.save({ useObjectStreams: true });
+        const outBlob = new Blob([outBytes], { type: 'application/pdf' });
+        const saved = bytes.byteLength - outBlob.size;
+        const pct = Math.round(saved / bytes.byteLength * 100);
+        const notice = document.createElement('div');
+        notice.className = saved > 0 ? 'success' : 'info-hint';
+        notice.textContent = saved > 0
+          ? `${fmtSize(bytes.byteLength)} → ${fmtSize(outBlob.size)} (${pct}% 削減)`
+          : `結果 ${fmtSize(outBlob.size)}。このPDFは圧縮効果が限定的です。`;
+        msg.appendChild(notice);
+        download(outBlob, safeFilename(fname.value, 'compressed') + '.pdf');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = origLabel;
+        setTimeout(() => prog.style.display = 'none', 800);
+      }
+    });
+  </script>
+</body>
+</html>

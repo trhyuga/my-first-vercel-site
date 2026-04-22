@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>PDF→JPG | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-blue">📸 PDF→JPG</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="application/pdf" hidden />
+      <div class="icon">📸</div>
+      <p><b>タップしてPDFを選択</b></p>
+      <p class="sub">各ページをJPG画像に変換</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="file-item">
+        <span class="name" id="srcName"></span>
+        <span class="size" id="srcSize"></span>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="dpi">解像度 (DPI)</label>
+          <select id="dpi">
+            <option value="100">100 (低)</option>
+            <option value="150" selected>150 (標準)</option>
+            <option value="200">200 (高)</option>
+            <option value="300">300 (最高)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="format">形式</label>
+          <select id="format">
+            <option value="jpeg" selected>JPG</option>
+            <option value="png">PNG</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="fname">ファイル名(連番が付与されます)</label>
+        <input type="text" id="fname" value="page" />
+      </div>
+      <button class="btn-primary blue" id="run">📦 ZIPでダウンロード</button>
+      <button class="btn-secondary" id="clear">別のPDFを選ぶ</button>
+      <div class="progress" id="prog" style="display:none;">
+        <span id="progText">準備中...</span>
+        <div class="progress-bar"><span id="progBar" style="width:0%"></span></div>
+      </div>
+    </div>
+
+    <div id="msg"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs } = PDFApp;
+    setupPdfJs();
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const srcName = document.getElementById('srcName');
+    const srcSize = document.getElementById('srcSize');
+    const fname = document.getElementById('fname');
+    const msg = document.getElementById('msg');
+    const prog = document.getElementById('prog');
+    const progText = document.getElementById('progText');
+    const progBar = document.getElementById('progBar');
+
+    let bytes = null;
+    let originalName = '';
+
+    bindDropzone(dz, fi, async (fs) => {
+      const f = fs[0]; if (!f) return;
+      bytes = new Uint8Array(await f.arrayBuffer());
+      originalName = f.name.replace(/\.pdf$/i, '');
+      srcName.textContent = f.name;
+      srcSize.textContent = fmtSize(f.size);
+      fname.value = safeFilename(originalName + '_page', 'page');
+      clearBox(msg);
+      dz.style.display = 'none';
+      controls.style.display = 'flex';
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      bytes = null;
+      dz.style.display = 'block';
+      controls.style.display = 'none';
+      clearBox(msg);
+      prog.style.display = 'none';
+    });
+
+    function setProgress(pct, text) {
+      prog.style.display = 'block';
+      progText.textContent = text;
+      progBar.style.width = pct + '%';
+    }
+
+    document.getElementById('run').addEventListener('click', async () => {
+      if (!bytes) return;
+      const runBtn = document.getElementById('run');
+      runBtn.disabled = true;
+      const origLabel = runBtn.textContent;
+      runBtn.textContent = '処理中...';
+      clearBox(msg);
+      try {
+        const dpi = parseInt(document.getElementById('dpi').value, 10);
+        const format = document.getElementById('format').value;
+        const mime = format === 'png' ? 'image/png' : 'image/jpeg';
+        const ext = format === 'png' ? 'png' : 'jpg';
+        const scale = dpi / 72;
+        const base = safeFilename(fname.value, 'page');
+
+        const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+        const zip = new JSZip();
+        for (let i = 1; i <= pdf.numPages; i++) {
+          setProgress(Math.round((i - 1) / pdf.numPages * 100), `ページ ${i}/${pdf.numPages} をレンダリング中...`);
+          const page = await pdf.getPage(i);
+          const vp = page.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.ceil(vp.width);
+          canvas.height = Math.ceil(vp.height);
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: ctx, viewport: vp }).promise;
+          const blob = await new Promise(r => canvas.toBlob(r, mime, 0.92));
+          zip.file(`${base}_${String(i).padStart(3, '0')}.${ext}`, blob);
+        }
+        setProgress(100, 'ZIPを生成中...');
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        download(zipBlob, safeFilename(originalName || 'pdf-to-images', 'pdf-to-images') + '.zip');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = origLabel;
+        setTimeout(() => prog.style.display = 'none', 800);
+      }
+    });
+  </script>
+</body>
+</html>

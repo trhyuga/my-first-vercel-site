@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>ページ番号 | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-yellow">🔢 ページ番号</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="application/pdf" hidden />
+      <div class="icon">🔢</div>
+      <p><b>タップしてPDFを選択</b></p>
+      <p class="sub">各ページに通し番号を挿入</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="file-item">
+        <span class="name" id="srcName"></span>
+        <span class="size" id="srcSize"></span>
+      </div>
+      <div class="field">
+        <label>配置</label>
+        <select id="position">
+          <option value="bc" selected>下 中央</option>
+          <option value="bl">下 左</option>
+          <option value="br">下 右</option>
+          <option value="tc">上 中央</option>
+          <option value="tl">上 左</option>
+          <option value="tr">上 右</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="startNum">開始番号</label>
+          <input type="number" id="startNum" value="1" min="1" />
+        </div>
+        <div class="field">
+          <label for="fontSize">サイズ</label>
+          <input type="number" id="fontSize" value="11" min="6" max="40" />
+        </div>
+      </div>
+      <div class="field">
+        <label for="format">書式 (# = 番号, @ = 総数)</label>
+        <input type="text" id="format" value="# / @" />
+      </div>
+      <div class="field">
+        <label for="fname">出力ファイル名</label>
+        <input type="text" id="fname" value="numbered" />
+      </div>
+      <button class="btn-primary orange" id="run">🔢 挿入してダウンロード</button>
+      <button class="btn-secondary" id="clear">別のPDFを選ぶ</button>
+    </div>
+
+    <div id="msg"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const srcName = document.getElementById('srcName');
+    const srcSize = document.getElementById('srcSize');
+    const fname = document.getElementById('fname');
+    const msg = document.getElementById('msg');
+
+    let bytes = null;
+
+    bindDropzone(dz, fi, async (fs) => {
+      const f = fs[0]; if (!f) return;
+      bytes = new Uint8Array(await f.arrayBuffer());
+      srcName.textContent = f.name;
+      srcSize.textContent = fmtSize(f.size);
+      fname.value = safeFilename(f.name.replace(/\.pdf$/i, '') + '_numbered', 'numbered');
+      clearBox(msg);
+      dz.style.display = 'none';
+      controls.style.display = 'flex';
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      bytes = null;
+      dz.style.display = 'block';
+      controls.style.display = 'none';
+      clearBox(msg);
+    });
+
+    document.getElementById('run').addEventListener('click', async () => {
+      if (!bytes) return;
+      const runBtn = document.getElementById('run');
+      runBtn.disabled = true;
+      const origLabel = runBtn.textContent;
+      runBtn.textContent = '処理中...';
+      clearBox(msg);
+      try {
+        const pos = document.getElementById('position').value;
+        const start = parseInt(document.getElementById('startNum').value, 10) || 1;
+        const fontSize = parseFloat(document.getElementById('fontSize').value) || 11;
+        const fmtText = document.getElementById('format').value || '#';
+
+        const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const font = await doc.embedFont(PDFLib.StandardFonts.Helvetica);
+        const pages = doc.getPages();
+        const total = pages.length;
+        const margin = 24;
+
+        pages.forEach((page, i) => {
+          const n = start + i;
+          const text = fmtText.replace(/#/g, String(n)).replace(/@/g, String(total + start - 1));
+          const { width, height } = page.getSize();
+          const textW = font.widthOfTextAtSize(text, fontSize);
+          let x, y;
+          if (pos[0] === 't') y = height - margin - fontSize;
+          else y = margin;
+          if (pos[1] === 'l') x = margin;
+          else if (pos[1] === 'r') x = width - margin - textW;
+          else x = (width - textW) / 2;
+          page.drawText(text, { x, y, size: fontSize, font, color: PDFLib.rgb(0, 0, 0) });
+        });
+
+        const out = await doc.save();
+        download(new Blob([out], { type: 'application/pdf' }), safeFilename(fname.value, 'numbered') + '.pdf');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = origLabel;
+      }
+    });
+  </script>
+</body>
+</html>

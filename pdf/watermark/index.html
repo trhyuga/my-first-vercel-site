@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>透かし | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-pink">💧 透かし</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="application/pdf" hidden />
+      <div class="icon">💧</div>
+      <p><b>タップしてPDFを選択</b></p>
+      <p class="sub">任意のテキストを透かしとして重ねます</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="file-item">
+        <span class="name" id="srcName"></span>
+        <span class="size" id="srcSize"></span>
+      </div>
+      <div class="field">
+        <label for="text">透かし文言</label>
+        <input type="text" id="text" value="CONFIDENTIAL" />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="size">サイズ</label>
+          <input type="number" id="size" value="60" min="10" max="200" />
+        </div>
+        <div class="field">
+          <label for="opacity">不透明度(%)</label>
+          <input type="number" id="opacity" value="25" min="5" max="100" />
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="angle">角度(°)</label>
+          <input type="number" id="angle" value="45" min="-180" max="180" />
+        </div>
+        <div class="field">
+          <label for="color">色</label>
+          <select id="color">
+            <option value="000000" selected>黒</option>
+            <option value="808080">グレー</option>
+            <option value="ff0000">赤</option>
+            <option value="0050ff">青</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="fname">出力ファイル名</label>
+        <input type="text" id="fname" value="watermarked" />
+      </div>
+      <button class="btn-primary" id="run">💧 透かしを入れてダウンロード</button>
+      <button class="btn-secondary" id="clear">別のPDFを選ぶ</button>
+    </div>
+
+    <div id="msg"></div>
+    <p class="info-hint">英数字のみ対応(Helvetica使用)。和文は画像として重ねる形で今後対応予定。</p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const srcName = document.getElementById('srcName');
+    const srcSize = document.getElementById('srcSize');
+    const fname = document.getElementById('fname');
+    const msg = document.getElementById('msg');
+
+    let bytes = null;
+
+    bindDropzone(dz, fi, async (fs) => {
+      const f = fs[0]; if (!f) return;
+      bytes = new Uint8Array(await f.arrayBuffer());
+      srcName.textContent = f.name;
+      srcSize.textContent = fmtSize(f.size);
+      fname.value = safeFilename(f.name.replace(/\.pdf$/i, '') + '_watermarked', 'watermarked');
+      clearBox(msg);
+      dz.style.display = 'none';
+      controls.style.display = 'flex';
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      bytes = null;
+      dz.style.display = 'block';
+      controls.style.display = 'none';
+      clearBox(msg);
+    });
+
+    function hex2rgb(hex) {
+      const r = parseInt(hex.slice(0, 2), 16) / 255;
+      const g = parseInt(hex.slice(2, 4), 16) / 255;
+      const b = parseInt(hex.slice(4, 6), 16) / 255;
+      return PDFLib.rgb(r, g, b);
+    }
+
+    document.getElementById('run').addEventListener('click', async () => {
+      if (!bytes) return;
+      const runBtn = document.getElementById('run');
+      runBtn.disabled = true;
+      const origLabel = runBtn.textContent;
+      runBtn.textContent = '処理中...';
+      clearBox(msg);
+      try {
+        const text = document.getElementById('text').value || 'WATERMARK';
+        const size = parseFloat(document.getElementById('size').value) || 60;
+        const opacity = (parseFloat(document.getElementById('opacity').value) || 25) / 100;
+        const angle = parseFloat(document.getElementById('angle').value) || 0;
+        const color = hex2rgb(document.getElementById('color').value);
+
+        const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const font = await doc.embedFont(PDFLib.StandardFonts.HelveticaBold);
+        const pages = doc.getPages();
+        pages.forEach(page => {
+          const { width, height } = page.getSize();
+          const textW = font.widthOfTextAtSize(text, size);
+          page.drawText(text, {
+            x: (width - textW) / 2,
+            y: height / 2 - size / 2,
+            size,
+            font,
+            color,
+            opacity,
+            rotate: PDFLib.degrees(angle),
+          });
+        });
+        download(new Blob([await doc.save()], { type: 'application/pdf' }), safeFilename(fname.value, 'watermarked') + '.pdf');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = origLabel;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>整理 | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+  <style>
+    .thumb .pos { position: absolute; bottom: 0.25rem; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.55); color: white; border: none; min-height: auto; width: 24px; height: 24px; border-radius: 50%; font-size: 0.85rem; padding: 0; display: flex; align-items: center; justify-content: center; }
+    .thumb .move-l { left: 0.25rem; transform: none; }
+    .thumb .move-r { left: auto; right: 0.25rem; transform: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-purple">🗂️ ページ整理</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="application/pdf" hidden />
+      <div class="icon">🗂️</div>
+      <p><b>タップしてPDFを選択</b></p>
+      <p class="sub">ページを並べ替え・削除できます</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="file-item">
+        <span class="name" id="srcName"></span>
+        <span class="size" id="srcSize"></span>
+      </div>
+      <p class="info-hint">◀ ▶ でページを左右に移動、✕ で削除。</p>
+      <div class="thumb-grid" id="grid"></div>
+      <div class="field">
+        <label for="fname">出力ファイル名</label>
+        <input type="text" id="fname" value="organized" />
+      </div>
+      <button class="btn-primary purple" id="run">🗂️ 整理してダウンロード</button>
+      <button class="btn-secondary" id="clear">別のPDFを選ぶ</button>
+    </div>
+
+    <div id="msg"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas } = PDFApp;
+    setupPdfJs();
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const grid = document.getElementById('grid');
+    const srcName = document.getElementById('srcName');
+    const srcSize = document.getElementById('srcSize');
+    const fname = document.getElementById('fname');
+    const msg = document.getElementById('msg');
+
+    let bytes = null;
+    let pageOrder = []; // array of original page indices (0-based)
+    let thumbs = []; // canvas per original idx
+
+    bindDropzone(dz, fi, async (fs) => {
+      const f = fs[0]; if (!f) return;
+      bytes = new Uint8Array(await f.arrayBuffer());
+      srcName.textContent = f.name;
+      srcSize.textContent = fmtSize(f.size);
+      fname.value = safeFilename(f.name.replace(/\.pdf$/i, '') + '_organized', 'organized');
+      clearBox(msg);
+      dz.style.display = 'none';
+      controls.style.display = 'flex';
+      await buildThumbs();
+    });
+
+    async function buildThumbs() {
+      grid.innerHTML = '';
+      const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+      thumbs = [];
+      pageOrder = [];
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const canvas = await renderPageToCanvas(pdf, i, 0.4);
+        thumbs.push(canvas);
+        pageOrder.push(i - 1);
+      }
+      renderGrid();
+    }
+
+    function renderGrid() {
+      grid.innerHTML = '';
+      pageOrder.forEach((origIdx, pos) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'thumb';
+        wrap.appendChild(thumbs[origIdx].cloneNode(true));
+        const num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = (pos + 1) + ' (元 p.' + (origIdx + 1) + ')';
+        wrap.appendChild(num);
+        const del = document.createElement('button');
+        del.className = 'del';
+        del.textContent = '✕';
+        del.addEventListener('click', (e) => {
+          e.stopPropagation();
+          pageOrder.splice(pos, 1);
+          renderGrid();
+        });
+        wrap.appendChild(del);
+        const mL = document.createElement('button');
+        mL.className = 'pos move-l';
+        mL.textContent = '◀';
+        mL.disabled = pos === 0;
+        mL.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (pos > 0) {
+            [pageOrder[pos - 1], pageOrder[pos]] = [pageOrder[pos], pageOrder[pos - 1]];
+            renderGrid();
+          }
+        });
+        wrap.appendChild(mL);
+        const mR = document.createElement('button');
+        mR.className = 'pos move-r';
+        mR.textContent = '▶';
+        mR.disabled = pos === pageOrder.length - 1;
+        mR.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (pos < pageOrder.length - 1) {
+            [pageOrder[pos], pageOrder[pos + 1]] = [pageOrder[pos + 1], pageOrder[pos]];
+            renderGrid();
+          }
+        });
+        wrap.appendChild(mR);
+        grid.appendChild(wrap);
+      });
+    }
+
+    document.getElementById('clear').addEventListener('click', () => {
+      bytes = null; pageOrder = []; thumbs = [];
+      dz.style.display = 'block';
+      controls.style.display = 'none';
+      grid.innerHTML = '';
+      clearBox(msg);
+    });
+
+    document.getElementById('run').addEventListener('click', async () => {
+      if (!bytes || !pageOrder.length) { showError(msg, 'ページがありません'); return; }
+      const runBtn = document.getElementById('run');
+      runBtn.disabled = true;
+      const orig = runBtn.textContent;
+      runBtn.textContent = '処理中...';
+      try {
+        const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const out = await PDFLib.PDFDocument.create();
+        const copied = await out.copyPages(src, pageOrder);
+        copied.forEach(p => out.addPage(p));
+        download(new Blob([await out.save()], { type: 'application/pdf' }), safeFilename(fname.value, 'organized') + '.pdf');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = orig;
+      }
+    });
+  </script>
+</body>
+</html>

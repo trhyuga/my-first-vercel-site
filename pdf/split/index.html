@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f0c29" />
+  <title>分割 | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <a class="back" href="../">← PDFツール</a>
+      <div class="title-bar"><h1 class="grad-purple">✂️ PDF分割</h1></div>
+      <div class="spacer"></div>
+    </header>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="application/pdf" hidden />
+      <div class="icon">✂️</div>
+      <p><b>タップしてPDFを選択</b></p>
+      <p class="sub">1ファイルずつ分割できます</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="file-item">
+        <span class="name" id="srcName"></span>
+        <span class="size" id="srcSize"></span>
+      </div>
+      <div class="field">
+        <label>モード</label>
+        <div class="radio-row">
+          <label><input type="radio" name="mode" value="range" checked><span>🎯 ページ範囲で抽出</span></label>
+          <label><input type="radio" name="mode" value="each"><span>📄 1ページずつZIPで</span></label>
+        </div>
+      </div>
+      <div class="field" id="rangeField">
+        <label for="range">ページ範囲 (例: 1-3, 5, 8-10)</label>
+        <input type="text" id="range" value="1" />
+      </div>
+      <div class="field">
+        <label for="fname">出力ファイル名</label>
+        <input type="text" id="fname" value="split" />
+      </div>
+      <button class="btn-primary purple" id="run">✂️ 分割してダウンロード</button>
+      <button class="btn-secondary" id="clear">別のPDFを選ぶ</button>
+    </div>
+
+    <div id="msg"></div>
+    <p class="info-hint">範囲抽出は抽出した分だけ1つのPDFにまとめ、1ページずつは複数ファイルを<b>ZIP</b>で出力します。</p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const runBtn = document.getElementById('run');
+    const clearBtn = document.getElementById('clear');
+    const msg = document.getElementById('msg');
+    const fname = document.getElementById('fname');
+    const srcName = document.getElementById('srcName');
+    const srcSize = document.getElementById('srcSize');
+    const rangeInput = document.getElementById('range');
+    const rangeField = document.getElementById('rangeField');
+
+    let currentFile = null;
+
+    function updateModeUI() {
+      const mode = document.querySelector('input[name="mode"]:checked').value;
+      rangeField.style.display = mode === 'range' ? 'flex' : 'none';
+    }
+    document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', updateModeUI));
+
+    bindDropzone(dz, fi, (fs) => {
+      const f = fs[0];
+      if (!f || (f.type !== 'application/pdf' && !/\.pdf$/i.test(f.name))) {
+        showError(msg, 'PDFファイルを選択してください'); return;
+      }
+      currentFile = f;
+      srcName.textContent = f.name;
+      srcSize.textContent = fmtSize(f.size);
+      fname.value = safeFilename(f.name.replace(/\.pdf$/i, '') + '_split', 'split');
+      dz.style.display = 'none';
+      controls.style.display = 'flex';
+      clearBox(msg);
+    });
+
+    clearBtn.addEventListener('click', () => {
+      currentFile = null;
+      dz.style.display = 'block';
+      controls.style.display = 'none';
+      clearBox(msg);
+    });
+
+    function parseRange(text, maxPage) {
+      const parts = text.split(',').map(s => s.trim()).filter(Boolean);
+      const pages = new Set();
+      for (const p of parts) {
+        const m = p.match(/^(\d+)(?:-(\d+))?$/);
+        if (!m) throw new Error('範囲指定が不正: ' + p);
+        const a = parseInt(m[1], 10);
+        const b = m[2] ? parseInt(m[2], 10) : a;
+        const lo = Math.min(a, b), hi = Math.max(a, b);
+        if (lo < 1 || hi > maxPage) throw new Error(`ページ${lo}-${hi}は範囲外 (1-${maxPage})`);
+        for (let i = lo; i <= hi; i++) pages.add(i);
+      }
+      return Array.from(pages).sort((a, b) => a - b);
+    }
+
+    runBtn.addEventListener('click', async () => {
+      if (!currentFile) return;
+      clearBox(msg);
+      runBtn.disabled = true;
+      runBtn.textContent = '処理中...';
+      try {
+        const bytes = new Uint8Array(await currentFile.arrayBuffer());
+        const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const total = src.getPageCount();
+        const mode = document.querySelector('input[name="mode"]:checked').value;
+        const base = safeFilename(fname.value, 'split');
+
+        if (mode === 'range') {
+          const pages = parseRange(rangeInput.value, total);
+          if (!pages.length) throw new Error('範囲が空です');
+          const out = await PDFLib.PDFDocument.create();
+          const copied = await out.copyPages(src, pages.map(p => p - 1));
+          copied.forEach(p => out.addPage(p));
+          const blob = new Blob([await out.save()], { type: 'application/pdf' });
+          download(blob, base + '.pdf');
+        } else {
+          const zip = new JSZip();
+          for (let i = 0; i < total; i++) {
+            const out = await PDFLib.PDFDocument.create();
+            const [p] = await out.copyPages(src, [i]);
+            out.addPage(p);
+            const bytesOut = await out.save();
+            zip.file(`${base}_page_${String(i + 1).padStart(3, '0')}.pdf`, bytesOut);
+          }
+          const blob = await zip.generateAsync({ type: 'blob' });
+          download(blob, base + '.zip');
+        }
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = '✂️ 分割してダウンロード';
+      }
+    });
+  </script>
+</body>
+</html>
