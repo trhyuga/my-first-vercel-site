@@ -330,6 +330,118 @@
       text-align: center;
       padding: 1rem 0;
     }
+
+    .runner-header .debug-btn {
+      position: relative;
+      padding: 0.5rem 0.75rem;
+    }
+    .runner-header .debug-btn.has-errors {
+      background: rgba(245,87,108,0.25);
+      border-color: rgba(245,87,108,0.6);
+      animation: pulse 1.2s ease-in-out 2;
+    }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(245,87,108,0.6); }
+      50% { box-shadow: 0 0 0 6px rgba(245,87,108,0); }
+    }
+    .badge-count {
+      display: none;
+      background: #f5576c;
+      color: white;
+      font-size: 0.68rem;
+      border-radius: 10px;
+      padding: 0 5px;
+      min-width: 16px;
+      height: 16px;
+      line-height: 16px;
+      margin-left: 3px;
+      font-weight: 700;
+    }
+    .badge-count.visible { display: inline-block; }
+
+    .debug-panel {
+      position: fixed;
+      inset: 0;
+      background: #0b0b12;
+      z-index: 25;
+      display: none;
+      flex-direction: column;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      color: #e8e8e8;
+    }
+    .debug-panel.active { display: flex; }
+    .debug-panel-header {
+      padding: 0.6rem 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      flex: 0 0 auto;
+      flex-wrap: wrap;
+    }
+    .debug-panel-header h2 {
+      font-size: 0.95rem;
+      font-weight: 700;
+      flex: 1 1 auto;
+    }
+    .debug-panel-header button {
+      padding: 0.45rem 0.75rem;
+      font-size: 0.8rem;
+      min-height: 36px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: white;
+      flex: 0 0 auto;
+      font-weight: 500;
+    }
+    .debug-panel-header .copy-btn {
+      background: linear-gradient(135deg, #f093fb, #f5576c);
+      border: none;
+      font-weight: 600;
+    }
+    .debug-log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem 0.75rem;
+      font-family: 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      -webkit-overflow-scrolling: touch;
+    }
+    .debug-entry {
+      padding: 0.5rem 0.6rem;
+      border-radius: 8px;
+      margin-bottom: 0.35rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border-left: 3px solid transparent;
+      background: rgba(255,255,255,0.03);
+    }
+    .debug-entry.error { border-left-color: #ff5c7a; background: rgba(245,87,108,0.08); color: #ffb4bf; }
+    .debug-entry.warn { border-left-color: #ffc857; background: rgba(255,200,87,0.08); color: #ffe1a0; }
+    .debug-entry.info { border-left-color: #5bc0eb; color: #c3e4f5; }
+    .debug-entry.log { border-left-color: rgba(255,255,255,0.25); }
+    .debug-entry .ts { opacity: 0.5; font-size: 11px; margin-right: 0.5rem; }
+    .debug-entry .lvl { font-weight: 700; margin-right: 0.4rem; text-transform: uppercase; font-size: 11px; }
+    .debug-empty { opacity: 0.4; text-align: center; padding: 2rem 1rem; font-family: inherit; font-size: 0.85rem; }
+    .toast {
+      position: fixed;
+      bottom: calc(env(safe-area-inset-bottom) + 1rem);
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: rgba(20,20,30,0.95);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: white;
+      padding: 0.6rem 1.1rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      z-index: 50;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s, transform 0.2s;
+    }
+    .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
   </style>
 </head>
 <body>
@@ -366,6 +478,7 @@
     <div class="runner-header">
       <span class="title">実行中</span>
       <div class="actions">
+        <button class="btn-secondary debug-btn" id="debug">🐛<span class="badge-count" id="debugBadge">0</span></button>
         <button class="btn-secondary" id="maximize">⤢ 最大化</button>
         <button class="btn-secondary" id="reload">🔄 再実行</button>
         <button class="btn-secondary" id="close">✕ 閉じる</button>
@@ -379,6 +492,18 @@
     ></iframe>
     <button class="exit-max" id="exitMax" aria-label="最大化を解除">⤡</button>
   </div>
+
+  <div class="debug-panel" id="debugPanel">
+    <div class="debug-panel-header">
+      <h2>🐛 デバッグログ</h2>
+      <button class="copy-btn" id="copyLogs">📋 コピー</button>
+      <button id="clearLogs">消去</button>
+      <button id="closeDebug">✕</button>
+    </div>
+    <div class="debug-log" id="debugLog"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
 
   <div class="panel" id="historyPanel">
     <div class="panel-header">
@@ -415,6 +540,14 @@
     const saveCurrentBtn = document.getElementById('saveCurrent');
     const favListEl = document.getElementById('favList');
     const recentListEl = document.getElementById('recentList');
+    const debugBtn = document.getElementById('debug');
+    const debugBadge = document.getElementById('debugBadge');
+    const debugPanel = document.getElementById('debugPanel');
+    const debugLogEl = document.getElementById('debugLog');
+    const copyLogsBtn = document.getElementById('copyLogs');
+    const clearLogsBtn = document.getElementById('clearLogs');
+    const closeDebugBtn = document.getElementById('closeDebug');
+    const toastEl = document.getElementById('toast');
 
     const STORAGE_KEY = 'html-runner-code';
     const SNAPSHOTS_KEY = 'html-runner-snapshots';
@@ -426,6 +559,55 @@
     codeEl.addEventListener('input', () => {
       localStorage.setItem(STORAGE_KEY, codeEl.value);
     });
+
+    const LOG_SCRIPT = `<script>
+(function(){
+  function safeStr(v){
+    if(v===undefined)return'undefined';
+    if(v===null)return'null';
+    if(typeof v==='function')return'[Function'+(v.name?' '+v.name:'')+']';
+    if(v instanceof Error)return(v.stack||(v.name+': '+v.message));
+    if(typeof v!=='object')return String(v);
+    try{
+      var seen=new WeakSet();
+      return JSON.stringify(v,function(k,val){
+        if(typeof val==='object'&&val!==null){
+          if(seen.has(val))return'[Circular]';
+          seen.add(val);
+          if(val instanceof Element){return'<'+val.tagName.toLowerCase()+(val.id?' id="'+val.id+'"':'')+'>';}
+        }
+        if(typeof val==='function')return'[Function'+(val.name?' '+val.name:'')+']';
+        if(typeof val==='bigint')return val.toString()+'n';
+        return val;
+      });
+    }catch(e){try{return String(v);}catch(e2){return'[Unstringifiable]';}}
+  }
+  function post(level,msg){
+    try{parent.postMessage({__runner:true,type:'log',level:level,message:msg,time:Date.now()},'*');}catch(e){}
+  }
+  ['log','info','warn','error','debug'].forEach(function(level){
+    var orig=console[level];
+    console[level]=function(){
+      var args=Array.prototype.slice.call(arguments);
+      try{orig.apply(console,args);}catch(e){}
+      post(level,args.map(safeStr).join(' '));
+    };
+  });
+  window.addEventListener('error',function(e){
+    var err=e.error;
+    var msg=(err&&err.stack)?err.stack:(e.message||'Error');
+    var loc=(e.filename||'about:srcdoc').replace(/^about:srcdoc/,'(game)');
+    msg+='\\n  at '+loc+':'+(e.lineno||'?')+':'+(e.colno||'?');
+    post('error',msg);
+  });
+  window.addEventListener('unhandledrejection',function(e){
+    var r=e.reason;
+    var msg='Unhandled Promise Rejection: '+((r&&r.stack)?r.stack:safeStr(r));
+    post('error',msg);
+  });
+  post('info','ゲーム起動');
+})();
+<\/script>`;
 
     const FIT_SCRIPT = `<script>
 (function(){
@@ -464,10 +646,11 @@
           out = VIEWPORT_META + out;
         }
       }
+      const INJECTION = LOG_SCRIPT + FIT_SCRIPT;
       if (/<\/body>/i.test(out)) {
-        out = out.replace(/<\/body>/i, FIT_SCRIPT + '</body>');
+        out = out.replace(/<\/body>/i, INJECTION + '</body>');
       } else {
-        out = out + FIT_SCRIPT;
+        out = out + INJECTION;
       }
       return out;
     }
@@ -616,6 +799,112 @@
       renderLists();
     });
 
+    const logs = [];
+    const MAX_LOGS = 500;
+
+    function pad2(n) { return String(n).padStart(2, '0'); }
+    function pad3(n) { return String(n).padStart(3, '0'); }
+    function tsStr(ts) {
+      const d = new Date(ts);
+      return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) + '.' + pad3(d.getMilliseconds());
+    }
+
+    function renderLogs() {
+      if (!logs.length) {
+        debugLogEl.innerHTML = '<div class="debug-empty">ログはまだありません。<br>実行中にconsole.log / エラー / 例外が出るとここに表示されます。</div>';
+        return;
+      }
+      debugLogEl.innerHTML = logs.map(l => (
+        '<div class="debug-entry ' + escapeHtml(l.level) + '">' +
+          '<span class="ts">' + tsStr(l.time) + '</span>' +
+          '<span class="lvl">' + escapeHtml(l.level) + '</span>' +
+          escapeHtml(l.message) +
+        '</div>'
+      )).join('');
+      debugLogEl.scrollTop = debugLogEl.scrollHeight;
+    }
+
+    function updateBadge() {
+      const errs = logs.filter(l => l.level === 'error' || l.level === 'warn').length;
+      if (errs > 0) {
+        debugBadge.textContent = errs > 99 ? '99+' : String(errs);
+        debugBadge.classList.add('visible');
+      } else {
+        debugBadge.classList.remove('visible');
+      }
+      const hasErr = logs.some(l => l.level === 'error');
+      debugBtn.classList.toggle('has-errors', hasErr);
+    }
+
+    function clearLogs() {
+      logs.length = 0;
+      renderLogs();
+      updateBadge();
+    }
+
+    window.addEventListener('message', (e) => {
+      const data = e.data;
+      if (!data || !data.__runner || data.type !== 'log') return;
+      logs.push({ level: data.level || 'log', message: String(data.message || ''), time: data.time || Date.now() });
+      if (logs.length > MAX_LOGS) logs.splice(0, logs.length - MAX_LOGS);
+      if (debugPanel.classList.contains('active')) renderLogs();
+      updateBadge();
+      if (data.level === 'error') {
+        debugBtn.classList.remove('has-errors');
+        void debugBtn.offsetWidth;
+        debugBtn.classList.add('has-errors');
+      }
+    });
+
+    debugBtn.addEventListener('click', () => {
+      renderLogs();
+      debugPanel.classList.add('active');
+    });
+    closeDebugBtn.addEventListener('click', () => debugPanel.classList.remove('active'));
+    clearLogsBtn.addEventListener('click', clearLogs);
+
+    function buildCopyText() {
+      const header = [
+        '# HTMLゲームランナー デバッグログ',
+        '# 取得日時: ' + new Date().toLocaleString('ja-JP'),
+        '# UserAgent: ' + navigator.userAgent,
+        '# 総数: ' + logs.length + ' (エラー: ' + logs.filter(l => l.level === 'error').length +
+          ', 警告: ' + logs.filter(l => l.level === 'warn').length + ')',
+        ''
+      ].join('\n');
+      const body = logs.map(l =>
+        '[' + tsStr(l.time) + '] [' + l.level.toUpperCase() + '] ' + l.message
+      ).join('\n\n');
+      const sourceHeader = '\n\n# --- 実行中のコード ---\n';
+      const source = '```html\n' + codeEl.value + '\n```\n';
+      return header + body + sourceHeader + source;
+    }
+
+    function showToast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('visible');
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => toastEl.classList.remove('visible'), 1800);
+    }
+
+    copyLogsBtn.addEventListener('click', async () => {
+      const text = buildCopyText();
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast('📋 コピーしました');
+      } catch (e) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); showToast('📋 コピーしました'); }
+        catch (e2) { showToast('コピー失敗。ログを長押しで選択してください'); }
+        document.body.removeChild(ta);
+      }
+    });
+
     function run() {
       const code = codeEl.value.trim();
       if (!code) {
@@ -623,6 +912,7 @@
         return;
       }
       addSnapshot(codeEl.value);
+      clearLogs();
       frame.srcdoc = prepareCode(codeEl.value);
       runner.classList.add('active');
     }
@@ -632,6 +922,7 @@
     reloadBtn.addEventListener('click', () => {
       const code = codeEl.value;
       frame.srcdoc = '';
+      clearLogs();
       requestAnimationFrame(() => { frame.srcdoc = prepareCode(code); });
     });
 
