@@ -5,7 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0f0c29" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="GameRunner" />
+  <link rel="manifest" href="./manifest.webmanifest" />
   <title>HTMLゲームランナー</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -153,6 +156,15 @@
       display: block;
     }
     .runner.maximized .runner-header { display: none; }
+    .runner:fullscreen,
+    .runner:-webkit-full-screen {
+      width: 100vw;
+      height: 100vh;
+    }
+    .runner:fullscreen .runner-header,
+    .runner:-webkit-full-screen .runner-header { display: none; }
+    :fullscreen .runner-header,
+    :-webkit-full-screen .runner-header { display: none; }
     .exit-max {
       position: fixed;
       top: calc(env(safe-area-inset-top) + 0.4rem);
@@ -201,7 +213,7 @@
         <button class="btn-secondary" id="clear">🗑 消去</button>
         <button class="btn-run" id="run">▶ 実行</button>
       </div>
-      <p class="hint">コードは自動で保存されます</p>
+      <p class="hint">コードは自動で保存されます<br>URLバーも消したいときは、ブラウザの共有メニューから「ホーム画面に追加」でアプリ化できます</p>
     </div>
   </div>
 
@@ -319,9 +331,15 @@
     }
 
     async function enterFullscreen() {
-      const req = runner.requestFullscreen || runner.webkitRequestFullscreen;
-      if (!req) return;
-      try { await req.call(runner); } catch (e) {}
+      const targets = [runner, document.documentElement];
+      for (const el of targets) {
+        const req = el.requestFullscreen || el.webkitRequestFullscreen;
+        if (!req) continue;
+        try {
+          await req.call(el);
+          return;
+        } catch (e) { /* try next target */ }
+      }
     }
 
     async function exitFullscreen() {
