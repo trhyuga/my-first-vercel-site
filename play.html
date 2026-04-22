@@ -188,13 +188,158 @@
     }
     .exit-max:active { transform: scale(0.92); }
     .runner.maximized .exit-max { display: flex; align-items: center; justify-content: center; }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+    .icon-btn {
+      background: transparent;
+      border: none;
+      color: rgba(255,255,255,0.8);
+      font-size: 1.1rem;
+      padding: 0.3rem 0.5rem;
+      min-height: auto;
+      cursor: pointer;
+      font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .icon-btn:active { transform: scale(0.92); }
+
+    .panel {
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+      z-index: 15;
+      display: none;
+      flex-direction: column;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+    .panel.active { display: flex; }
+    .panel-header {
+      padding: 0.75rem 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      flex: 0 0 auto;
+    }
+    .panel-header h2 {
+      font-size: 1rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #f093fb, #f5576c);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .panel-header button {
+      padding: 0.4rem 0.8rem;
+      font-size: 0.9rem;
+      min-height: 36px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 10px;
+      color: white;
+    }
+    .panel-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem;
+      -webkit-overflow-scrolling: touch;
+    }
+    .save-current {
+      width: 100%;
+      padding: 0.85rem;
+      margin-bottom: 1.25rem;
+      background: rgba(245,87,108,0.18);
+      border: 1px solid rgba(245,87,108,0.4);
+      border-radius: 12px;
+      color: white;
+      font-size: 0.95rem;
+      font-weight: 600;
+      min-height: 48px;
+    }
+    .panel section { margin-bottom: 1.5rem; }
+    .panel h3 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      opacity: 0.7;
+      margin-bottom: 0.6rem;
+      letter-spacing: 0.02em;
+    }
+    .snap-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .snap {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px;
+      padding: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    .snap-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+      min-width: 0;
+    }
+    .snap-title {
+      font-size: 0.9rem;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .snap-time {
+      font-size: 0.72rem;
+      opacity: 0.5;
+    }
+    .snap-actions {
+      display: flex;
+      gap: 0.4rem;
+    }
+    .snap-actions button {
+      flex: 1;
+      padding: 0.55rem;
+      font-size: 0.85rem;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 10px;
+      color: white;
+      min-height: 40px;
+      font-weight: 500;
+    }
+    .snap-actions .snap-load {
+      flex: 2;
+      background: linear-gradient(135deg, #f093fb, #f5576c);
+      border: none;
+      font-weight: 600;
+    }
+    .snap-actions .snap-fav.on {
+      background: rgba(255,200,0,0.2);
+      border-color: rgba(255,200,0,0.5);
+    }
+    .empty {
+      opacity: 0.4;
+      font-size: 0.85rem;
+      text-align: center;
+      padding: 1rem 0;
+    }
   </style>
 </head>
 <body>
   <div class="app">
     <header>
       <h1>🎮 HTMLゲームランナー</h1>
-      <a class="home-link" href="./">← ホーム</a>
+      <div class="header-actions">
+        <button class="icon-btn" id="openHistory" aria-label="履歴">📚</button>
+        <a class="home-link" href="./">← ホーム</a>
+      </div>
     </header>
     <div class="editor">
       <textarea id="code" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="ここにHTMLコードを貼り付けてね！
@@ -235,6 +380,24 @@
     <button class="exit-max" id="exitMax" aria-label="最大化を解除">⤡</button>
   </div>
 
+  <div class="panel" id="historyPanel">
+    <div class="panel-header">
+      <h2>📚 履歴・お気に入り</h2>
+      <button id="closePanel">✕ 閉じる</button>
+    </div>
+    <div class="panel-body">
+      <button class="save-current" id="saveCurrent">⭐ 今のコードをお気に入りに保存</button>
+      <section>
+        <h3>⭐ お気に入り (無制限)</h3>
+        <div id="favList" class="snap-list"></div>
+      </section>
+      <section>
+        <h3>🕒 最近の実行 (最新3件)</h3>
+        <div id="recentList" class="snap-list"></div>
+      </section>
+    </div>
+  </div>
+
   <script>
     const codeEl = document.getElementById('code');
     const runBtn = document.getElementById('run');
@@ -246,8 +409,16 @@
     const exitMaxBtn = document.getElementById('exitMax');
     const runner = document.getElementById('runner');
     const frame = document.getElementById('frame');
+    const openHistoryBtn = document.getElementById('openHistory');
+    const closePanelBtn = document.getElementById('closePanel');
+    const historyPanel = document.getElementById('historyPanel');
+    const saveCurrentBtn = document.getElementById('saveCurrent');
+    const favListEl = document.getElementById('favList');
+    const recentListEl = document.getElementById('recentList');
 
     const STORAGE_KEY = 'html-runner-code';
+    const SNAPSHOTS_KEY = 'html-runner-snapshots';
+    const MAX_RECENT = 3;
 
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) codeEl.value = saved;
@@ -301,12 +472,157 @@
       return out;
     }
 
+    function loadSnapshots() {
+      try {
+        const raw = localStorage.getItem(SNAPSHOTS_KEY);
+        return raw ? JSON.parse(raw) : [];
+      } catch (e) { return []; }
+    }
+
+    function saveSnapshots(list) {
+      localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(list));
+    }
+
+    function extractTitle(code) {
+      const m = code.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (m && m[1].trim()) return m[1].trim().slice(0, 60);
+      const stripped = code.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      return stripped.slice(0, 40) || '(無題)';
+    }
+
+    function newId() {
+      return 'snap_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    }
+
+    function pruneRecents(list) {
+      const favorites = list.filter(s => s.favorite);
+      const recents = list.filter(s => !s.favorite)
+        .sort((a, b) => b.savedAt - a.savedAt)
+        .slice(0, MAX_RECENT);
+      return [...favorites, ...recents];
+    }
+
+    function addSnapshot(code, { favorite = false } = {}) {
+      const trimmed = code.trim();
+      if (!trimmed) return null;
+      const list = loadSnapshots();
+      const existing = list.find(s => s.code === code);
+      if (existing) {
+        existing.savedAt = Date.now();
+        if (favorite) existing.favorite = true;
+        saveSnapshots(pruneRecents(list));
+        return existing;
+      }
+      const snap = {
+        id: newId(),
+        code,
+        title: extractTitle(code),
+        savedAt: Date.now(),
+        favorite,
+      };
+      list.push(snap);
+      saveSnapshots(pruneRecents(list));
+      return snap;
+    }
+
+    function toggleFavorite(id) {
+      const list = loadSnapshots();
+      const snap = list.find(s => s.id === id);
+      if (!snap) return;
+      snap.favorite = !snap.favorite;
+      saveSnapshots(pruneRecents(list));
+    }
+
+    function deleteSnapshot(id) {
+      saveSnapshots(loadSnapshots().filter(s => s.id !== id));
+    }
+
+    function formatTime(ts) {
+      const d = new Date(ts);
+      const pad = n => String(n).padStart(2, '0');
+      return `${d.getMonth() + 1}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+
+    function renderSnap(s) {
+      return `
+        <div class="snap" data-id="${s.id}">
+          <div class="snap-meta">
+            <div class="snap-title">${escapeHtml(s.title)}</div>
+            <div class="snap-time">${formatTime(s.savedAt)}</div>
+          </div>
+          <div class="snap-actions">
+            <button class="snap-load" data-action="load" data-id="${s.id}">📥 読込</button>
+            <button class="snap-fav ${s.favorite ? 'on' : ''}" data-action="fav" data-id="${s.id}">${s.favorite ? '★' : '☆'}</button>
+            <button class="snap-del" data-action="del" data-id="${s.id}">🗑</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderLists() {
+      const list = loadSnapshots();
+      const favorites = list.filter(s => s.favorite).sort((a, b) => b.savedAt - a.savedAt);
+      const recents = list.filter(s => !s.favorite).sort((a, b) => b.savedAt - a.savedAt).slice(0, MAX_RECENT);
+      favListEl.innerHTML = favorites.length ? favorites.map(renderSnap).join('') : '<p class="empty">まだお気に入りはありません</p>';
+      recentListEl.innerHTML = recents.length ? recents.map(renderSnap).join('') : '<p class="empty">まだ履歴はありません</p>';
+    }
+
+    function loadSnapshotIntoEditor(id) {
+      const snap = loadSnapshots().find(s => s.id === id);
+      if (!snap) return;
+      codeEl.value = snap.code;
+      localStorage.setItem(STORAGE_KEY, snap.code);
+      historyPanel.classList.remove('active');
+    }
+
+    function handleSnapAction(e) {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const { action, id } = btn.dataset;
+      if (action === 'load') {
+        loadSnapshotIntoEditor(id);
+      } else if (action === 'fav') {
+        toggleFavorite(id);
+        renderLists();
+      } else if (action === 'del') {
+        if (!confirm('この項目を削除しますか？')) return;
+        deleteSnapshot(id);
+        renderLists();
+      }
+    }
+    favListEl.addEventListener('click', handleSnapAction);
+    recentListEl.addEventListener('click', handleSnapAction);
+
+    openHistoryBtn.addEventListener('click', () => {
+      renderLists();
+      historyPanel.classList.add('active');
+    });
+    closePanelBtn.addEventListener('click', () => {
+      historyPanel.classList.remove('active');
+    });
+    saveCurrentBtn.addEventListener('click', () => {
+      const code = codeEl.value;
+      if (!code.trim()) {
+        alert('コードが空です');
+        return;
+      }
+      addSnapshot(code, { favorite: true });
+      renderLists();
+    });
+
     function run() {
       const code = codeEl.value.trim();
       if (!code) {
         alert('HTMLコードを貼り付けてください');
         return;
       }
+      addSnapshot(codeEl.value);
       frame.srcdoc = prepareCode(codeEl.value);
       runner.classList.add('active');
     }
