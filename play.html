@@ -216,13 +216,58 @@
       localStorage.setItem(STORAGE_KEY, codeEl.value);
     });
 
+    const FIT_SCRIPT = `<script>
+(function(){
+  function fit(){
+    var b=document.body;if(!b)return;
+    b.style.transformOrigin='0 0';
+    b.style.transform='none';
+    var w=Math.max(b.scrollWidth,b.offsetWidth,1);
+    var h=Math.max(b.scrollHeight,b.offsetHeight,1);
+    var vw=window.innerWidth||document.documentElement.clientWidth;
+    var vh=window.innerHeight||document.documentElement.clientHeight;
+    var s=Math.min(vw/w,vh/h,1);
+    var ox=(vw-w*s)/2, oy=(vh-h*s)/2;
+    b.style.transform='translate('+ox+'px,'+oy+'px) scale('+s+')';
+    document.documentElement.style.overflow='hidden';
+  }
+  function schedule(){setTimeout(fit,0);setTimeout(fit,120);setTimeout(fit,600);}
+  if(document.readyState!=='loading')schedule();
+  else document.addEventListener('DOMContentLoaded',schedule);
+  window.addEventListener('load',schedule);
+  window.addEventListener('resize',fit);
+  window.addEventListener('orientationchange',function(){setTimeout(fit,300);});
+})();
+<\/script>`;
+
+    const VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">';
+
+    function prepareCode(code) {
+      let out = code;
+      if (!/name=["']?viewport["']?/i.test(out)) {
+        if (/<head[^>]*>/i.test(out)) {
+          out = out.replace(/<head[^>]*>/i, m => m + VIEWPORT_META);
+        } else if (/<html[^>]*>/i.test(out)) {
+          out = out.replace(/<html[^>]*>/i, m => m + '<head>' + VIEWPORT_META + '</head>');
+        } else {
+          out = VIEWPORT_META + out;
+        }
+      }
+      if (/<\/body>/i.test(out)) {
+        out = out.replace(/<\/body>/i, FIT_SCRIPT + '</body>');
+      } else {
+        out = out + FIT_SCRIPT;
+      }
+      return out;
+    }
+
     function run() {
       const code = codeEl.value.trim();
       if (!code) {
         alert('HTMLコードを貼り付けてください');
         return;
       }
-      frame.srcdoc = codeEl.value;
+      frame.srcdoc = prepareCode(codeEl.value);
       runner.classList.add('active');
     }
 
@@ -231,7 +276,7 @@
     reloadBtn.addEventListener('click', () => {
       const code = codeEl.value;
       frame.srcdoc = '';
-      requestAnimationFrame(() => { frame.srcdoc = code; });
+      requestAnimationFrame(() => { frame.srcdoc = prepareCode(code); });
     });
 
     closeBtn.addEventListener('click', () => {
