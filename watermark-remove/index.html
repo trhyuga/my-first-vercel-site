@@ -374,6 +374,7 @@
           ⚠️ ブラウザの制約で動画は<b>フレームごとに再生しながら録画</b>します。長い動画ほど処理に時間がかかります (おおむね実時間の1〜3倍)。出力は<b>WebM</b>形式で音声も保持します。
         </div>
         <button class="btn btn-primary" id="vProcess">🎬 マークを除去してWebM出力</button>
+        <div id="vSaveHint" class="alert info" style="margin-top:0.55rem;font-size:0.78rem;"></div>
         <div id="vStatus"></div>
       </div>
       <div class="btn-row">
@@ -475,7 +476,8 @@
           <input type="checkbox" id="transparentBg" />
           <label for="transparentBg">背景を透過する (AIで自動抽出・PNG出力)</label>
         </div>
-        <button class="btn btn-primary" id="dlBtn" disabled>💾 ダウンロード</button>
+        <button class="btn btn-primary" id="dlBtn" disabled>💾 保存先を選んで保存</button>
+        <div id="saveHint" class="alert info" style="margin-top:0.55rem;font-size:0.78rem;"></div>
         <div id="dlStatus"></div>
       </div>
 
@@ -510,6 +512,55 @@
       document.body.appendChild(a); a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1500);
+    }
+
+    // ---- Capability detection ----
+    const hasShare = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
+    const hasFSSave = typeof window.showSaveFilePicker === 'function';
+    function canShareFile(file) {
+      try { return hasShare && navigator.canShare({ files: [file] }); }
+      catch (e) { return false; }
+    }
+
+    // Open the platform's system save chooser:
+    // - iOS/Android: share sheet ("画像を保存"=写真, "ファイルに保存"=iCloud/本体, AirDrop...)
+    // - Desktop Chrome/Edge: File System Access save dialog
+    // - Other: regular download fallback
+    async function smartSave(blob, filename) {
+      const mime = blob.type || 'application/octet-stream';
+      // 1) Web Share API with files (mobile)
+      if (hasShare) {
+        const file = new File([blob], filename, { type: mime });
+        if (canShareFile(file)) {
+          try {
+            await navigator.share({ files: [file] });
+            return { ok: true, where: 'share', text: '共有シートで選んだ場所に保存しました' };
+          } catch (e) {
+            if (e && e.name === 'AbortError') return { ok: false, where: 'cancel', text: 'キャンセルしました' };
+            // fall through to next strategy
+          }
+        }
+      }
+      // 2) File System Access save picker (desktop)
+      if (hasFSSave) {
+        try {
+          const extMatch = filename.match(/\.[^.]+$/);
+          const ext = extMatch ? extMatch[0] : '';
+          const handle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: ext ? [{ description: ext.slice(1).toUpperCase(), accept: { [mime]: [ext] } }] : [],
+          });
+          const w = await handle.createWritable();
+          await w.write(blob);
+          await w.close();
+          return { ok: true, where: 'fs', text: '選択した場所に保存しました' };
+        } catch (e) {
+          if (e && e.name === 'AbortError') return { ok: false, where: 'cancel', text: 'キャンセルしました' };
+        }
+      }
+      // 3) Fallback: anchor download
+      downloadBlob(blob, filename);
+      return { ok: true, where: 'download', text: 'ブラウザの「ダウンロード」フォルダに保存しました' };
     }
 
     function bindDropzone(zone, input, onFiles) {
@@ -1094,14 +1145,20 @@
         vpgText.textContent = `✅ 処理完了 (${frames}フレーム / ${fmtSize(blob.size)})`;
 
         const dlName = safeFilename(vFname.value, 'clean') + '.' + ext;
-        downloadBlob(blob, dlName);
+        const saveRes = await smartSave(blob, dlName);
+        const msg = saveRes.ok
+          ? `<div class="alert success">✅ ${dlName} (${fmtSize(blob.size)}) / ${saveRes.text}</div>`
+          : `<div class="alert info">${saveRes.text}</div>`;
         vStatus.insertAdjacentHTML('beforeend', `
-          <div class="alert success">✅ ${dlName} を書き出しました</div>
+          ${msg}
           <div class="btn-row">
-            <button class="btn btn-secondary" id="vRedl">⬇️ もう一度ダウンロード</button>
+            <button class="btn btn-secondary" id="vRedl">⬇️ もう一度 保存先を選ぶ</button>
           </div>
         `);
-        document.getElementById('vRedl').addEventListener('click', () => downloadBlob(blob, dlName));
+        document.getElementById('vRedl').addEventListener('click', async () => {
+          const r = await smartSave(blob, dlName);
+          if (r.ok) vStatus.insertAdjacentHTML('beforeend', `<div class="alert success" style="margin-top:0.4rem;">✅ ${r.text}</div>`);
+        });
       } catch (e) {
         vStatus.innerHTML = `<div class="alert error">動画処理に失敗: ${String(e.message || e)}</div>`;
       } finally {
@@ -1227,8 +1284,13 @@
       try {
         const { blob, ext } = await buildOutputBlob();
         const base = safeFilename(fnameEl.value, 'clean');
-        downloadBlob(blob, base + '.' + ext);
-        dlStatus.innerHTML = `<div class="alert success">✅ ${fmtSize(blob.size)} でダウンロードしました</div>`;
+        const filename = base + '.' + ext;
+        const res = await smartSave(blob, filename);
+        if (res.ok) {
+          dlStatus.innerHTML = `<div class="alert success">✅ ${fmtSize(blob.size)} / ${res.text}</div>`;
+        } else {
+          dlStatus.innerHTML = `<div class="alert info">${res.text}</div>`;
+        }
       } catch (e) {
         dlStatus.innerHTML = `<div class="alert error">失敗: ${e.message || e}</div>`;
       } finally {
@@ -1236,6 +1298,22 @@
         dlBtn.textContent = orig;
       }
     });
+
+    // Populate the save-hint once we know the platform capabilities
+    (function setSaveHint() {
+      const imageHint = hasShare
+        ? '📱 共有シートが開くので「<b>画像を保存</b>」=<b>写真</b>アプリ、「<b>"ファイル"に保存</b>」=<b>iCloud Drive / この端末</b>などから自由に選べます。'
+        : hasFSSave
+          ? '💻 保存先ダイアログが開くので、任意のフォルダ(ダウンロード / デスクトップ など)を選べます。'
+          : 'ℹ️ このブラウザでは保存先を選べないため、通常の「ダウンロード」フォルダに保存されます。';
+      const videoHint = hasShare
+        ? '📱 共有シートから「<b>"ファイル"に保存</b>」で iCloud Drive / この端末を選べます (動画は「写真」アプリに直接保存できない場合があります)。'
+        : imageHint;
+      const a = document.getElementById('saveHint');
+      const b = document.getElementById('vSaveHint');
+      if (a) a.innerHTML = imageHint;
+      if (b) b.innerHTML = videoHint;
+    })();
   </script>
 </body>
 </html>
