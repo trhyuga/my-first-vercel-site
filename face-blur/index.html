@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>動画の顔ぼかし | ひゅうがのTR-Labo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky; top: 0; z-index: 20;
+    }
+    .brand {
+      max-width: 860px; margin: 0 auto;
+      padding: 0.7rem 1rem;
+      display: flex; align-items: center; gap: 0.6rem;
+    }
+    .back-btn {
+      width: 36px; height: 36px;
+      border-radius: 9px; border: 1px solid #e2e8f0;
+      background: #fff; color: #475569;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .back-btn:active { background: #f1f5f9; }
+    .logo {
+      width: 34px; height: 34px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800; font-size: 0.78rem;
+      box-shadow: 0 4px 10px rgba(14,165,233,0.25);
+    }
+    .brand-name {
+      font-size: 1rem; font-weight: 700;
+      flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    main { max-width: 860px; margin: 0 auto; padding: 1.25rem 1rem 2rem; }
+    .hero { text-align: center; padding: 0.25rem 0 1rem; }
+    .hero h1 {
+      font-size: clamp(1.4rem, 4.8vw, 1.85rem);
+      font-weight: 800; letter-spacing: -0.015em;
+      margin-bottom: 0.5rem;
+    }
+    .hero h1 .accent {
+      background: linear-gradient(135deg, #0284c7, #06b6d4);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p { color: #64748b; font-size: 0.88rem; line-height: 1.65; }
+
+    .dropzone {
+      border: 2px dashed #cbd5e1;
+      border-radius: 16px;
+      padding: 2.5rem 1rem;
+      text-align: center;
+      background: #fff;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .dropzone:active, .dropzone.drag { background: #e0f2fe; border-color: #38bdf8; }
+    .dropzone .icon { font-size: 2.6rem; color: #0ea5e9; margin-bottom: 0.5rem; }
+    .dropzone .t { font-size: 1.02rem; font-weight: 700; margin-bottom: 0.3rem; }
+    .dropzone .d { font-size: 0.82rem; color: #64748b; line-height: 1.55; }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+    .panel h2 {
+      font-size: 0.74rem; font-weight: 700;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      margin-bottom: 0.65rem; color: #0f172a;
+    }
+
+    .video-stage {
+      position: relative;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      width: 100%;
+      aspect-ratio: 16/9;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .video-stage video {
+      max-width: 100%;
+      max-height: 100%;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .overlay-canvas {
+      position: absolute;
+      left: 0; top: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+    }
+
+    .meta { font-size: 0.78rem; color: #64748b; display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
+
+    .field { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.7rem; }
+    .field:first-child { margin-top: 0; }
+    .field label {
+      font-size: 0.78rem; color: #475569; font-weight: 600;
+      padding: 0 0.1rem;
+    }
+    .field input[type="text"], .field select {
+      background: #fff;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+      padding: 0.65rem 0.75rem;
+      border-radius: 9px;
+      font-family: inherit; font-size: 0.92rem;
+      width: 100%;
+      -webkit-appearance: none; appearance: none;
+    }
+
+    button.btn {
+      border: none;
+      border-radius: 11px;
+      padding: 0.85rem 1rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      font-family: inherit;
+      transition: transform 0.08s, opacity 0.15s;
+      min-height: 48px;
+      color: #fff;
+    }
+    button.btn:active { transform: scale(0.98); opacity: 0.92; }
+    button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.btn-primary {
+      background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(14,165,233,0.28);
+      width: 100%;
+    }
+    button.btn-secondary {
+      background: #fff; color: #0f172a;
+      border: 1px solid #cbd5e1;
+      width: 100%;
+    }
+    .btn-row { display: flex; gap: 0.5rem; margin-top: 0.7rem; flex-wrap: wrap; }
+    .btn-row .btn { flex: 1; min-width: 140px; }
+
+    .alert {
+      padding: 0.7rem 0.85rem;
+      border-radius: 10px;
+      font-size: 0.85rem; line-height: 1.55;
+      margin-top: 0.6rem;
+    }
+    .alert.info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .alert.success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .alert.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .alert.warn { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+
+    .progress-wrap { margin-top: 0.6rem; }
+    .progress-label { font-size: 0.82rem; color: #475569; margin-bottom: 0.3rem; display: flex; justify-content: space-between; }
+    .progress-bar { height: 8px; background: #e2e8f0; border-radius: 999px; overflow: hidden; }
+    .progress-bar > span { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #0ea5e9, #06b6d4); transition: width 0.2s; }
+
+    .hidden { display: none !important; }
+
+    footer {
+      max-width: 860px; margin: 0 auto;
+      padding: 1rem; color: #94a3b8;
+      font-size: 0.74rem; text-align: center;
+      padding-bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
+    }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">🫥 動画の顔ぼかし</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>動画の中の顔を、<span class="accent">最初から最後までぼかす。</span></h1>
+      <p>指定した人だけ・指定した人以外・全員 の3モード。アップロードした動画はこの端末内だけで処理されます。</p>
+    </section>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="video/*" hidden />
+      <div class="icon">🎬</div>
+      <div class="t">タップして動画を選択</div>
+      <div class="d">MP4 / MOV / WebM などブラウザが再生できる動画形式<br>長い動画ほど処理に時間がかかります (目安: 実時間の1〜2倍)</div>
+    </div>
+
+    <div id="workArea" class="hidden">
+      <div class="panel">
+        <h2>プレビュー</h2>
+        <div class="video-stage">
+          <video id="srcVideo" controls playsinline muted preload="metadata"></video>
+          <canvas class="overlay-canvas" id="overlay"></canvas>
+        </div>
+        <div class="meta" id="videoMeta"></div>
+      </div>
+
+      <div class="panel">
+        <h2>顔の検出 (Step 2で実装)</h2>
+        <p style="font-size:0.84rem;color:#475569;line-height:1.6;">
+          動画を任意のシーンで一時停止し、次のステップで「顔を検出」ボタンから検出を実行します。
+        </p>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="resetBtn">別の動画を選ぶ</button>
+      </div>
+    </div>
+
+    <p class="alert info" style="margin-top:1rem;">
+      🔒 動画はこの端末内だけで処理され、サーバーには一切アップロードされません。
+    </p>
+  </main>
+
+  <footer>© ひゅうがのTR-Labo</footer>
+
+  <script>
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + ' MB';
+      return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    }
+    function fmtDur(sec) {
+      sec = Math.max(0, Math.floor(sec));
+      const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+      const pad = n => String(n).padStart(2, '0');
+      return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+    }
+    function safeFilename(name, fallback) {
+      return (name || fallback || 'video').trim().replace(/[\\/:*?"<>|]/g, '_');
+    }
+
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const workArea = document.getElementById('workArea');
+    const srcVideo = document.getElementById('srcVideo');
+    const overlay = document.getElementById('overlay');
+    const videoMeta = document.getElementById('videoMeta');
+
+    function bindDropzone(zone, input, onFiles) {
+      zone.addEventListener('click', () => input.click());
+      ['dragenter', 'dragover'].forEach(evt => zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.add('drag'); }));
+      ['dragleave', 'drop'].forEach(evt => zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.remove('drag'); }));
+      zone.addEventListener('drop', (e) => {
+        const files = Array.from(e.dataTransfer.files || []);
+        if (files.length) onFiles(files);
+      });
+      input.addEventListener('change', () => {
+        const files = Array.from(input.files || []);
+        if (files.length) onFiles(files);
+        input.value = '';
+      });
+    }
+
+    async function loadVideo(file) {
+      if (!file.type.startsWith('video/')) {
+        alert('動画ファイルを選択してください'); return;
+      }
+      srcVideo.src = URL.createObjectURL(file);
+      dz.classList.add('hidden');
+      workArea.classList.remove('hidden');
+      await new Promise(res => { srcVideo.onloadedmetadata = res; });
+      // Size the overlay canvas to the video's intrinsic dimensions
+      overlay.width = srcVideo.videoWidth;
+      overlay.height = srcVideo.videoHeight;
+      videoMeta.innerHTML = `
+        <span>📐 ${srcVideo.videoWidth} × ${srcVideo.videoHeight}</span>
+        <span>⏱ ${fmtDur(srcVideo.duration)}</span>
+        <span>💾 ${fmtSize(file.size)}</span>
+        <span>📄 ${file.name}</span>
+      `;
+    }
+
+    bindDropzone(dz, fi, (files) => loadVideo(files[0]));
+
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      srcVideo.pause();
+      srcVideo.removeAttribute('src'); srcVideo.load();
+      workArea.classList.add('hidden');
+      dz.classList.remove('hidden');
+    });
+  </script>
+</body>
+</html>
