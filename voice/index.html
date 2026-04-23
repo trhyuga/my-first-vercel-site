@@ -517,6 +517,12 @@
         </select>
       </div>
       <div class="field">
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-weight:500;">
+          <input type="checkbox" id="stripFillers" checked style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
+          <span>✂️ フィラー (あー・えー・えっと・um等) を除去する</span>
+        </label>
+      </div>
+      <div class="field">
         <label>💾 ダウンロード形式</label>
         <div style="font-size:0.72rem;color:#64748b;padding:0 0.25rem 0.45rem;">
           NotebookLMは <b>MP3 / WAV</b> と <b>PDF / TXT</b> を取り込めます。WebMは非対応なので自動で変換します。
@@ -1229,6 +1235,34 @@
       }
     })();
 
+    // ---- Filler removal ----
+    // Strip obvious hesitation fillers while keeping real words intact.
+    // Targets clearly-filler patterns (long vowels, 「えっと」「あのー」等).
+    function stripFillers(text) {
+      if (!text) return text;
+      const patterns = [
+        /あー+/g, /ああー+/g,
+        /えー+/g, /ええー+/g,
+        /おー+/g,
+        /うーん+/g, /うーー+ん/g,
+        /えっと[ー]?/g, /えと[ー]/g,
+        /えー*っ?と[ー]?/g,
+        /あのー+/g, /あのう+/g,
+        /そのー+/g, /そのう+/g,
+        /まあー+/g, /まー+あ/g, /まあっ+/g,
+        /んー+/g,
+        /\b(um+|uh+|er+|erm+|ah+|hmm+|mm+)\b/gi,
+      ];
+      let out = text;
+      for (const p of patterns) out = out.replace(p, '');
+      // Tidy residual punctuation/spacing left over from removed fillers
+      out = out.replace(/[、,][\s、,]+/g, '、');
+      out = out.replace(/([。!?])\s*[、,]/g, '$1');
+      out = out.replace(/^\s*[、。,.\s]+/, '');
+      out = out.replace(/\s{2,}/g, ' ');
+      return out.trim();
+    }
+
     // ---- Transcript text generation ----
     // Merge consecutive segments from the same speaker into one turn.
     function buildTurns() {
@@ -1250,38 +1284,41 @@
       const dateStr = new Date().toLocaleString('ja-JP');
       const totalSec = recordedBlob ? ((performance.now() - startedAt) / 1000) : 0;
       const usedSpeakers = speakers.filter((_, i) => segments.some(s => s.speaker === i));
+      const clean = document.getElementById('stripFillers')?.checked;
+      const xform = clean ? stripFillers : (s) => s;
       const header = [
         `# ${title}`,
         `収録日時: ${dateStr}`,
         `長さ: ${fmtHMS(totalSec)}`,
         `話者: ${usedSpeakers.join(', ')}`,
+        clean ? 'フィラー除去: あり' : null,
         '',
-      ].join('\n');
+      ].filter(x => x !== null).join('\n');
 
       const turns = buildTurns();
       // Join all parts of a turn with a space (for clean/timestamped) or a newline (for dialog)
       if (format === 'timestamped') {
         const body = turns.map(t => {
           const name = speakers[t.speaker] || '話者?';
-          const text = t.parts.map(p => p.text).join(' ');
-          return `[${fmtHMS(t.parts[0].t)}] ${name}: ${text}`;
-        }).join('\n\n');
+          const text = xform(t.parts.map(p => p.text).join(' '));
+          return text ? `[${fmtHMS(t.parts[0].t)}] ${name}: ${text}` : '';
+        }).filter(Boolean).join('\n\n');
         return header + body + '\n';
       }
       if (format === 'dialog') {
         const body = turns.map(t => {
           const name = speakers[t.speaker] || '話者?';
-          const text = t.parts.map(p => p.text).join('\n');
-          return `${name}:\n${text}`;
-        }).join('\n\n');
+          const text = xform(t.parts.map(p => p.text).join('\n'));
+          return text ? `${name}:\n${text}` : '';
+        }).filter(Boolean).join('\n\n');
         return header + body + '\n';
       }
       // clean (default): speaker name only when it changes
       const body = turns.map(t => {
         const name = speakers[t.speaker] || '話者?';
-        const text = t.parts.map(p => p.text).join(' ');
-        return `${name}: ${text}`;
-      }).join('\n\n');
+        const text = xform(t.parts.map(p => p.text).join(' '));
+        return text ? `${name}: ${text}` : '';
+      }).filter(Boolean).join('\n\n');
       return header + body + '\n';
     }
 
