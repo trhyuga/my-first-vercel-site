@@ -539,6 +539,14 @@
 
         <div class="panel">
           <h2>ファイル一覧</h2>
+          ${window._mojibake ? `
+          <div class="alert info" style="margin:0 0 0.6rem;">
+            ⚠️ ファイル名の文字化けを検出しました。
+            <div class="btn-row" style="margin-top:0.5rem;">
+              <button class="btn btn-secondary" id="fixSjis">Shift_JISとして修正</button>
+              <button class="btn btn-secondary" id="fixUtf8">元に戻す</button>
+            </div>
+          </div>` : ''}
           <div class="btn-row" style="margin-top:0;">
             <button class="btn btn-secondary" id="selAll">すべて選択</button>
             <button class="btn btn-secondary" id="selNone">すべて解除</button>
@@ -565,6 +573,16 @@
       if (pwApply) pwApply.addEventListener('click', async () => {
         currentPassword = document.getElementById('pwInput').value;
         await loadArchive(currentArchiveFile, currentPassword);
+      });
+      const fixSjis = document.getElementById('fixSjis');
+      if (fixSjis) fixSjis.addEventListener('click', () => {
+        currentEntries.forEach(e => { e.path = fixMojibake(e.origPath, 'shift_jis'); });
+        renderEntryList();
+      });
+      const fixUtf8 = document.getElementById('fixUtf8');
+      if (fixUtf8) fixUtf8.addEventListener('click', () => {
+        currentEntries.forEach(e => { e.path = e.origPath; });
+        renderEntryList();
       });
     }
 
@@ -605,6 +623,29 @@
       extractBody.innerHTML = '';
     }
 
+    // ---- Filename encoding fix (UTF-8 ↔ Shift_JIS) ----
+    // Detect mojibake: strings from ZIPs/7z that were encoded as Shift_JIS
+    // but read as UTF-8 turn into byte strings of replacement chars / Latin-1.
+    function fixMojibake(name, encoding) {
+      if (!name) return name;
+      try {
+        const bytes = new Uint8Array(name.length);
+        for (let i = 0; i < name.length; i++) {
+          const c = name.charCodeAt(i);
+          if (c > 0xFF) return name; // already valid multi-byte char
+          bytes[i] = c & 0xFF;
+        }
+        const dec = new TextDecoder(encoding || 'shift_jis', { fatal: false });
+        const fixed = dec.decode(bytes);
+        if (!fixed || /�/.test(fixed)) return name;
+        return fixed;
+      } catch (e) { return name; }
+    }
+    function likelyMojibake(name) {
+      // Heuristic: contains characters in Latin-1 extended range that look like raw Shift_JIS bytes
+      return /[\x80-\xFF]{2,}/.test(name);
+    }
+
     async function loadArchive(file, password) {
       extractBody.innerHTML = '<div class="panel"><p style="color:#64748b;font-size:0.88rem;">アーカイブを解析中...</p></div>';
       try {
@@ -625,11 +666,14 @@
         const files = await archive.getFilesArray();
         currentEntries = files.map(f => ({
           path: (f.path ? (f.path + '/') : '') + f.file.name,
+          origPath: (f.path ? (f.path + '/') : '') + f.file.name,
           size: f.file.size != null ? f.file.size : (f.file._size || null),
           selected: true,
           isDir: false,
           raw: f,
         }));
+        const hasMojibake = currentEntries.some(e => likelyMojibake(e.path));
+        window._mojibake = hasMojibake;
         renderExtract();
         if (passwordNeeded) {
           const pwPanel = document.getElementById('pwPanel');
