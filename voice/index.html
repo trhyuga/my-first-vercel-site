@@ -531,7 +531,17 @@
         <button class="btn btn-secondary" id="savePdfBtn">📄 PDFで保存</button>
       </div>
       <div class="btn-row">
-        <button class="btn btn-secondary" id="previewTextBtn">📋 テキストをプレビュー/コピー</button>
+        <button class="btn btn-secondary" id="previewTextBtn">👁 テキストをプレビュー</button>
+      </div>
+      <div id="previewPanel" class="hidden" style="margin-top:0.6rem;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem;margin-bottom:0.35rem;">
+          <span style="font-size:0.78rem;color:#475569;font-weight:600;">📝 プレビュー <span id="previewStats" style="color:#94a3b8;font-weight:400;"></span></span>
+          <div style="display:flex;gap:0.4rem;">
+            <button class="btn btn-secondary" id="previewCopyBtn" style="flex:0 0 auto;width:auto;min-height:auto;padding:0.4rem 0.7rem;font-size:0.78rem;">📋 コピー</button>
+            <button class="btn btn-secondary" id="previewCloseBtn" style="flex:0 0 auto;width:auto;min-height:auto;padding:0.4rem 0.7rem;font-size:0.78rem;">✕ 閉じる</button>
+          </div>
+        </div>
+        <textarea id="previewText" readonly style="width:100%;height:260px;font-family:'SF Mono',Menlo,Monaco,Consolas,monospace;font-size:12.5px;line-height:1.55;padding:0.7rem;border:1px solid #cbd5e1;border-radius:10px;background:#f8fafc;color:#0f172a;resize:vertical;-webkit-appearance:none;"></textarea>
       </div>
       <div id="saveHint" class="alert info" style="font-size:0.78rem;"></div>
       <div id="saveStatus"></div>
@@ -1550,18 +1560,42 @@
       }
     });
 
-    document.getElementById('previewTextBtn').addEventListener('click', async () => {
+    document.getElementById('previewTextBtn').addEventListener('click', () => {
+      if (!segments.length) { alert('文字起こしがありません'); return; }
       const fmt = document.getElementById('txtFormat').value;
       const text = buildTranscriptText(fmt);
+      const pane = document.getElementById('previewPanel');
+      const ta = document.getElementById('previewText');
+      const stats = document.getElementById('previewStats');
+      ta.value = text;
+      const lines = (text.match(/\n/g) || []).length + 1;
+      stats.textContent = `(${text.length.toLocaleString()}文字 / ${lines}行)`;
+      pane.classList.remove('hidden');
+      pane.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      // auto-select so mobile long-press copy still works easily
+      try { ta.focus({ preventScroll: true }); ta.select(); } catch (e) {}
+    });
+
+    document.getElementById('previewCopyBtn').addEventListener('click', async () => {
+      const ta = document.getElementById('previewText');
+      const btn = document.getElementById('previewCopyBtn');
+      const orig = btn.textContent;
       try {
-        await navigator.clipboard.writeText(text);
-        document.getElementById('saveStatus').innerHTML = `<div class="alert success">📋 クリップボードにコピーしました (${text.length}文字)</div>`;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(ta.value);
+        } else {
+          ta.focus(); ta.select();
+          document.execCommand('copy');
+        }
+        btn.textContent = '✅ コピー済み';
       } catch (e) {
-        // fallback: show in a textarea modal-like
-        const win = window.open('', '_blank');
-        if (win) { win.document.body.innerText = text; }
-        else alert(text.slice(0, 500) + (text.length > 500 ? '…' : ''));
+        btn.textContent = '⚠ 失敗 (長押しでコピー)';
       }
+      setTimeout(() => { btn.textContent = orig; }, 1800);
+    });
+
+    document.getElementById('previewCloseBtn').addEventListener('click', () => {
+      document.getElementById('previewPanel').classList.add('hidden');
     });
 
     // ---- Stop with confirmation (keeps recording while asking) ----
