@@ -931,18 +931,19 @@
       startBtn.disabled = true;
       const origText = startBtn.textContent;
       startBtn.textContent = '準備中…';
+      // Make progress visible immediately so the user isn't staring at an
+      // inert 準備中 button if model load / play() takes a moment.
+      processStatus.innerHTML = '';
+      processProgress(2, 'モデルを準備中…');
       try {
         await ensureModels();
         if (mediaKind === 'image') { await processImage(); return; }
+        processProgress(5, 'エンコーダを準備中…');
         const vw = srcVideo.videoWidth, vh = srcVideo.videoHeight;
         const out = document.createElement('canvas');
         out.width = vw; out.height = vh;
         const outCtx = out.getContext('2d', { willReadFrequently: true });
 
-        // Build output stream: processed canvas video + original audio track.
-        // Use 60 fps to cover iPhone 60 fps videos without halving the frame
-        // rate; canvas.captureStream treats this as a ceiling, so 30 fps
-        // sources still end up at 30 fps.
         const canvasStream = out.captureStream(60);
         try {
           if (typeof srcVideo.captureStream === 'function') {
@@ -952,48 +953,55 @@
         } catch (e) { /* audio optional */ }
 
         const mime = pickSupportedMime();
-        // Target at least the source's bitrate so re-encode doesn't lose quality.
-        // The file-size estimate includes audio, so add 1.3x headroom then clamp.
         const srcDurSec = srcVideo.duration || 10;
         const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
-        // Resolution-aware floor: ~0.15 bit/pixel/frame at 30 fps.
         const resolutionFloor = Math.round(vw * vh * 30 * 0.15);
         const targetBps = Math.max(15_000_000, resolutionFloor, Math.round(srcBps * 1.3));
         const cappedBps = Math.min(50_000_000, targetBps);
-        const recorder = new MediaRecorder(canvasStream, mime ? { mimeType: mime, videoBitsPerSecond: cappedBps } : {});
+
+        // MediaRecorder can throw on some browsers when the bitrate/mime
+        // combination isn't supported; retry with a lower bitrate, then with
+        // no bitrate, then with no options at all before giving up.
+        let recorder;
+        const recorderAttempts = [
+          mime ? { mimeType: mime, videoBitsPerSecond: cappedBps } : { videoBitsPerSecond: cappedBps },
+          mime ? { mimeType: mime, videoBitsPerSecond: 10_000_000 } : { videoBitsPerSecond: 10_000_000 },
+          mime ? { mimeType: mime } : null,
+          null,
+        ];
+        let lastRecErr = null;
+        for (const opts of recorderAttempts) {
+          try {
+            recorder = opts ? new MediaRecorder(canvasStream, opts) : new MediaRecorder(canvasStream);
+            break;
+          } catch (e) { lastRecErr = e; recorder = null; }
+        }
+        if (!recorder) throw new Error('MediaRecorder を初期化できませんでした: ' + (lastRecErr && lastRecErr.message || lastRecErr));
+
         const chunks = [];
         recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
         const stopped = new Promise(res => { recorder.onstop = res; });
 
-        // Respect the sensitivity chip; do NOT force SSD (slower) during video.
-        // Use a smaller 320 input for video to cut detection latency (less GPU
-        // contention with the per-frame canvas draw) while still leaving
-        // 「細かく検出」 routed to SSD if the user chose that.
         const detOpts = (sensitivity === 'sensitive' && ssdLoaded)
           ? new faceapi.SsdMobilenetv1Options({ minConfidence: 0.25, maxResults: 200 })
           : new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.4 });
 
-        // Keep detection OFF the per-frame draw path so MediaRecorder never
-        // starves. Detection runs async; when a new result arrives, update the
-        // box list. Motion velocity is estimated from consecutive detections so
-        // the blur can extrapolate forward while a fresh detection is running.
-        const STICKY_FRAMES = 30; // ~1s @ 30fps
-        // Each tracked match: { box:{x,y,width,height}, vx, vy, cx, cy }
-        // Velocity is in pixels/second in source coordinates.
+        const STICKY_FRAMES = 30;
         let lastMatches = [];
         let lastDetectTimeMs = 0;
-        let prevSnapshot = null; // { time, matches }
+        let prevSnapshot = null;
         let stickyLeft = 0;
         let detectRunning = false;
 
+        // Muted must be set BEFORE play() so iOS Safari allows inline playback.
+        srcVideo.muted = true;
+        srcVideo.playbackRate = 1;
         srcVideo.pause();
         srcVideo.currentTime = 0;
-        srcVideo.muted = true; // audio comes from captureStream
-        srcVideo.playbackRate = 1;
 
         clearFaces();
         faceLayer.style.display = 'none';
-        processProgress(0, '処理開始…');
+        processProgress(8, '処理開始…');
 
         const haveRVFC = typeof srcVideo.requestVideoFrameCallback === 'function';
 
@@ -1098,15 +1106,36 @@
           else requestAnimationFrame(processFrame);
         };
 
-        recorder.start(800);
-        await srcVideo.play();
+        try { recorder.start(800); } catch (e) { try { recorder.start(); } catch (_) { throw new Error('録画を開始できませんでした: ' + (e.message || e)); } }
+
+        try {
+          await srcVideo.play();
+        } catch (e) {
+          throw new Error('動画の再生を開始できませんでした: ' + (e.message || e) + ' (もう一度試すか、別の動画でお試しください)');
+        }
+
         if (haveRVFC) srcVideo.requestVideoFrameCallback(processFrame);
         else requestAnimationFrame(processFrame);
 
+        // Watchdog: if the video doesn't advance for 15 seconds (stuck decoder,
+        // blocked by autoplay policy, etc.), abort cleanly instead of hanging.
+        const watchdog = setInterval(() => {
+          const t = srcVideo.currentTime;
+          if (t === watchdog._lastT) {
+            watchdog._stuck = (watchdog._stuck || 0) + 1;
+            if (watchdog._stuck > 15) {
+              clearInterval(watchdog);
+              try { recorder.stop(); } catch (e) {}
+              try { srcVideo.pause(); } catch (e) {}
+            }
+          } else { watchdog._stuck = 0; watchdog._lastT = t; }
+        }, 1000);
+
         await new Promise(res => { srcVideo.onended = res; });
+        clearInterval(watchdog);
         // Give the recorder one last chunk before stopping
         await new Promise(r => setTimeout(r, 150));
-        recorder.stop();
+        try { recorder.stop(); } catch (e) {}
         await stopped;
 
         faceLayer.style.display = '';
