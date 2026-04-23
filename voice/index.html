@@ -542,7 +542,7 @@
 
   <footer>© ひゅうがのTR-Labo</footer>
 
-  <script src="https://cdn.jsdelivr.net/npm/@breezystack/lamejs@1.2.7/lame.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script>
     // ---- helpers ----
@@ -1329,11 +1329,50 @@
       return out;
     }
 
-    async function encodeMP3(samples, sampleRate, kbps) {
-      if (typeof lamejs === 'undefined' || !lamejs.Mp3Encoder) {
-        throw new Error('MP3エンコーダを読み込めませんでした');
+    // lamejs 1.2.1 needs a couple of helper classes on the global scope;
+    // the UMD build exposes them only under `lamejs.*`. Bridge them lazily.
+    function primeLameGlobals() {
+      if (typeof lamejs === 'undefined') return false;
+      const names = ['MPEGMode', 'Lame', 'BitStream'];
+      for (const k of names) {
+        if (typeof window[k] === 'undefined' && lamejs[k]) window[k] = lamejs[k];
       }
-      const encoder = new lamejs.Mp3Encoder(1, sampleRate, kbps);
+      return typeof lamejs.Mp3Encoder === 'function';
+    }
+
+    // Try loading an alternative CDN if the primary failed.
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('script load failed: ' + src));
+        document.head.appendChild(s);
+      });
+    }
+    async function ensureLamejs() {
+      if (typeof lamejs !== 'undefined' && lamejs.Mp3Encoder) return;
+      const fallbacks = [
+        'https://unpkg.com/lamejs@1.2.1/lame.min.js',
+        'https://cdn.jsdelivr.net/gh/zhuker/lamejs@master/lame.min.js',
+      ];
+      for (const u of fallbacks) {
+        if (typeof lamejs !== 'undefined' && lamejs.Mp3Encoder) return;
+        try { await loadScript(u); } catch (e) { /* try next */ }
+      }
+    }
+
+    async function encodeMP3(samples, sampleRate, kbps) {
+      await ensureLamejs();
+      if (typeof lamejs === 'undefined' || !primeLameGlobals()) {
+        throw new Error('MP3エンコーダを読み込めませんでした。WAVで保存してみてください。');
+      }
+      let encoder;
+      try {
+        encoder = new lamejs.Mp3Encoder(1, sampleRate, kbps);
+      } catch (e) {
+        throw new Error('MP3エンコーダの初期化に失敗: ' + (e.message || e) + ' (WAVをお試しください)');
+      }
       const int16 = floatToInt16(samples);
       const chunks = [];
       const blockSize = 1152;
