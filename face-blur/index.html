@@ -121,6 +121,42 @@
       width: 100%; height: 100%;
       pointer-events: none;
     }
+    .face-layer {
+      position: absolute;
+      left: 0; top: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+    }
+    .face-box {
+      position: absolute;
+      border: 2px solid rgba(14,165,233,0.9);
+      background: rgba(14,165,233,0.12);
+      border-radius: 4px;
+      pointer-events: auto;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s, border-color 0.15s;
+      box-shadow: 0 0 0 2px rgba(255,255,255,0.5);
+    }
+    .face-box:hover { background: rgba(14,165,233,0.22); }
+    .face-box.selected {
+      border-color: #ef4444;
+      background: rgba(239,68,68,0.22);
+      box-shadow: 0 0 0 2px rgba(239,68,68,0.35);
+    }
+    .face-box .num {
+      position: absolute;
+      top: -10px; left: -10px;
+      background: rgba(14,165,233,0.95);
+      color: white;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      font-size: 0.72rem;
+      font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      border: 2px solid white;
+    }
+    .face-box.selected .num { background: #ef4444; }
 
     .meta { font-size: 0.78rem; color: #64748b; display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
 
@@ -224,15 +260,21 @@
         <div class="video-stage">
           <video id="srcVideo" controls playsinline muted preload="metadata"></video>
           <canvas class="overlay-canvas" id="overlay"></canvas>
+          <div class="face-layer" id="faceLayer"></div>
         </div>
         <div class="meta" id="videoMeta"></div>
       </div>
 
       <div class="panel">
-        <h2>顔の検出 (Step 2で実装)</h2>
-        <p style="font-size:0.84rem;color:#475569;line-height:1.6;">
-          動画を任意のシーンで一時停止し、次のステップで「顔を検出」ボタンから検出を実行します。
+        <h2>ぼかす人を指定</h2>
+        <p style="font-size:0.82rem;color:#475569;line-height:1.6;margin-bottom:0.6rem;">
+          動画を <b>ぼかしたい人が写っているシーン</b> で一時停止してから「顔を検出」をタップ。検出された顔をタップで選択できます。
         </p>
+        <div class="btn-row" style="margin-top:0;">
+          <button class="btn btn-secondary" id="detectBtn">🔍 この画面で顔を検出</button>
+          <button class="btn btn-secondary hidden" id="clearSelBtn">選択を解除</button>
+        </div>
+        <div id="detectStatus"></div>
       </div>
 
       <div class="btn-row">
@@ -247,6 +289,7 @@
 
   <footer>© ひゅうがのTR-Labo</footer>
 
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.14/dist/face-api.js"></script>
   <script>
     function fmtSize(n) {
       if (n < 1024) return n + ' B';
@@ -312,7 +355,131 @@
       srcVideo.removeAttribute('src'); srcVideo.load();
       workArea.classList.add('hidden');
       dz.classList.remove('hidden');
+      clearFaces();
+      selectedDescriptors.length = 0;
+      updateSelBtn();
     });
+
+    // ---- Face detection ----
+    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.14/model';
+    const faceLayer = document.getElementById('faceLayer');
+    const detectBtn = document.getElementById('detectBtn');
+    const clearSelBtn = document.getElementById('clearSelBtn');
+    const detectStatus = document.getElementById('detectStatus');
+
+    let modelsReady = false;
+    let detectedFaces = []; // {box, descriptor, selected, el}
+    const selectedDescriptors = []; // Float32Array[]
+
+    async function ensureModels() {
+      if (modelsReady) return;
+      detectStatus.innerHTML = '<div class="alert info">モデルを読み込んでいます (初回は少し時間がかかります)…</div>';
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+      modelsReady = true;
+      detectStatus.innerHTML = '';
+    }
+
+    function clearFaces() {
+      faceLayer.innerHTML = '';
+      detectedFaces = [];
+    }
+
+    function renderFaceBoxes() {
+      faceLayer.innerHTML = '';
+      const vw = srcVideo.videoWidth, vh = srcVideo.videoHeight;
+      if (!vw || !vh) return;
+      detectedFaces.forEach((f, i) => {
+        const el = document.createElement('div');
+        el.className = 'face-box' + (f.selected ? ' selected' : '');
+        el.style.left = (f.box.x / vw * 100) + '%';
+        el.style.top = (f.box.y / vh * 100) + '%';
+        el.style.width = (f.box.width / vw * 100) + '%';
+        el.style.height = (f.box.height / vh * 100) + '%';
+        const num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = (i + 1);
+        el.appendChild(num);
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleFaceSelection(i);
+        });
+        f.el = el;
+        faceLayer.appendChild(el);
+      });
+    }
+
+    function toggleFaceSelection(i) {
+      const f = detectedFaces[i];
+      if (!f) return;
+      f.selected = !f.selected;
+      if (f.el) f.el.classList.toggle('selected', f.selected);
+      // Sync selectedDescriptors
+      selectedDescriptors.length = 0;
+      detectedFaces.forEach(f => {
+        if (f.selected && f.descriptor) selectedDescriptors.push(f.descriptor);
+      });
+      updateSelBtn();
+      updateStartBtn && updateStartBtn();
+    }
+
+    function updateSelBtn() {
+      const n = detectedFaces.filter(f => f.selected).length;
+      clearSelBtn.classList.toggle('hidden', n === 0);
+      clearSelBtn.textContent = `選択を解除 (${n}人)`;
+    }
+
+    detectBtn.addEventListener('click', async () => {
+      if (!srcVideo.videoWidth) return;
+      detectBtn.disabled = true;
+      const origText = detectBtn.textContent;
+      detectBtn.textContent = '検出中...';
+      try {
+        srcVideo.pause();
+        await ensureModels();
+        const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.4 });
+        const results = await faceapi.detectAllFaces(srcVideo, opts)
+          .withFaceLandmarks()
+          .withFaceDescriptors();
+        detectedFaces = results.map(r => ({
+          box: {
+            x: r.detection.box.x,
+            y: r.detection.box.y,
+            width: r.detection.box.width,
+            height: r.detection.box.height,
+          },
+          descriptor: r.descriptor,
+          selected: false,
+          el: null,
+        }));
+        renderFaceBoxes();
+        if (!detectedFaces.length) {
+          detectStatus.innerHTML = '<div class="alert warn">顔が検出できませんでした。別のシーンで一時停止してから再度お試しください。</div>';
+        } else {
+          detectStatus.innerHTML = `<div class="alert success">${detectedFaces.length}つの顔を検出しました。ぼかしたい顔をタップで選択してください。</div>`;
+        }
+      } catch (e) {
+        detectStatus.innerHTML = `<div class="alert error">検出に失敗: ${String(e.message || e)}</div>`;
+      } finally {
+        detectBtn.disabled = false;
+        detectBtn.textContent = origText;
+      }
+    });
+
+    clearSelBtn.addEventListener('click', () => {
+      detectedFaces.forEach(f => { f.selected = false; if (f.el) f.el.classList.remove('selected'); });
+      selectedDescriptors.length = 0;
+      updateSelBtn();
+      updateStartBtn && updateStartBtn();
+    });
+
+    // Clear detected boxes when seeking (they belong to a single frame)
+    srcVideo.addEventListener('seeking', clearFaces);
+    srcVideo.addEventListener('play', clearFaces);
+
+    // placeholder until Step 3
+    window.updateStartBtn = () => {};
   </script>
 </body>
 </html>
