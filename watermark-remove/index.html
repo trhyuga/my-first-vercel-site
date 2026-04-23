@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>右下マーク除去 | ひゅうがのTR-Labo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .brand {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 0.7rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    .back-btn {
+      width: 36px; height: 36px;
+      border-radius: 9px;
+      border: 1px solid #e2e8f0;
+      background: #fff;
+      color: #475569;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .back-btn:active { background: #f1f5f9; }
+    .logo {
+      width: 34px; height: 34px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800;
+      font-size: 0.78rem;
+      box-shadow: 0 4px 10px rgba(14,165,233,0.25);
+    }
+    .brand-name {
+      font-size: 1rem;
+      font-weight: 700;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    main { max-width: 760px; margin: 0 auto; padding: 1.25rem 1rem 2rem; }
+    .hero { text-align: center; padding: 0.25rem 0 1rem; }
+    .hero h1 {
+      font-size: clamp(1.4rem, 4.8vw, 1.85rem);
+      font-weight: 800;
+      letter-spacing: -0.015em;
+      margin-bottom: 0.5rem;
+    }
+    .hero h1 .accent {
+      background: linear-gradient(135deg, #0284c7, #06b6d4);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p { color: #64748b; font-size: 0.88rem; line-height: 1.65; }
+
+    .dropzone {
+      border: 2px dashed #cbd5e1;
+      border-radius: 16px;
+      padding: 2.5rem 1rem;
+      text-align: center;
+      background: #fff;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .dropzone:active, .dropzone.drag { background: #e0f2fe; border-color: #38bdf8; }
+    .dropzone .icon { font-size: 2.6rem; color: #0ea5e9; margin-bottom: 0.5rem; }
+    .dropzone .t { font-size: 1rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .dropzone .d { font-size: 0.82rem; color: #64748b; line-height: 1.5; }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+    .panel h2 {
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 0.65rem;
+      color: #0f172a;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      width: 100%;
+      background: #0f172a;
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      aspect-ratio: auto;
+    }
+    .canvas-wrap canvas {
+      max-width: 100%;
+      max-height: 70vh;
+      display: block;
+      image-rendering: auto;
+    }
+    .mask-box {
+      position: absolute;
+      border: 2px solid #f43f5e;
+      background: rgba(244,63,94,0.18);
+      box-shadow: 0 0 0 2px rgba(255,255,255,0.4);
+      pointer-events: none;
+    }
+    .mask-box::before {
+      content: '✂ 除去範囲';
+      position: absolute;
+      top: -22px; left: 0;
+      background: #f43f5e;
+      color: white;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+    .before-after-tabs {
+      display: flex; gap: 0.3rem;
+      background: #eef2f7;
+      padding: 0.25rem;
+      border-radius: 9px;
+      margin: 0.6rem 0 0.25rem;
+    }
+    .ba-tab {
+      flex: 1;
+      padding: 0.45rem;
+      text-align: center;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #64748b;
+      border-radius: 7px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .ba-tab.active {
+      background: #fff;
+      color: #0f172a;
+      box-shadow: 0 1px 2px rgba(15,23,42,0.08);
+    }
+
+    .field { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.7rem; }
+    .field label {
+      font-size: 0.78rem; color: #475569; font-weight: 600;
+      display: flex; justify-content: space-between;
+      padding: 0 0.1rem;
+    }
+    .field label .val { color: #0ea5e9; font-variant-numeric: tabular-nums; }
+    .field input[type="text"], .field input[type="number"], .field select {
+      background: #fff;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+      padding: 0.65rem 0.75rem;
+      border-radius: 9px;
+      font-family: inherit;
+      font-size: 0.92rem;
+      width: 100%;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .field input:focus, .field select:focus {
+      outline: none; border-color: #38bdf8;
+      box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+    }
+    .field-row { display: flex; gap: 0.5rem; }
+    .field-row > * { flex: 1; }
+
+    input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      width: 100%; height: 28px; background: transparent;
+    }
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 5px; border-radius: 999px;
+      background: linear-gradient(90deg, #0ea5e9, #06b6d4);
+    }
+    input[type="range"]::-moz-range-track {
+      height: 5px; border-radius: 999px; background: #0ea5e9;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      height: 22px; width: 22px; border-radius: 50%;
+      background: #fff; margin-top: -8.5px;
+      box-shadow: 0 2px 6px rgba(15,23,42,0.2);
+      border: 2px solid #0ea5e9;
+      cursor: pointer;
+    }
+    input[type="range"]::-moz-range-thumb {
+      height: 22px; width: 22px; border-radius: 50%;
+      background: #fff; border: 2px solid #0ea5e9; cursor: pointer;
+    }
+
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.55rem 0;
+      font-size: 0.9rem;
+    }
+    .check-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: #0ea5e9; }
+
+    button.btn {
+      border: none;
+      border-radius: 11px;
+      padding: 0.8rem 1rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      font-family: inherit;
+      transition: transform 0.08s, opacity 0.15s;
+      min-height: 48px;
+      width: 100%;
+    }
+    button.btn:active { transform: scale(0.98); opacity: 0.92; }
+    button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary {
+      background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(14,165,233,0.28);
+    }
+    .btn-secondary { background: #fff; color: #0f172a; border: 1px solid #cbd5e1; }
+    .btn-row { display: flex; gap: 0.5rem; margin-top: 0.8rem; }
+    .btn-row .btn { flex: 1; }
+
+    .progress-wrap { margin-top: 0.65rem; }
+    .progress-label { font-size: 0.8rem; color: #475569; margin-bottom: 0.3rem; display: flex; justify-content: space-between; }
+    .progress-bar { height: 8px; background: #e2e8f0; border-radius: 999px; overflow: hidden; }
+    .progress-bar > span { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #0ea5e9, #06b6d4); transition: width 0.15s; }
+
+    .alert {
+      padding: 0.7rem 0.85rem; border-radius: 10px;
+      font-size: 0.85rem; line-height: 1.55; margin-top: 0.6rem;
+    }
+    .alert.info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .alert.success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .alert.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+
+    .hidden { display: none !important; }
+    .meta { font-size: 0.75rem; color: #64748b; display: flex; gap: 0.75rem; flex-wrap: wrap; }
+
+    footer {
+      max-width: 760px; margin: 0 auto;
+      padding: 1rem; color: #94a3b8;
+      font-size: 0.74rem; text-align: center;
+      padding-bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
+    }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">✨ 右下マーク除去</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>右下の<span class="accent">星マーク</span>を自然に消す。</h1>
+      <p>AI生成画像によくある右下のロゴ・星型ウォーターマークを、周囲の背景に馴染ませて除去。</p>
+    </section>
+
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="image/*" hidden />
+      <div class="icon">🖼️</div>
+      <div class="t">タップして画像を選択</div>
+      <div class="d">JPG / PNG / WebP など・ドラッグ&ドロップ対応</div>
+    </div>
+
+    <div id="workArea" class="hidden">
+      <div class="panel">
+        <h2>プレビュー</h2>
+        <div class="canvas-wrap" id="canvasWrap">
+          <canvas id="cv"></canvas>
+          <div class="mask-box" id="maskBox"></div>
+        </div>
+        <div class="before-after-tabs">
+          <div class="ba-tab active" data-ba="before">処理前</div>
+          <div class="ba-tab" data-ba="after">処理後</div>
+        </div>
+        <div class="meta" id="meta"></div>
+      </div>
+
+      <div class="panel">
+        <h2>除去範囲 (右下からのオフセット)</h2>
+        <div class="field">
+          <label>幅 <span class="val" id="vW">12%</span></label>
+          <input type="range" id="rW" min="2" max="35" value="12" />
+        </div>
+        <div class="field">
+          <label>高さ <span class="val" id="vH">12%</span></label>
+          <input type="range" id="rH" min="2" max="35" value="12" />
+        </div>
+        <div class="field">
+          <label>右からのオフセット <span class="val" id="vR">2%</span></label>
+          <input type="range" id="rR" min="0" max="30" value="2" />
+        </div>
+        <div class="field">
+          <label>下からのオフセット <span class="val" id="vB">2%</span></label>
+          <input type="range" id="rB" min="0" max="30" value="2" />
+        </div>
+        <button class="btn btn-primary" id="processBtn">✨ マークを除去</button>
+        <div id="procStatus"></div>
+      </div>
+
+      <div class="panel">
+        <h2>ダウンロード設定</h2>
+        <div class="field">
+          <label for="fname">ファイル名</label>
+          <input type="text" id="fname" />
+        </div>
+        <div class="field">
+          <label for="fmt">形式</label>
+          <select id="fmt">
+            <option value="auto" selected>元の形式に合わせる</option>
+            <option value="png">PNG</option>
+            <option value="jpeg">JPG (高画質)</option>
+            <option value="webp">WebP</option>
+          </select>
+        </div>
+        <div class="check-row">
+          <input type="checkbox" id="resize" />
+          <label for="resize">リサイズ (未チェックなら元の解像度のまま)</label>
+        </div>
+        <div id="resizeFields" class="hidden">
+          <div class="field-row">
+            <div class="field">
+              <label for="rwPx">幅 (px)</label>
+              <input type="number" id="rwPx" min="16" />
+            </div>
+            <div class="field">
+              <label for="rhPx">高さ (px)</label>
+              <input type="number" id="rhPx" min="16" />
+            </div>
+          </div>
+          <div class="check-row">
+            <input type="checkbox" id="keepAspect" checked />
+            <label for="keepAspect">縦横比を保つ</label>
+          </div>
+        </div>
+        <div class="check-row">
+          <input type="checkbox" id="transparentBg" />
+          <label for="transparentBg">背景を透過する (AIで自動抽出・PNG出力)</label>
+        </div>
+        <button class="btn btn-primary" id="dlBtn" disabled>💾 ダウンロード</button>
+        <div id="dlStatus"></div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="resetBtn">別の画像を選ぶ</button>
+      </div>
+    </div>
+
+    <p class="alert info" style="margin-top:1rem;">
+      🔒 すべてブラウザ内で処理され、画像はサーバーにアップロードされません。
+    </p>
+  </main>
+
+  <footer>© ひゅうがのTR-Labo</footer>
+
+  <script>
+    // ---- helpers ----
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1024 / 1024).toFixed(2) + ' MB';
+    }
+    function safeFilename(name, fallback) {
+      let out = (name || fallback || 'output').trim();
+      out = out.replace(/[\\/:*?"<>|]/g, '_');
+      return out;
+    }
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    }
+
+    function bindDropzone(zone, input, onFiles) {
+      zone.addEventListener('click', () => input.click());
+      ['dragenter', 'dragover'].forEach(evt => zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.add('drag'); }));
+      ['dragleave', 'drop'].forEach(evt => zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.remove('drag'); }));
+      zone.addEventListener('drop', (e) => {
+        const files = Array.from(e.dataTransfer.files || []);
+        if (files.length) onFiles(files);
+      });
+      input.addEventListener('change', () => {
+        const files = Array.from(input.files || []);
+        if (files.length) onFiles(files);
+        input.value = '';
+      });
+    }
+
+    // ---- State ----
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const workArea = document.getElementById('workArea');
+    const cv = document.getElementById('cv');
+    const ctx = cv.getContext('2d');
+    const maskBox = document.getElementById('maskBox');
+    const canvasWrap = document.getElementById('canvasWrap');
+    const metaEl = document.getElementById('meta');
+    const fnameEl = document.getElementById('fname');
+    const fmtEl = document.getElementById('fmt');
+    const procStatus = document.getElementById('procStatus');
+    const dlStatus = document.getElementById('dlStatus');
+    const dlBtn = document.getElementById('dlBtn');
+
+    let originalFile = null;
+    let originalImageData = null;     // full-resolution original pixels
+    let processedImageData = null;    // after inpainting
+    let viewMode = 'before';          // 'before' or 'after'
+
+    // ---- Range controls ----
+    const rW = document.getElementById('rW');
+    const rH = document.getElementById('rH');
+    const rR = document.getElementById('rR');
+    const rB = document.getElementById('rB');
+    const vW = document.getElementById('vW');
+    const vH = document.getElementById('vH');
+    const vR = document.getElementById('vR');
+    const vB = document.getElementById('vB');
+    function updateMaskLabels() {
+      vW.textContent = rW.value + '%';
+      vH.textContent = rH.value + '%';
+      vR.textContent = rR.value + '%';
+      vB.textContent = rB.value + '%';
+    }
+    [rW, rH, rR, rB].forEach(s => s.addEventListener('input', () => { updateMaskLabels(); drawMaskOverlay(); }));
+
+    // ---- Mask geometry (in image coordinates) ----
+    function getMaskRect() {
+      if (!originalImageData) return null;
+      const iw = originalImageData.width, ih = originalImageData.height;
+      const w = Math.max(4, Math.round(iw * (parseFloat(rW.value) / 100)));
+      const h = Math.max(4, Math.round(ih * (parseFloat(rH.value) / 100)));
+      const offR = Math.round(iw * (parseFloat(rR.value) / 100));
+      const offB = Math.round(ih * (parseFloat(rB.value) / 100));
+      const x = Math.max(0, Math.min(iw - w, iw - w - offR));
+      const y = Math.max(0, Math.min(ih - h, ih - h - offB));
+      return { x, y, w, h };
+    }
+
+    // ---- Rendering ----
+    function drawCanvas(imgData) {
+      cv.width = imgData.width;
+      cv.height = imgData.height;
+      ctx.putImageData(imgData, 0, 0);
+    }
+    function drawMaskOverlay() {
+      const r = getMaskRect();
+      if (!r) { maskBox.style.display = 'none'; return; }
+      // map image coords → displayed canvas coords
+      const rect = cv.getBoundingClientRect();
+      const wrapRect = canvasWrap.getBoundingClientRect();
+      const sx = rect.width / cv.width;
+      const sy = rect.height / cv.height;
+      maskBox.style.display = 'block';
+      maskBox.style.left = ((rect.left - wrapRect.left) + r.x * sx) + 'px';
+      maskBox.style.top = ((rect.top - wrapRect.top) + r.y * sy) + 'px';
+      maskBox.style.width = (r.w * sx) + 'px';
+      maskBox.style.height = (r.h * sy) + 'px';
+    }
+    window.addEventListener('resize', drawMaskOverlay);
+
+    function showMeta() {
+      if (!originalImageData || !originalFile) { metaEl.textContent = ''; return; }
+      metaEl.innerHTML = `
+        <span>📐 ${originalImageData.width} × ${originalImageData.height} px</span>
+        <span>💾 ${fmtSize(originalFile.size)}</span>
+        <span>📄 ${originalFile.name}</span>
+      `;
+    }
+
+    // ---- Inpainting (iterative Laplace diffusion, Gauss-Seidel w/ SOR) ----
+    async function inpaintRegion(fullImg, rect) {
+      // Work on a padded crop for efficiency
+      const PAD = Math.max(16, Math.round(Math.max(rect.w, rect.h) * 0.5));
+      const x0 = Math.max(0, rect.x - PAD);
+      const y0 = Math.max(0, rect.y - PAD);
+      const x1 = Math.min(fullImg.width, rect.x + rect.w + PAD);
+      const y1 = Math.min(fullImg.height, rect.y + rect.h + PAD);
+      const cw = x1 - x0, ch = y1 - y0;
+
+      const src = fullImg.data;
+      const fw = fullImg.width;
+      const buf = new Float32Array(cw * ch * 3);
+      const mask = new Uint8Array(cw * ch); // 1 = fill
+      // copy cropped region into float buffer
+      for (let j = 0; j < ch; j++) {
+        for (let i = 0; i < cw; i++) {
+          const sIdx = ((y0 + j) * fw + (x0 + i)) * 4;
+          const dIdx = (j * cw + i) * 3;
+          buf[dIdx] = src[sIdx];
+          buf[dIdx + 1] = src[sIdx + 1];
+          buf[dIdx + 2] = src[sIdx + 2];
+          const gx = x0 + i, gy = y0 + j;
+          if (gx >= rect.x && gx < rect.x + rect.w && gy >= rect.y && gy < rect.y + rect.h) {
+            mask[j * cw + i] = 1;
+          }
+        }
+      }
+
+      // Initialise masked pixels with average of boundary pixels (speeds convergence)
+      let br = 0, bg = 0, bb = 0, bn = 0;
+      for (let j = 0; j < ch; j++) {
+        for (let i = 0; i < cw; i++) {
+          if (mask[j * cw + i]) continue;
+          const idx = (j * cw + i) * 3;
+          // count only pixels that are neighbors of mask
+          const neighbors = [
+            [i - 1, j], [i + 1, j], [i, j - 1], [i, j + 1],
+          ];
+          let touches = false;
+          for (const [ni, nj] of neighbors) {
+            if (ni < 0 || ni >= cw || nj < 0 || nj >= ch) continue;
+            if (mask[nj * cw + ni]) { touches = true; break; }
+          }
+          if (touches) {
+            br += buf[idx]; bg += buf[idx + 1]; bb += buf[idx + 2]; bn++;
+          }
+        }
+      }
+      if (bn > 0) {
+        br /= bn; bg /= bn; bb /= bn;
+        for (let j = 0; j < ch; j++) {
+          for (let i = 0; i < cw; i++) {
+            if (mask[j * cw + i]) {
+              const idx = (j * cw + i) * 3;
+              buf[idx] = br; buf[idx + 1] = bg; buf[idx + 2] = bb;
+            }
+          }
+        }
+      }
+
+      // Iterative Laplace with SOR
+      const omega = 1.85;
+      const maxSide = Math.max(rect.w, rect.h);
+      const iterations = Math.min(600, Math.max(150, Math.round(maxSide * 2.2)));
+      const report = (pct, text) => {
+        procStatus.innerHTML = `
+          <div class="progress-wrap">
+            <div class="progress-label"><span>${text}</span><span>${pct}%</span></div>
+            <div class="progress-bar"><span style="width:${pct}%"></span></div>
+          </div>`;
+      };
+      for (let iter = 0; iter < iterations; iter++) {
+        // Gauss-Seidel update
+        for (let j = 1; j < ch - 1; j++) {
+          for (let i = 1; i < cw - 1; i++) {
+            if (!mask[j * cw + i]) continue;
+            const idx = (j * cw + i) * 3;
+            const up = ((j - 1) * cw + i) * 3;
+            const dn = ((j + 1) * cw + i) * 3;
+            const lt = (j * cw + (i - 1)) * 3;
+            const rt = (j * cw + (i + 1)) * 3;
+            for (let c = 0; c < 3; c++) {
+              const avg = (buf[up + c] + buf[dn + c] + buf[lt + c] + buf[rt + c]) * 0.25;
+              buf[idx + c] = buf[idx + c] + omega * (avg - buf[idx + c]);
+            }
+          }
+        }
+        if (iter % 30 === 0) {
+          report(Math.round((iter / iterations) * 100), 'マークを除去中...');
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+
+      // Write back
+      const outData = new Uint8ClampedArray(src);
+      for (let j = 0; j < ch; j++) {
+        for (let i = 0; i < cw; i++) {
+          if (!mask[j * cw + i]) continue;
+          const dIdx = (j * cw + i) * 3;
+          const sIdx = ((y0 + j) * fw + (x0 + i)) * 4;
+          outData[sIdx] = Math.max(0, Math.min(255, Math.round(buf[dIdx])));
+          outData[sIdx + 1] = Math.max(0, Math.min(255, Math.round(buf[dIdx + 1])));
+          outData[sIdx + 2] = Math.max(0, Math.min(255, Math.round(buf[dIdx + 2])));
+          outData[sIdx + 3] = src[sIdx + 3];
+        }
+      }
+      report(100, '完了');
+      setTimeout(() => { procStatus.innerHTML = ''; }, 1200);
+      return new ImageData(outData, fullImg.width, fullImg.height);
+    }
+
+    // ---- File load ----
+    async function loadFile(file) {
+      if (!file.type.startsWith('image/')) return;
+      originalFile = file;
+      const bmp = await createImageBitmap(file);
+      const c = document.createElement('canvas');
+      c.width = bmp.width; c.height = bmp.height;
+      const cx = c.getContext('2d');
+      cx.drawImage(bmp, 0, 0);
+      originalImageData = cx.getImageData(0, 0, c.width, c.height);
+      processedImageData = null;
+      viewMode = 'before';
+      document.querySelectorAll('.ba-tab').forEach(t => t.classList.toggle('active', t.dataset.ba === 'before'));
+
+      dz.classList.add('hidden');
+      workArea.classList.remove('hidden');
+      drawCanvas(originalImageData);
+      showMeta();
+      updateMaskLabels();
+      drawMaskOverlay();
+      // default filename
+      const base = file.name.replace(/\.[^.]+$/, '');
+      fnameEl.value = safeFilename(base + '_clean', 'clean');
+      // default resize values
+      document.getElementById('rwPx').value = originalImageData.width;
+      document.getElementById('rhPx').value = originalImageData.height;
+      dlBtn.disabled = true;
+      dlStatus.innerHTML = '';
+    }
+
+    bindDropzone(dz, fi, (files) => loadFile(files[0]));
+
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      originalFile = null; originalImageData = null; processedImageData = null;
+      workArea.classList.add('hidden');
+      dz.classList.remove('hidden');
+      dlBtn.disabled = true;
+    });
+
+    document.getElementById('processBtn').addEventListener('click', async () => {
+      if (!originalImageData) return;
+      const btn = document.getElementById('processBtn');
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = '処理中...';
+      try {
+        const rect = getMaskRect();
+        processedImageData = await inpaintRegion(originalImageData, rect);
+        viewMode = 'after';
+        document.querySelectorAll('.ba-tab').forEach(t => t.classList.toggle('active', t.dataset.ba === 'after'));
+        drawCanvas(processedImageData);
+        drawMaskOverlay();
+        dlBtn.disabled = false;
+      } catch (e) {
+        procStatus.innerHTML = `<div class="alert error">失敗: ${e.message || e}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
+    });
+
+    // Before/After tabs
+    document.querySelectorAll('.ba-tab').forEach(tab => tab.addEventListener('click', () => {
+      const mode = tab.dataset.ba;
+      if (mode === 'after' && !processedImageData) return;
+      viewMode = mode;
+      document.querySelectorAll('.ba-tab').forEach(t => t.classList.toggle('active', t === tab));
+      drawCanvas(mode === 'after' ? processedImageData : originalImageData);
+      drawMaskOverlay();
+    }));
+
+    // Resize UI
+    const resizeChk = document.getElementById('resize');
+    const resizeFields = document.getElementById('resizeFields');
+    const rwPx = document.getElementById('rwPx');
+    const rhPx = document.getElementById('rhPx');
+    const keepAspect = document.getElementById('keepAspect');
+    resizeChk.addEventListener('change', () => {
+      resizeFields.classList.toggle('hidden', !resizeChk.checked);
+    });
+    rwPx.addEventListener('input', () => {
+      if (keepAspect.checked && originalImageData) {
+        rhPx.value = Math.max(1, Math.round(parseInt(rwPx.value, 10) * originalImageData.height / originalImageData.width));
+      }
+    });
+    rhPx.addEventListener('input', () => {
+      if (keepAspect.checked && originalImageData) {
+        rwPx.value = Math.max(1, Math.round(parseInt(rhPx.value, 10) * originalImageData.width / originalImageData.height));
+      }
+    });
+
+    // ---- Download ----
+    async function buildOutputBlob() {
+      const useImg = processedImageData || originalImageData;
+      let targetW = useImg.width, targetH = useImg.height;
+      if (resizeChk.checked) {
+        targetW = Math.max(1, parseInt(rwPx.value, 10) || useImg.width);
+        targetH = Math.max(1, parseInt(rhPx.value, 10) || useImg.height);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW; canvas.height = targetH;
+      const cx = canvas.getContext('2d');
+      // Put processed image to a full-size canvas, then draw resized
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = useImg.width; srcCanvas.height = useImg.height;
+      srcCanvas.getContext('2d').putImageData(useImg, 0, 0);
+      cx.imageSmoothingEnabled = true;
+      cx.imageSmoothingQuality = 'high';
+      cx.drawImage(srcCanvas, 0, 0, targetW, targetH);
+
+      // Transparent background via @imgly/background-removal
+      if (document.getElementById('transparentBg').checked) {
+        dlStatus.innerHTML = `<div class="progress-wrap"><div class="progress-label"><span>背景を解析中...</span><span></span></div><div class="progress-bar"><span id="bgBar" style="width:10%"></span></div></div>`;
+        const bgBlob = await new Promise(r => canvas.toBlob(r, 'image/png', 1.0));
+        const { removeBackground } = await import('https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.5.5/+esm');
+        const cleaned = await removeBackground(bgBlob, {
+          progress: (key, cur, tot) => {
+            const bar = document.getElementById('bgBar');
+            if (bar && tot) bar.style.width = Math.min(100, Math.round(cur / tot * 100)) + '%';
+          },
+          output: { format: 'image/png', quality: 1.0 },
+        });
+        dlStatus.innerHTML = '';
+        return { blob: cleaned, ext: 'png' };
+      }
+
+      let fmt = fmtEl.value;
+      if (fmt === 'auto') {
+        const origType = (originalFile && originalFile.type) || '';
+        if (origType.includes('png')) fmt = 'png';
+        else if (origType.includes('webp')) fmt = 'webp';
+        else fmt = 'jpeg';
+      }
+      const mime = fmt === 'png' ? 'image/png' : (fmt === 'webp' ? 'image/webp' : 'image/jpeg');
+      const ext = fmt === 'jpeg' ? 'jpg' : fmt;
+      const quality = fmt === 'png' ? undefined : 0.95;
+      const blob = await new Promise(r => canvas.toBlob(r, mime, quality));
+      return { blob, ext };
+    }
+
+    dlBtn.addEventListener('click', async () => {
+      dlBtn.disabled = true;
+      const orig = dlBtn.textContent;
+      dlBtn.textContent = '生成中...';
+      dlStatus.innerHTML = '';
+      try {
+        const { blob, ext } = await buildOutputBlob();
+        const base = safeFilename(fnameEl.value, 'clean');
+        downloadBlob(blob, base + '.' + ext);
+        dlStatus.innerHTML = `<div class="alert success">✅ ${fmtSize(blob.size)} でダウンロードしました</div>`;
+      } catch (e) {
+        dlStatus.innerHTML = `<div class="alert error">失敗: ${e.message || e}</div>`;
+      } finally {
+        dlBtn.disabled = false;
+        dlBtn.textContent = orig;
+      }
+    });
+  </script>
+</body>
+</html>
