@@ -337,8 +337,56 @@
       font-size: 1rem;
     }
     .btn-stop {
-      background: #fff; color: #0f172a; border: 1px solid #cbd5e1;
-      width: 100%; min-height: 56px; font-size: 1rem;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: white;
+      border: none;
+      width: 100%;
+      min-height: 60px;
+      font-size: 1.05rem;
+      box-shadow: 0 4px 14px rgba(239,68,68,0.3);
+      letter-spacing: 0.01em;
+    }
+    .stop-confirm {
+      display: none;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-top: 0.2rem;
+    }
+    .stop-confirm.active { display: flex; }
+    .stop-confirm .q {
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: #fde68a;
+      margin-bottom: 0.15rem;
+    }
+    .stop-confirm .sub {
+      font-size: 0.76rem;
+      color: rgba(255,255,255,0.6);
+      margin-bottom: 0.5rem;
+    }
+    .stop-confirm .row {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .stop-confirm .row button { flex: 1; min-height: 56px; font-size: 0.98rem; font-weight: 700; }
+    .btn-cancel {
+      background: rgba(255,255,255,0.12);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.25);
+    }
+    .btn-confirm-stop {
+      background: linear-gradient(135deg, #ef4444, #b91c1c);
+      color: white;
+      border: none;
+      box-shadow: 0 4px 14px rgba(239,68,68,0.4);
+    }
+    .countdown {
+      display: inline-block;
+      min-width: 1.4em;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+      margin-left: 0.35rem;
+      opacity: 0.8;
     }
     .btn-primary {
       background: linear-gradient(135deg, #0ea5e9, #06b6d4);
@@ -424,7 +472,15 @@
       <div class="live-transcript hidden" id="liveTranscript"><div class="empty">ここに発言がリアルタイムに表示されます…</div></div>
       <div style="margin-top:0.75rem;">
         <button class="btn btn-rec" id="recBtn">🎙️ 録音開始</button>
-        <button class="btn btn-stop hidden" id="stopBtn">■ 停止</button>
+        <button class="btn btn-stop hidden" id="stopBtn">⏹  録音を停止</button>
+        <div class="stop-confirm" id="stopConfirm">
+          <div class="q">⚠️ 本当に録音を停止しますか?</div>
+          <div class="sub">まだ録音は続いています。キャンセルすればそのまま継続できます。<span id="cdHint"></span></div>
+          <div class="row">
+            <button class="btn btn-cancel" id="cancelStopBtn">✕ キャンセル (録音継続)</button>
+            <button class="btn btn-confirm-stop" id="confirmStopBtn">⏹ 停止する</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1241,8 +1297,44 @@
       }
     });
 
+    // ---- Stop with confirmation (keeps recording while asking) ----
+    const stopConfirm = document.getElementById('stopConfirm');
+    const cancelStopBtn = document.getElementById('cancelStopBtn');
+    const confirmStopBtn = document.getElementById('confirmStopBtn');
+    const cdHint = document.getElementById('cdHint');
+    const CONFIRM_SECONDS = 15;
+    let confirmTimer = 0;
+    let confirmCountdown = 0;
+
+    function showStopConfirm() {
+      stopBtn.classList.add('hidden');
+      stopConfirm.classList.add('active');
+      confirmCountdown = CONFIRM_SECONDS;
+      cdHint.textContent = ` (${confirmCountdown}秒後に自動キャンセル)`;
+      clearInterval(confirmTimer);
+      confirmTimer = setInterval(() => {
+        confirmCountdown--;
+        cdHint.textContent = ` (${Math.max(0, confirmCountdown)}秒後に自動キャンセル)`;
+        if (confirmCountdown <= 0) hideStopConfirm();
+      }, 1000);
+    }
+    function hideStopConfirm() {
+      clearInterval(confirmTimer);
+      confirmTimer = 0;
+      stopConfirm.classList.remove('active');
+      // Only show the stop button again if we are still recording
+      if (recorder && recorder.state === 'recording') {
+        stopBtn.classList.remove('hidden');
+      }
+    }
+
     recBtn.addEventListener('click', startRecording);
-    stopBtn.addEventListener('click', stopRecording);
+    stopBtn.addEventListener('click', showStopConfirm);
+    cancelStopBtn.addEventListener('click', hideStopConfirm);
+    confirmStopBtn.addEventListener('click', () => {
+      hideStopConfirm();
+      stopRecording();
+    });
   </script>
 </body>
 </html>
