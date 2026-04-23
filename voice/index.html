@@ -1235,6 +1235,19 @@
       }
     })();
 
+    // ---- Sentence-ending punctuation ----
+    // Speech recognition often drops periods. End each utterance with 。
+    // unless it already has terminal punctuation.
+    function finishSentence(s) {
+      if (!s) return '';
+      let t = s.trim();
+      // Strip whitespace and dangling 、 at the tail (息継ぎマーク止まり防止)
+      t = t.replace(/[、,\s]+$/, '');
+      if (!t) return '';
+      if (!/[。．.!?！？」』…]$/.test(t)) t += '。';
+      return t;
+    }
+
     // ---- Filler removal ----
     // Strip obvious hesitation fillers while keeping real words intact.
     // Targets clearly-filler patterns (long vowels, 「えっと」「あのー」等).
@@ -1297,10 +1310,15 @@
 
       const turns = buildTurns();
       // Join all parts of a turn with a space (for clean/timestamped) or a newline (for dialog)
+      // Each utterance part: filler strip → sentence-terminate
+      const buildParts = (parts) => parts
+        .map(p => finishSentence(xform(p.text)))
+        .filter(Boolean);
+
       if (format === 'timestamped') {
         const body = turns.map(t => {
           const name = speakers[t.speaker] || '話者?';
-          const text = xform(t.parts.map(p => p.text).join(' '));
+          const text = buildParts(t.parts).join('');
           return text ? `[${fmtHMS(t.parts[0].t)}] ${name}: ${text}` : '';
         }).filter(Boolean).join('\n\n');
         return header + body + '\n';
@@ -1308,7 +1326,7 @@
       if (format === 'dialog') {
         const body = turns.map(t => {
           const name = speakers[t.speaker] || '話者?';
-          const text = xform(t.parts.map(p => p.text).join('\n'));
+          const text = buildParts(t.parts).join('\n');
           return text ? `${name}:\n${text}` : '';
         }).filter(Boolean).join('\n\n');
         return header + body + '\n';
@@ -1316,7 +1334,7 @@
       // clean (default): speaker name only when it changes
       const body = turns.map(t => {
         const name = speakers[t.speaker] || '話者?';
-        const text = xform(t.parts.map(p => p.text).join(' '));
+        const text = buildParts(t.parts).join('');
         return text ? `${name}: ${text}` : '';
       }).filter(Boolean).join('\n\n');
       return header + body + '\n';
