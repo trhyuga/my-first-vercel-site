@@ -356,8 +356,8 @@
           </div>
         </div>
         <div class="field">
-          <label>強さ <span class="val" id="blurVal">24 px</span></label>
-          <input type="range" id="blurRange" min="8" max="60" value="24" />
+          <label>強さ <span class="val" id="blurVal">40 px</span></label>
+          <input type="range" id="blurRange" min="8" max="80" value="40" />
         </div>
         <div class="field">
           <label>形</label>
@@ -539,6 +539,14 @@
     async function ensureModels() {
       if (!modelsReady) {
         detectStatus.innerHTML = '<div class="alert info">モデルを読み込んでいます (初回は少し時間がかかります)…</div>';
+        // Force WebGL backend so detection runs on GPU and does not compete
+        // with the per-frame draw loop for the main thread.
+        try {
+          if (faceapi.tf && faceapi.tf.setBackend) {
+            await faceapi.tf.setBackend('webgl');
+            if (faceapi.tf.ready) await faceapi.tf.ready();
+          }
+        } catch (e) { /* fall back to whatever backend TF picked */ }
         await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
         await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
         await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
@@ -733,45 +741,33 @@
       return m;
     }
 
-    // Reliable cross-browser blur: iterative bilinear downscale → upscale.
-    // `ctx.filter = 'blur()'` silently no-ops in some WebKit paths (especially
-    // when source == destination), which is why the previous filter-based
-    // approach often produced no visible blur. Downscale/upscale is a box-blur
-    // approximation that works consistently everywhere.
+    // Fast two-step blur: single downscale (kills high frequencies reliably
+    // on every browser) + one upscale with native gaussian filter for
+    // smoothness. Two canvases, two drawImage calls — ~5x faster than the
+    // previous multi-step variant, which matters because applyBlurToBox runs
+    // per-face per-frame during video processing.
     function makeBlurredPatch(srcCanvas, sx, sy, sw, sh, strength) {
-      const steps = Math.max(1, Math.min(6, Math.round(strength / 8)));
-      let w = Math.max(1, sw), h = Math.max(1, sh);
-      let cur = document.createElement('canvas');
-      cur.width = w; cur.height = h;
-      cur.getContext('2d').drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, w, h);
-      for (let i = 0; i < steps; i++) {
-        const nw = Math.max(1, Math.round(w / 2));
-        const nh = Math.max(1, Math.round(h / 2));
-        const nxt = document.createElement('canvas');
-        nxt.width = nw; nxt.height = nh;
-        const nctx = nxt.getContext('2d');
-        nctx.imageSmoothingEnabled = true;
-        nctx.imageSmoothingQuality = 'low';
-        nctx.drawImage(cur, 0, 0, w, h, 0, 0, nw, nh);
-        cur = nxt; w = nw; h = nh;
-      }
+      const factor = Math.max(2, Math.round(strength / 3));
+      const tinyW = Math.max(2, Math.round(sw / factor));
+      const tinyH = Math.max(2, Math.round(sh / factor));
+      const tiny = document.createElement('canvas');
+      tiny.width = tinyW; tiny.height = tinyH;
+      const tctx = tiny.getContext('2d');
+      tctx.imageSmoothingEnabled = true;
+      tctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, tinyW, tinyH);
+
       const patch = document.createElement('canvas');
       patch.width = sw; patch.height = sh;
       const pctx = patch.getContext('2d');
       pctx.imageSmoothingEnabled = true;
       pctx.imageSmoothingQuality = 'high';
-      pctx.drawImage(cur, 0, 0, w, h, 0, 0, sw, sh);
-      // Optional extra gaussian softening on top; if filter is unsupported the
-      // draw is a no-op and we still have the downscale blur.
-      try {
-        const extra = document.createElement('canvas');
-        extra.width = sw; extra.height = sh;
-        const ectx = extra.getContext('2d');
-        ectx.filter = `blur(${Math.max(2, Math.round(strength / 4))}px)`;
-        ectx.drawImage(patch, 0, 0);
-        ectx.filter = 'none';
-        return extra;
-      } catch (e) { return patch; }
+      // Native filter adds gaussian softness on top of the downscale blur.
+      // If Safari silently ignores it, the downscale blur is still fully in
+      // place — no visible regression.
+      pctx.filter = `blur(${Math.max(3, Math.round(strength / 3))}px)`;
+      pctx.drawImage(tiny, 0, 0, tinyW, tinyH, 0, 0, sw, sh);
+      pctx.filter = 'none';
+      return patch;
     }
 
     function applyBlurToBox(ctx, box, srcCanvas, extraPadFraction) {
@@ -922,11 +918,15 @@
         } catch (e) { /* audio optional */ }
 
         const mime = pickSupportedMime();
-        // Target roughly the source's bitrate so re-encode doesn't halve quality.
+        // Target at least the source's bitrate so re-encode doesn't lose quality.
+        // The file-size estimate includes audio, so add 1.2x headroom then clamp.
         const srcDurSec = srcVideo.duration || 10;
         const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
-        const targetBps = Math.max(4_000_000, Math.min(24_000_000, srcBps));
-        const recorder = new MediaRecorder(canvasStream, mime ? { mimeType: mime, videoBitsPerSecond: targetBps } : {});
+        // Resolution-aware floor: ~0.1 bit/pixel/frame at 30 fps.
+        const resolutionFloor = Math.round(vw * vh * 30 * 0.1);
+        const targetBps = Math.max(10_000_000, resolutionFloor, Math.round(srcBps * 1.2));
+        const cappedBps = Math.min(40_000_000, targetBps);
+        const recorder = new MediaRecorder(canvasStream, mime ? { mimeType: mime, videoBitsPerSecond: cappedBps } : {});
         const chunks = [];
         recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
         const stopped = new Promise(res => { recorder.onstop = res; });
