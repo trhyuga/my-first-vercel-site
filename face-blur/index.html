@@ -806,8 +806,71 @@
         startBtn.textContent = origText;
       }
     });
-    // placeholder until Step 5
-    window.renderSaveButtons = () => {};
+    // ---- Smart save (share sheet / save picker / anchor fallback) ----
+    const hasShare = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
+    const hasFSSave = typeof window.showSaveFilePicker === 'function';
+    function canShareFile(file) {
+      try { return hasShare && navigator.canShare({ files: [file] }); } catch (e) { return false; }
+    }
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    }
+    async function smartSave(blob, filename) {
+      const mime = blob.type || 'application/octet-stream';
+      if (hasShare) {
+        const file = new File([blob], filename, { type: mime });
+        if (canShareFile(file)) {
+          try { await navigator.share({ files: [file] }); return { ok: true, text: '共有シートで選んだ場所に保存しました' }; }
+          catch (e) { if (e && e.name === 'AbortError') return { ok: false, text: 'キャンセルしました' }; }
+        }
+      }
+      if (hasFSSave) {
+        try {
+          const extMatch = filename.match(/\.[^.]+$/);
+          const ext = extMatch ? extMatch[0] : '';
+          const handle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: ext ? [{ description: ext.slice(1).toUpperCase(), accept: { [mime]: [ext] } }] : [],
+          });
+          const w = await handle.createWritable();
+          await w.write(blob); await w.close();
+          return { ok: true, text: '選択した場所に保存しました' };
+        } catch (e) { if (e && e.name === 'AbortError') return { ok: false, text: 'キャンセルしました' }; }
+      }
+      downloadBlob(blob, filename);
+      return { ok: true, text: 'ブラウザの「ダウンロード」フォルダに保存しました' };
+    }
+
+    window.renderSaveButtons = function () {
+      const actions = document.getElementById('postActions');
+      if (!actions) return;
+      actions.innerHTML = `
+        <button class="btn btn-primary" id="saveBtn">💾 保存先を選んで保存</button>
+        <button class="btn btn-secondary" id="redoBtn">🔁 設定を変えて再処理</button>
+      `;
+      document.getElementById('saveBtn').addEventListener('click', async () => {
+        if (!window._blurredBlob) return;
+        const base = safeFilename(outName.value, 'blurred');
+        const res = await smartSave(window._blurredBlob, base + '.' + (window._blurredExt || 'webm'));
+        processStatus.insertAdjacentHTML('beforeend',
+          `<div class="alert ${res.ok ? 'success' : 'info'}" style="margin-top:0.5rem;">${res.text}</div>`);
+      });
+      document.getElementById('redoBtn').addEventListener('click', () => {
+        processStatus.innerHTML = '';
+        window._blurredBlob = null;
+      });
+      const hint = hasShare
+        ? '📱 共有シートから「<b>ビデオを保存</b>」=<b>写真</b>アプリ、「<b>"ファイル"に保存</b>」=<b>iCloud / この端末</b>を選べます。'
+        : hasFSSave
+          ? '💻 保存先ダイアログが開くので任意のフォルダを選べます。'
+          : 'ℹ️ ブラウザの「ダウンロード」フォルダに保存されます。';
+      processStatus.insertAdjacentHTML('beforeend', `<div class="alert info" style="font-size:0.78rem;margin-top:0.4rem;">${hint}</div>`);
+    };
   </script>
 </body>
 </html>
