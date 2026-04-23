@@ -150,6 +150,28 @@
     .rec-state.live .dot { background: #ef4444; animation: blink 1s infinite; }
     @keyframes blink { 50% { opacity: 0.25; } }
 
+    .wave-wrap {
+      position: relative;
+      height: 72px;
+      margin: 0.5rem 0 1rem;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.04);
+      overflow: hidden;
+    }
+    .wave-wrap canvas { width: 100%; height: 100%; display: block; }
+    .level-bar {
+      margin-top: 0.35rem;
+      height: 4px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .level-bar > span {
+      display: block; height: 100%; width: 0%;
+      background: linear-gradient(90deg, #22c55e, #eab308, #ef4444);
+      transition: width 0.08s linear;
+    }
+
     button.btn {
       border: none;
       border-radius: 11px;
@@ -254,8 +276,12 @@
     <div class="record-area" id="recordArea">
       <div class="rec-state" id="recState"><span class="dot"></span><span id="recStateText">待機中</span></div>
       <div class="timer" id="timer">00:00:00</div>
-      <button class="btn btn-rec" id="recBtn">🎙️ 録音開始</button>
-      <button class="btn btn-stop hidden" id="stopBtn">■ 停止</button>
+      <div class="wave-wrap"><canvas id="wave"></canvas></div>
+      <div class="level-bar"><span id="levelFill"></span></div>
+      <div style="margin-top:0.75rem;">
+        <button class="btn btn-rec" id="recBtn">🎙️ 録音開始</button>
+        <button class="btn btn-stop hidden" id="stopBtn">■ 停止</button>
+      </div>
     </div>
 
     <p class="alert info" style="margin-top:1rem;">
@@ -338,6 +364,70 @@
     let timerHandle = null;
     let recordedBlob = null;
     let recordedMime = '';
+    let audioCtx = null;
+    let analyser = null;
+    let sourceNode = null;
+    let waveRaf = 0;
+
+    // ---- Waveform / level meter ----
+    const waveCanvas = document.getElementById('wave');
+    const waveCtx = waveCanvas.getContext('2d');
+    const levelFill = document.getElementById('levelFill');
+    function resizeWave() {
+      const r = waveCanvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      waveCanvas.width = Math.max(64, Math.floor(r.width * dpr));
+      waveCanvas.height = Math.max(32, Math.floor(r.height * dpr));
+    }
+    window.addEventListener('resize', resizeWave);
+    resizeWave();
+
+    function startWaveLoop() {
+      if (!analyser) return;
+      const data = new Uint8Array(analyser.fftSize);
+      const levelBuf = new Float32Array(6);
+      let levelIdx = 0;
+      const draw = () => {
+        analyser.getByteTimeDomainData(data);
+        const W = waveCanvas.width, H = waveCanvas.height;
+        waveCtx.clearRect(0, 0, W, H);
+        // grid
+        waveCtx.strokeStyle = 'rgba(255,255,255,0.08)';
+        waveCtx.lineWidth = 1;
+        waveCtx.beginPath();
+        waveCtx.moveTo(0, H / 2);
+        waveCtx.lineTo(W, H / 2);
+        waveCtx.stroke();
+        // waveform
+        waveCtx.strokeStyle = '#38bdf8';
+        waveCtx.lineWidth = 2 * (window.devicePixelRatio || 1);
+        waveCtx.beginPath();
+        const step = data.length / W;
+        let peak = 0;
+        for (let x = 0; x < W; x++) {
+          const i = Math.floor(x * step);
+          const v = (data[i] - 128) / 128;
+          if (Math.abs(v) > peak) peak = Math.abs(v);
+          const y = H / 2 + v * (H / 2 - 4);
+          if (x === 0) waveCtx.moveTo(x, y);
+          else waveCtx.lineTo(x, y);
+        }
+        waveCtx.stroke();
+        // level meter (smoothed peak)
+        levelBuf[levelIdx++ % levelBuf.length] = peak;
+        let avg = 0; for (const v of levelBuf) avg += v; avg /= levelBuf.length;
+        levelFill.style.width = Math.min(100, Math.round(avg * 140)) + '%';
+        waveRaf = requestAnimationFrame(draw);
+      };
+      draw();
+    }
+    function stopWaveLoop() {
+      if (waveRaf) cancelAnimationFrame(waveRaf);
+      waveRaf = 0;
+      const W = waveCanvas.width, H = waveCanvas.height;
+      waveCtx.clearRect(0, 0, W, H);
+      levelFill.style.width = '0%';
+    }
 
     function updateTimer() {
       const sec = (performance.now() - startedAt) / 1000;
@@ -385,6 +475,18 @@
       recStateText.textContent = '録音中';
       recBtn.classList.add('hidden');
       stopBtn.classList.remove('hidden');
+
+      // audio analyser for waveform
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.6;
+        sourceNode.connect(analyser);
+        resizeWave();
+        startWaveLoop();
+      } catch (e) { /* waveform is optional */ }
     }
 
     function stopRecording() {
@@ -392,6 +494,9 @@
       try { recorder.stop(); } catch (e) {}
       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
       if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+      stopWaveLoop();
+      if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+      analyser = null; sourceNode = null;
     }
 
     function onRecordingStopped() {
