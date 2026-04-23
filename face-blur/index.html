@@ -307,10 +307,10 @@
     </section>
 
     <div class="dropzone" id="dz">
-      <input type="file" id="fi" accept="video/*" hidden />
+      <input type="file" id="fi" accept="video/*,image/*" hidden />
       <div class="icon">🎬</div>
-      <div class="t">タップして動画を選択</div>
-      <div class="d">MP4 / MOV / WebM などブラウザが再生できる動画形式<br>長い動画ほど処理に時間がかかります (目安: 実時間の1〜2倍)</div>
+      <div class="t">タップして動画または写真を選択</div>
+      <div class="d">動画: MP4 / MOV / WebM・写真: JPG / PNG / WebP / HEIC など<br>動画は実時間の1〜2倍、写真は数秒で処理</div>
     </div>
 
     <div id="workArea" class="hidden">
@@ -318,6 +318,7 @@
         <h2>プレビュー</h2>
         <div class="video-stage">
           <video id="srcVideo" controls playsinline muted preload="metadata"></video>
+          <img id="srcImage" alt="" style="display:none;max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;" />
           <canvas class="overlay-canvas" id="overlay"></canvas>
           <div class="face-layer" id="faceLayer"></div>
         </div>
@@ -326,11 +327,19 @@
 
       <div class="panel">
         <h2>ぼかす人を指定</h2>
-        <p style="font-size:0.82rem;color:#475569;line-height:1.6;margin-bottom:0.6rem;">
+        <p style="font-size:0.82rem;color:#475569;line-height:1.6;margin-bottom:0.6rem;" id="detectHint">
           動画を <b>ぼかしたい人が写っているシーン</b> で一時停止してから「顔を検出」をタップ。検出された顔をタップで選択できます。
         </p>
-        <div class="btn-row" style="margin-top:0;">
-          <button class="btn btn-secondary" id="detectBtn">🔍 この画面で顔を検出</button>
+        <div class="field" style="margin-top:0;">
+          <label>検出の感度</label>
+          <div class="mode-row">
+            <div class="mode-chip" data-sens="fast">🏃 速い<span class="sub">正面の顔・軽量</span></div>
+            <div class="mode-chip active" data-sens="balanced">⚖️ 標準<span class="sub">ふつう</span></div>
+            <div class="mode-chip" data-sens="sensitive">🔍 細かく検出<span class="sub">横顔・小さい顔も拾う</span></div>
+          </div>
+        </div>
+        <div class="btn-row" style="margin-top:0.6rem;">
+          <button class="btn btn-secondary" id="detectBtn">🔍 顔を検出</button>
           <button class="btn btn-secondary hidden" id="clearSelBtn">選択を解除</button>
         </div>
         <div id="detectStatus"></div>
@@ -404,8 +413,15 @@
     const fi = document.getElementById('fi');
     const workArea = document.getElementById('workArea');
     const srcVideo = document.getElementById('srcVideo');
+    const srcImage = document.getElementById('srcImage');
     const overlay = document.getElementById('overlay');
     const videoMeta = document.getElementById('videoMeta');
+
+    // ---- Media kind abstraction ----
+    let mediaKind = 'video'; // 'video' | 'image'
+    function mediaElement() { return mediaKind === 'image' ? srcImage : srcVideo; }
+    function mediaWidth() { return mediaKind === 'image' ? srcImage.naturalWidth : srcVideo.videoWidth; }
+    function mediaHeight() { return mediaKind === 'image' ? srcImage.naturalHeight : srcVideo.videoHeight; }
 
     function bindDropzone(zone, input, onFiles) {
       zone.addEventListener('click', () => input.click());
@@ -422,35 +438,78 @@
       });
     }
 
+    async function loadMedia(file) {
+      if (file.type.startsWith('video/')) return loadVideo(file);
+      if (file.type.startsWith('image/')) return loadImage(file);
+      alert('動画または画像ファイルを選択してください');
+    }
+
     async function loadVideo(file) {
-      if (!file.type.startsWith('video/')) {
-        alert('動画ファイルを選択してください'); return;
-      }
+      mediaKind = 'video';
+      srcImage.style.display = 'none';
+      srcVideo.style.display = '';
       srcVideo.src = URL.createObjectURL(file);
       dz.classList.add('hidden');
       workArea.classList.remove('hidden');
       await new Promise(res => { srcVideo.onloadedmetadata = res; });
-      // Size the overlay canvas to the video's intrinsic dimensions
       overlay.width = srcVideo.videoWidth;
       overlay.height = srcVideo.videoHeight;
       videoMeta.innerHTML = `
+        <span>🎬 動画</span>
         <span>📐 ${srcVideo.videoWidth} × ${srcVideo.videoHeight}</span>
         <span>⏱ ${fmtDur(srcVideo.duration)}</span>
         <span>💾 ${fmtSize(file.size)}</span>
         <span>📄 ${file.name}</span>
       `;
+      // Show detection hint for video
+      const hint = document.getElementById('detectHint');
+      if (hint) hint.innerHTML = '動画を <b>ぼかしたい人が写っているシーン</b> で一時停止してから「顔を検出」をタップ。検出された顔をタップで選択できます。';
+      const startBtnEl = document.getElementById('startBtn');
+      if (startBtnEl) startBtnEl.textContent = '🎬 処理を開始';
     }
 
-    bindDropzone(dz, fi, (files) => loadVideo(files[0]));
+    async function loadImage(file) {
+      mediaKind = 'image';
+      srcVideo.pause();
+      srcVideo.style.display = 'none';
+      srcImage.style.display = '';
+      srcImage.src = URL.createObjectURL(file);
+      dz.classList.add('hidden');
+      workArea.classList.remove('hidden');
+      await new Promise((res, rej) => {
+        srcImage.onload = res;
+        srcImage.onerror = rej;
+      });
+      overlay.width = srcImage.naturalWidth;
+      overlay.height = srcImage.naturalHeight;
+      videoMeta.innerHTML = `
+        <span>🖼️ 写真</span>
+        <span>📐 ${srcImage.naturalWidth} × ${srcImage.naturalHeight}</span>
+        <span>💾 ${fmtSize(file.size)}</span>
+        <span>📄 ${file.name}</span>
+      `;
+      const hint = document.getElementById('detectHint');
+      if (hint) hint.innerHTML = '「顔を検出」をタップで写真に写っている顔を抽出します。検出された顔をタップで選択できます。';
+      const startBtnEl = document.getElementById('startBtn');
+      if (startBtnEl) startBtnEl.textContent = '🖼️ ぼかして保存';
+    }
+
+    bindDropzone(dz, fi, (files) => loadMedia(files[0]));
 
     document.getElementById('resetBtn').addEventListener('click', () => {
       srcVideo.pause();
       srcVideo.removeAttribute('src'); srcVideo.load();
+      srcImage.removeAttribute('src');
+      srcVideo.style.display = '';
+      srcImage.style.display = 'none';
       workArea.classList.add('hidden');
       dz.classList.remove('hidden');
       clearFaces();
       selectedDescriptors.length = 0;
       updateSelBtn();
+      processStatus.innerHTML = '';
+      detectStatus.innerHTML = '';
+      window._blurredBlob = null;
     });
 
     // ---- Face detection ----
@@ -461,18 +520,43 @@
     const detectStatus = document.getElementById('detectStatus');
 
     let modelsReady = false;
+    let ssdLoaded = false;
     let detectedFaces = []; // {box, descriptor, selected, el}
     const selectedDescriptors = []; // Float32Array[]
+    let sensitivity = 'balanced'; // 'fast' | 'balanced' | 'sensitive'
 
     async function ensureModels() {
-      if (modelsReady) return;
-      detectStatus.innerHTML = '<div class="alert info">モデルを読み込んでいます (初回は少し時間がかかります)…</div>';
-      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-      await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-      modelsReady = true;
-      detectStatus.innerHTML = '';
+      if (!modelsReady) {
+        detectStatus.innerHTML = '<div class="alert info">モデルを読み込んでいます (初回は少し時間がかかります)…</div>';
+        await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+        await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+        modelsReady = true;
+        detectStatus.innerHTML = '';
+      }
+      if (sensitivity === 'sensitive' && !ssdLoaded) {
+        detectStatus.innerHTML = '<div class="alert info">高精度モデル (SSD) を読み込み中…</div>';
+        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+        ssdLoaded = true;
+        detectStatus.innerHTML = '';
+      }
     }
+
+    function detectorOptions() {
+      if (sensitivity === 'sensitive' && ssdLoaded) {
+        return new faceapi.SsdMobilenetv1Options({ minConfidence: 0.2, maxResults: 200 });
+      }
+      if (sensitivity === 'fast') {
+        return new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.55 });
+      }
+      // balanced
+      return new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.35 });
+    }
+
+    document.querySelectorAll('.mode-chip[data-sens]').forEach(chip => chip.addEventListener('click', () => {
+      sensitivity = chip.dataset.sens;
+      document.querySelectorAll('.mode-chip[data-sens]').forEach(c => c.classList.toggle('active', c === chip));
+    }));
 
     function clearFaces() {
       faceLayer.innerHTML = '';
@@ -481,7 +565,7 @@
 
     function renderFaceBoxes() {
       faceLayer.innerHTML = '';
-      const vw = srcVideo.videoWidth, vh = srcVideo.videoHeight;
+      const vw = mediaWidth(), vh = mediaHeight();
       if (!vw || !vh) return;
       detectedFaces.forEach((f, i) => {
         const el = document.createElement('div');
@@ -524,15 +608,15 @@
     }
 
     detectBtn.addEventListener('click', async () => {
-      if (!srcVideo.videoWidth) return;
+      if (!mediaWidth()) return;
       detectBtn.disabled = true;
       const origText = detectBtn.textContent;
       detectBtn.textContent = '検出中...';
       try {
-        srcVideo.pause();
+        if (mediaKind === 'video') srcVideo.pause();
         await ensureModels();
-        const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.4 });
-        const results = await faceapi.detectAllFaces(srcVideo, opts)
+        const opts = detectorOptions();
+        const results = await faceapi.detectAllFaces(mediaElement(), opts)
           .withFaceLandmarks()
           .withFaceDescriptors();
         detectedFaces = results.map(r => ({
@@ -567,9 +651,9 @@
       updateStartBtn && updateStartBtn();
     });
 
-    // Clear detected boxes when seeking (they belong to a single frame)
-    srcVideo.addEventListener('seeking', clearFaces);
-    srcVideo.addEventListener('play', clearFaces);
+    // Clear detected boxes when seeking (video only — they belong to a single frame)
+    srcVideo.addEventListener('seeking', () => { if (mediaKind === 'video') clearFaces(); });
+    srcVideo.addEventListener('play', () => { if (mediaKind === 'video') clearFaces(); });
 
     // ---- Mode / shape / strength ----
     let blurMode = 'selected';  // 'selected' | 'others' | 'all'
@@ -698,13 +782,61 @@
       `;
     }
 
+    async function processImage() {
+      const vw = srcImage.naturalWidth, vh = srcImage.naturalHeight;
+      const out = document.createElement('canvas');
+      out.width = vw; out.height = vh;
+      const outCtx = out.getContext('2d', { willReadFrequently: true });
+      outCtx.drawImage(srcImage, 0, 0, vw, vh);
+
+      processProgress(30, '顔を検出中…');
+      let toBlur = [];
+      try {
+        if (blurMode === 'all') {
+          const dets = await faceapi.detectAllFaces(srcImage, detectorOptions());
+          toBlur = dets.map(d => ({ box: d.box }));
+        } else {
+          const dets = await faceapi.detectAllFaces(srcImage, detectorOptions())
+            .withFaceLandmarks().withFaceDescriptors();
+          for (const d of dets) {
+            const dist = selectedDescriptors.length ? minDistanceToSelected(d.descriptor) : Infinity;
+            const matched = dist < MATCH_THRESHOLD;
+            if (blurMode === 'selected' && matched) toBlur.push({ box: d.detection.box });
+            if (blurMode === 'others' && !matched) toBlur.push({ box: d.detection.box });
+          }
+        }
+      } catch (e) { /* ignore, may mean zero faces */ }
+
+      processProgress(70, `${toBlur.length}箇所をぼかし中…`);
+      for (const m of toBlur) applyBlurToBox(outCtx, m.box, out);
+
+      processProgress(90, '画像を生成中…');
+      const srcType = (fi.files && fi.files[0] && fi.files[0].type) || 'image/png';
+      const isPng = /\.(png)$/i.test(fi.files && fi.files[0] ? fi.files[0].name : '') || /png/i.test(srcType);
+      const mime = isPng ? 'image/png' : 'image/jpeg';
+      const ext = isPng ? 'png' : 'jpg';
+      const q = isPng ? undefined : 0.92;
+      const blob = await new Promise(r => out.toBlob(r, mime, q));
+      processProgress(100, '✅ 完了');
+      window._blurredExt = ext;
+      window._blurredBlob = blob;
+      processStatus.insertAdjacentHTML('beforeend', `
+        <div class="alert success" style="margin-top:0.5rem;">
+          ${toBlur.length}箇所をぼかしました・${fmtSize(blob.size)}・${ext.toUpperCase()}
+        </div>
+        <div class="btn-row" id="postActions"></div>
+      `);
+      renderSaveButtons && renderSaveButtons();
+    }
+
     startBtn.addEventListener('click', async () => {
-      if (!srcVideo.videoWidth) return;
+      if (!mediaWidth()) return;
       startBtn.disabled = true;
       const origText = startBtn.textContent;
       startBtn.textContent = '準備中…';
       try {
         await ensureModels();
+        if (mediaKind === 'image') { await processImage(); return; }
         const vw = srcVideo.videoWidth, vh = srcVideo.videoHeight;
         const out = document.createElement('canvas');
         out.width = vw; out.height = vh;
@@ -725,8 +857,8 @@
         recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
         const stopped = new Promise(res => { recorder.onstop = res; });
 
-        // Scene-independent detector options
-        const detOpts = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.35 });
+        // Detector options follow the sensitivity chip
+        const detOpts = detectorOptions();
 
         srcVideo.pause();
         srcVideo.currentTime = 0;
