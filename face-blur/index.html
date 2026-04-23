@@ -937,36 +937,31 @@
 
         const mime = pickSupportedMime();
         // Target at least the source's bitrate so re-encode doesn't lose quality.
-        // The file-size estimate includes audio, so add 1.2x headroom then clamp.
+        // The file-size estimate includes audio, so add 1.3x headroom then clamp.
         const srcDurSec = srcVideo.duration || 10;
         const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
-        // Resolution-aware floor: ~0.1 bit/pixel/frame at 30 fps.
-        const resolutionFloor = Math.round(vw * vh * 30 * 0.1);
-        const targetBps = Math.max(10_000_000, resolutionFloor, Math.round(srcBps * 1.2));
-        const cappedBps = Math.min(40_000_000, targetBps);
+        // Resolution-aware floor: ~0.15 bit/pixel/frame at 30 fps.
+        const resolutionFloor = Math.round(vw * vh * 30 * 0.15);
+        const targetBps = Math.max(15_000_000, resolutionFloor, Math.round(srcBps * 1.3));
+        const cappedBps = Math.min(50_000_000, targetBps);
         const recorder = new MediaRecorder(canvasStream, mime ? { mimeType: mime, videoBitsPerSecond: cappedBps } : {});
         const chunks = [];
         recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
         const stopped = new Promise(res => { recorder.onstop = res; });
 
-        // Auto-upgrade detector to SSD (sensitive) during video processing —
-        // it's noticeably better at profiles / close-ups where Tiny misses.
-        if (!ssdLoaded) {
-          processProgress(0, '高精度モデル (SSD) を読み込み中…');
-          try { await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL); ssdLoaded = true; }
-          catch (e) { /* keep whatever is loaded */ }
-        }
-        const detOpts = ssdLoaded
-          ? new faceapi.SsdMobilenetv1Options({ minConfidence: 0.2, maxResults: 200 })
-          : detectorOptions();
+        // Respect the sensitivity chip; do NOT force SSD (slower) during video.
+        const detOpts = detectorOptions();
 
         // Keep detection OFF the per-frame draw path so MediaRecorder never
         // starves. Detection runs async; when a new result arrives, update the
-        // box list. If detection briefly returns zero (occlusion, motion blur,
-        // profile angle), keep the last known boxes for STICKY_FRAMES frames so
-        // the blur does not flicker off.
+        // box list. Motion velocity is estimated from consecutive detections so
+        // the blur can extrapolate forward while a fresh detection is running.
         const STICKY_FRAMES = 30; // ~1s @ 30fps
+        // Each tracked match: { box:{x,y,width,height}, vx, vy, cx, cy }
+        // Velocity is in pixels/second in source coordinates.
         let lastMatches = [];
+        let lastDetectTimeMs = 0;
+        let prevSnapshot = null; // { time, matches }
         let stickyLeft = 0;
         let detectRunning = false;
 
@@ -1001,12 +996,41 @@
           } catch (e) { return []; }
         }
 
+        function boxCenter(b) { return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; }
+        function assignVelocities(newMatches, prev) {
+          if (!prev || !prev.matches.length) {
+            for (const m of newMatches) { m.vx = 0; m.vy = 0; m.cx = boxCenter(m.box).x; m.cy = boxCenter(m.box).y; }
+            return;
+          }
+          const dt = Math.max(0.016, (performance.now() - prev.time) / 1000);
+          for (const m of newMatches) {
+            const mc = boxCenter(m.box);
+            // Nearest previous match by center distance, within a plausible range.
+            let best = null, bestD = Infinity;
+            for (const p of prev.matches) {
+              const d = Math.hypot(mc.x - p.cx, mc.y - p.cy);
+              if (d < bestD) { bestD = d; best = p; }
+            }
+            const maxJump = Math.max(m.box.width, 80) * 1.8;
+            if (best && bestD < maxJump) {
+              m.vx = (mc.x - best.cx) / dt;
+              m.vy = (mc.y - best.cy) / dt;
+            } else {
+              m.vx = 0; m.vy = 0;
+            }
+            m.cx = mc.x; m.cy = mc.y;
+          }
+        }
+
         function scheduleDetection() {
           if (detectRunning) return;
           detectRunning = true;
           runDetection().then(matches => {
             if (matches.length > 0) {
+              assignVelocities(matches, prevSnapshot);
+              prevSnapshot = { time: performance.now(), matches };
               lastMatches = matches;
+              lastDetectTimeMs = performance.now();
               stickyLeft = STICKY_FRAMES;
             } else if (stickyLeft > 0) {
               stickyLeft--;
@@ -1021,11 +1045,17 @@
           // Draw + blur IMMEDIATELY so captureStream gets a fresh frame every
           // time the source decodes one. No awaits on this path.
           outCtx.drawImage(srcVideo, 0, 0, vw, vh);
-          // Extra padding scales with how stale the boxes are, so moving faces
-          // stay covered between detections.
+          // Extrapolate box positions forward using velocity so the blur keeps
+          // up with a moving face while the next detection is in flight.
+          const ageSec = Math.min(0.35, Math.max(0, (performance.now() - lastDetectTimeMs) / 1000));
           const stale = Math.max(0, STICKY_FRAMES - stickyLeft);
-          const padExtra = Math.min(0.2, stale * 0.01);
-          for (const m of lastMatches) applyBlurToBox(outCtx, m.box, out, padExtra);
+          const padExtra = Math.min(0.25, stale * 0.01);
+          for (const m of lastMatches) {
+            const ex = m.box.x + (m.vx || 0) * ageSec;
+            const ey = m.box.y + (m.vy || 0) * ageSec;
+            const predictedBox = { x: ex, y: ey, width: m.box.width, height: m.box.height };
+            applyBlurToBox(outCtx, predictedBox, out, padExtra);
+          }
 
           // Kick off a background detection if none is running.
           scheduleDetection();
