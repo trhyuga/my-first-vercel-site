@@ -386,8 +386,9 @@
 
   <footer>© ひゅうがのTR-Labo</footer>
 
+  <script src="https://cdn.jsdelivr.net/npm/libarchive.js@2.0.2/dist/libarchive.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@zip.js/zip.js@2.7.45/dist/zip.min.js"></script>
   <script>
-    // Step 1: tab switching + drop zone wiring only
     const tabs = document.querySelectorAll('.tab');
     const panes = {
       extract: document.getElementById('extractPane'),
@@ -418,10 +419,253 @@
       });
     }
 
+    // ---- helpers ----
+    function fmtSize(bytes) {
+      if (bytes == null) return '';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+      return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    }
+    function safeFilename(name, fallback) {
+      let out = (name || fallback || 'output').trim();
+      out = out.replace(/[\\/:*?"<>|]/g, '_');
+      return out;
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    }
+
+    // ---- libarchive init ----
+    let libarchiveReady = null;
+    function initLibarchive() {
+      if (libarchiveReady) return libarchiveReady;
+      libarchiveReady = (async () => {
+        if (typeof Archive === 'undefined') throw new Error('libarchive.js の読み込みに失敗しました');
+        Archive.init({
+          workerUrl: 'https://cdn.jsdelivr.net/npm/libarchive.js@2.0.2/dist/worker-bundle.js'
+        });
+      })();
+      return libarchiveReady;
+    }
+
+    // ---- Extract UI ----
+    const extractBody = document.getElementById('extractBody');
+    let currentArchive = null;
+    let currentArchiveFile = null;
+    let currentEntries = []; // [{path, size, selected, isDir}]
+    let currentPassword = '';
+
+    function renderExtract() {
+      if (!currentArchiveFile) { extractBody.innerHTML = ''; return; }
+      const total = currentEntries.filter(e => !e.isDir).length;
+      const selCount = currentEntries.filter(e => !e.isDir && e.selected).length;
+      const totalSize = currentEntries.reduce((s, e) => s + (e.size || 0), 0);
+
+      extractBody.innerHTML = `
+        <div class="panel">
+          <h2>アーカイブ情報</h2>
+          <div class="info-row"><span class="k">ファイル</span><span class="v">${escapeHtml(currentArchiveFile.name)}</span></div>
+          <div class="info-row"><span class="k">サイズ</span><span class="v">${fmtSize(currentArchiveFile.size)}</span></div>
+          <div class="info-row"><span class="k">中身</span><span class="v">${total}件 / ${fmtSize(totalSize)}</span></div>
+        </div>
+
+        <div id="pwPanel" class="panel hidden">
+          <h2>パスワード</h2>
+          <p class="alert info" style="margin:0 0 0.6rem;">このアーカイブはパスワードで保護されています。</p>
+          <div class="field">
+            <input type="password" id="pwInput" placeholder="パスワードを入力" autocomplete="current-password" />
+          </div>
+          <button class="btn btn-primary" id="pwApply" style="margin-top:0.6rem;">🔓 開く</button>
+        </div>
+
+        <div class="panel">
+          <h2>ファイル一覧</h2>
+          <div class="btn-row" style="margin-top:0;">
+            <button class="btn btn-secondary" id="selAll">すべて選択</button>
+            <button class="btn btn-secondary" id="selNone">すべて解除</button>
+          </div>
+          <div class="file-list" id="fileList"></div>
+          <div style="font-size:0.8rem;color:#64748b;margin-top:0.5rem;padding:0 0.15rem;">
+            <span id="selInfo">${selCount} / ${total} 選択中</span>
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn-primary" id="extractBtn" ${selCount === 0 ? 'disabled' : ''}>📂 選択を解凍</button>
+          <button class="btn btn-secondary" id="resetExtract">別のファイル</button>
+        </div>
+
+        <div id="extractResult"></div>
+      `;
+      renderEntryList();
+      document.getElementById('selAll').addEventListener('click', () => { currentEntries.forEach(e => { if (!e.isDir) e.selected = true; }); renderEntryList(); updateSelInfo(); });
+      document.getElementById('selNone').addEventListener('click', () => { currentEntries.forEach(e => e.selected = false); renderEntryList(); updateSelInfo(); });
+      document.getElementById('resetExtract').addEventListener('click', resetExtract);
+      document.getElementById('extractBtn').addEventListener('click', doExtract);
+      const pwApply = document.getElementById('pwApply');
+      if (pwApply) pwApply.addEventListener('click', async () => {
+        currentPassword = document.getElementById('pwInput').value;
+        await loadArchive(currentArchiveFile, currentPassword);
+      });
+    }
+
+    function renderEntryList() {
+      const list = document.getElementById('fileList');
+      if (!list) return;
+      list.innerHTML = '';
+      currentEntries.forEach((e, i) => {
+        if (e.isDir) return;
+        const row = document.createElement('div');
+        row.className = 'file-row';
+        row.innerHTML = `
+          <input type="checkbox" ${e.selected ? 'checked' : ''} data-idx="${i}" />
+          <span class="name" title="${escapeHtml(e.path)}">${escapeHtml(e.path)}</span>
+          <span class="size">${fmtSize(e.size)}</span>
+        `;
+        row.querySelector('input').addEventListener('change', (ev) => {
+          e.selected = ev.target.checked;
+          updateSelInfo();
+        });
+        list.appendChild(row);
+      });
+    }
+    function updateSelInfo() {
+      const total = currentEntries.filter(e => !e.isDir).length;
+      const sel = currentEntries.filter(e => !e.isDir && e.selected).length;
+      const info = document.getElementById('selInfo');
+      if (info) info.textContent = `${sel} / ${total} 選択中`;
+      const btn = document.getElementById('extractBtn');
+      if (btn) btn.disabled = sel === 0;
+    }
+
+    function resetExtract() {
+      currentArchive = null;
+      currentArchiveFile = null;
+      currentEntries = [];
+      currentPassword = '';
+      extractBody.innerHTML = '';
+    }
+
+    async function loadArchive(file, password) {
+      extractBody.innerHTML = '<div class="panel"><p style="color:#64748b;font-size:0.88rem;">アーカイブを解析中...</p></div>';
+      try {
+        await initLibarchive();
+        currentArchiveFile = file;
+        const archive = await Archive.open(file);
+        currentArchive = archive;
+
+        let passwordNeeded = false;
+        try {
+          if (password) await archive.usePassword(password);
+          if (typeof archive.hasEncryptedData === 'function') {
+            const enc = await archive.hasEncryptedData();
+            if (enc && !password) passwordNeeded = true;
+          }
+        } catch (e) { /* some formats don't expose this */ }
+
+        const files = await archive.getFilesArray();
+        currentEntries = files.map(f => ({
+          path: (f.path ? (f.path + '/') : '') + f.file.name,
+          size: f.file.size != null ? f.file.size : (f.file._size || null),
+          selected: true,
+          isDir: false,
+          raw: f,
+        }));
+        renderExtract();
+        if (passwordNeeded) {
+          const pwPanel = document.getElementById('pwPanel');
+          if (pwPanel) pwPanel.classList.remove('hidden');
+        }
+      } catch (e) {
+        const msg = String(e && e.message || e);
+        if (/passphrase|password|encrypted/i.test(msg)) {
+          currentArchiveFile = file;
+          currentEntries = [];
+          renderExtract();
+          const pwPanel = document.getElementById('pwPanel');
+          if (pwPanel) pwPanel.classList.remove('hidden');
+        } else {
+          extractBody.innerHTML = `<div class="alert error">解析に失敗しました: ${escapeHtml(msg)}</div>
+            <div class="btn-row"><button class="btn btn-secondary" id="resetExtract">別のファイル</button></div>`;
+          const r = document.getElementById('resetExtract');
+          if (r) r.addEventListener('click', resetExtract);
+        }
+      }
+    }
+
+    async function doExtract() {
+      const selected = currentEntries.filter(e => !e.isDir && e.selected);
+      if (!selected.length) return;
+      const btn = document.getElementById('extractBtn');
+      const resultBox = document.getElementById('extractResult');
+      btn.disabled = true;
+      const origLabel = btn.textContent;
+      btn.textContent = '解凍中...';
+      resultBox.innerHTML = `
+        <div class="progress-wrap">
+          <div class="progress-label"><span id="pgText">展開中...</span><span id="pgPct">0%</span></div>
+          <div class="progress-bar"><span id="pgBar"></span></div>
+        </div>
+      `;
+      const pgBar = document.getElementById('pgBar');
+      const pgPct = document.getElementById('pgPct');
+      const pgText = document.getElementById('pgText');
+
+      try {
+        const extracted = [];
+        for (let i = 0; i < selected.length; i++) {
+          const e = selected[i];
+          pgText.textContent = `(${i + 1}/${selected.length}) ${e.path}`;
+          const blob = await e.raw.file.extract
+            ? await e.raw.file.extract()
+            : e.raw.file;
+          const fileBlob = blob instanceof Blob ? blob : new Blob([blob]);
+          extracted.push({ path: e.path, blob: fileBlob });
+          const pct = Math.round((i + 1) / selected.length * 100);
+          pgBar.style.width = pct + '%';
+          pgPct.textContent = pct + '%';
+        }
+        pgText.textContent = '解凍完了';
+        window._extracted = extracted;
+        resultBox.insertAdjacentHTML('beforeend', `
+          <div class="alert success">${extracted.length}件のファイルを展開しました。保存方法は次のステップで追加されます。</div>
+          <div class="btn-row">
+            <button class="btn btn-secondary" id="listBtn">一覧を表示</button>
+          </div>
+          <div id="extList"></div>
+        `);
+        document.getElementById('listBtn').addEventListener('click', () => {
+          const box = document.getElementById('extList');
+          box.innerHTML = '<div class="file-list">' + extracted.map(e =>
+            `<div class="file-row"><span class="name">${escapeHtml(e.path)}</span><span class="size">${fmtSize(e.blob.size)}</span><button class="act-btn" data-dl="${escapeHtml(e.path)}">⬇</button></div>`
+          ).join('') + '</div>';
+          box.querySelectorAll('.act-btn').forEach(b => b.addEventListener('click', () => {
+            const p = b.dataset.dl;
+            const hit = extracted.find(x => x.path === p);
+            if (hit) downloadBlob(hit.blob, hit.path.split('/').pop());
+          }));
+        });
+      } catch (e) {
+        resultBox.innerHTML = `<div class="alert error">解凍に失敗: ${escapeHtml(String(e.message || e))}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origLabel;
+      }
+    }
+
     bindDropzone(
       document.getElementById('dzExtract'),
       document.getElementById('fiExtract'),
-      (files) => { console.log('extract selected:', files); /* step 2 で実装 */ }
+      (files) => { const f = files[0]; if (f) loadArchive(f); }
     );
     bindDropzone(
       document.getElementById('dzCompress'),
