@@ -321,10 +321,64 @@
     </section>
 
     <div class="dropzone" id="dz">
-      <input type="file" id="fi" accept="image/*" hidden />
+      <input type="file" id="fi" accept="image/*,video/*" hidden />
       <div class="icon">🖼️</div>
-      <div class="t">タップして画像を選択</div>
-      <div class="d">JPG / PNG / WebP など・ドラッグ&ドロップ対応</div>
+      <div class="t">タップして画像または動画を選択</div>
+      <div class="d">画像: JPG / PNG / WebP<br>動画: MP4 / MOV / WebM (ブラウザが再生できる形式)</div>
+    </div>
+
+    <div id="videoArea" class="hidden">
+      <div class="panel">
+        <h2>動画プレビュー</h2>
+        <video id="srcVideo" controls playsinline muted style="width:100%;max-height:60vh;background:#0f172a;border-radius:10px;"></video>
+        <div class="meta" id="videoMeta" style="margin-top:0.5rem;"></div>
+      </div>
+      <div class="panel">
+        <h2>除去範囲 (右下からのオフセット)</h2>
+        <div class="presets">
+          <button class="preset active" data-vp="sora" data-w="14" data-h="10" data-r="3" data-b="3">☁️ Soraの雲</button>
+          <button class="preset" data-vp="sora-big" data-w="18" data-h="12" data-r="3" data-b="3">☁️ Sora (大)</button>
+          <button class="preset" data-vp="star" data-w="10" data-h="10" data-r="2" data-b="2">⭐ 星マーク</button>
+        </div>
+        <div class="field">
+          <label>幅 <span class="val" id="vvW">14%</span></label>
+          <input type="range" id="vrW" min="2" max="35" value="14" />
+        </div>
+        <div class="field">
+          <label>高さ <span class="val" id="vvH">10%</span></label>
+          <input type="range" id="vrH" min="2" max="35" value="10" />
+        </div>
+        <div class="field">
+          <label>右からのオフセット <span class="val" id="vvR">3%</span></label>
+          <input type="range" id="vrR" min="0" max="30" value="3" />
+        </div>
+        <div class="field">
+          <label>下からのオフセット <span class="val" id="vvB">3%</span></label>
+          <input type="range" id="vrB" min="0" max="30" value="3" />
+        </div>
+        <div class="field">
+          <label>検出モード</label>
+          <div class="presets" style="margin-bottom:0;">
+            <button class="preset active" data-vmode="smart">🎯 マークだけ検出</button>
+            <button class="preset" data-vmode="full">⬛ 矩形全体</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>動画 出力</h2>
+        <div class="field">
+          <label for="vFname">ファイル名</label>
+          <input type="text" id="vFname" />
+        </div>
+        <div class="alert info" style="margin:0.35rem 0 0.4rem;">
+          ⚠️ ブラウザの制約で動画は<b>フレームごとに再生しながら録画</b>します。長い動画ほど処理に時間がかかります (おおむね実時間の1〜3倍)。出力は<b>WebM</b>形式で音声も保持します。
+        </div>
+        <button class="btn btn-primary" id="vProcess">🎬 マークを除去してWebM出力</button>
+        <div id="vStatus"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="vReset">別のファイルを選ぶ</button>
+      </div>
     </div>
 
     <div id="workArea" class="hidden">
@@ -349,6 +403,18 @@
           <button class="preset" data-p="sora-big" data-w="18" data-h="12" data-r="3" data-b="3">☁️ Sora (大)</button>
           <button class="preset" data-p="mj" data-w="9" data-h="9" data-r="2" data-b="2">🎨 Midjourney</button>
           <button class="preset" data-p="big" data-w="22" data-h="16" data-r="2" data-b="2">📦 右下広め</button>
+        </div>
+        <div class="field">
+          <label>検出モード</label>
+          <div class="presets" style="margin-bottom:0;">
+            <button class="preset active" data-mode="smart">🎯 マークだけ検出 (推奨)</button>
+            <button class="preset" data-mode="full">⬛ 矩形を全て除去</button>
+          </div>
+        </div>
+        <div class="field" id="sensField">
+          <label>検出感度 <span class="val" id="vS">25</span></label>
+          <input type="range" id="rS" min="5" max="70" value="25" />
+          <div style="font-size:0.72rem;color:#64748b;padding:0 0.2rem;">数値を上げると「マークらしい」画素だけに厳しく絞り、元画像をより多く残します。消し残しがある場合は下げる。</div>
         </div>
         <div class="field">
           <label>幅 <span class="val" id="vW">10%</span></label>
@@ -501,15 +567,26 @@
       document.querySelectorAll('.preset').forEach(p => p.classList.remove('active'));
     }));
 
-    document.querySelectorAll('.preset').forEach(btn => btn.addEventListener('click', () => {
+    document.querySelectorAll('.preset[data-p]').forEach(btn => btn.addEventListener('click', () => {
       rW.value = btn.dataset.w;
       rH.value = btn.dataset.h;
       rR.value = btn.dataset.r;
       rB.value = btn.dataset.b;
       updateMaskLabels();
       drawMaskOverlay();
-      document.querySelectorAll('.preset').forEach(p => p.classList.toggle('active', p === btn));
+      document.querySelectorAll('.preset[data-p]').forEach(p => p.classList.toggle('active', p === btn));
     }));
+
+    // Detection mode presets
+    let detectMode = 'smart';
+    document.querySelectorAll('.preset[data-mode]').forEach(btn => btn.addEventListener('click', () => {
+      detectMode = btn.dataset.mode;
+      document.querySelectorAll('.preset[data-mode]').forEach(p => p.classList.toggle('active', p === btn));
+      document.getElementById('sensField').style.display = detectMode === 'smart' ? '' : 'none';
+    }));
+    const rS = document.getElementById('rS');
+    const vS = document.getElementById('vS');
+    rS.addEventListener('input', () => { vS.textContent = rS.value; });
 
     // ---- Mask geometry (in image coordinates) ----
     function getMaskRect() {
@@ -555,8 +632,78 @@
       `;
     }
 
+    // ---- Smart mark detection ----
+    // Returns a per-pixel Uint8Array for the rect region (1 = likely-mark).
+    function detectMarkPixels(imgData, rect, sensitivity) {
+      const { data, width, height } = imgData;
+      const S = Math.max(4, Math.round(Math.min(rect.w, rect.h) * 0.12));
+      // Collect ring samples around the rect
+      const ringR = [], ringG = [], ringB = [], ringL = [];
+      for (let y = Math.max(0, rect.y - S); y < Math.min(height, rect.y + rect.h + S); y++) {
+        for (let x = Math.max(0, rect.x - S); x < Math.min(width, rect.x + rect.w + S); x++) {
+          if (x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h) continue;
+          const idx = (y * width + x) * 4;
+          ringR.push(data[idx]); ringG.push(data[idx + 1]); ringB.push(data[idx + 2]);
+          ringL.push(0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]);
+        }
+      }
+      if (!ringR.length) {
+        const m = new Uint8Array(rect.w * rect.h); m.fill(1); return m;
+      }
+      ringR.sort((a, b) => a - b); ringG.sort((a, b) => a - b);
+      ringB.sort((a, b) => a - b); ringL.sort((a, b) => a - b);
+      const median = arr => arr[Math.floor(arr.length * 0.5)];
+      const mR = median(ringR), mG = median(ringG), mB = median(ringB), mL = median(ringL);
+      // Standard deviation of luminance of the ring
+      let vL = 0;
+      for (const l of ringL) vL += (l - mL) * (l - mL);
+      const sdL = Math.sqrt(vL / ringL.length);
+
+      const threshold = Math.max(8, sensitivity * 1.0 + sdL * 0.6);
+
+      const mask = new Uint8Array(rect.w * rect.h);
+      let count = 0;
+      for (let j = 0; j < rect.h; j++) {
+        for (let i = 0; i < rect.w; i++) {
+          const idx = ((rect.y + j) * width + (rect.x + i)) * 4;
+          const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          const dLum = Math.abs(lum - mL);
+          const dCol = Math.abs(r - mR) + Math.abs(g - mG) + Math.abs(b - mB);
+          // Mark-like = either brighter/darker than background OR saturated-different color
+          if (dLum > threshold || dCol > threshold * 1.7) {
+            mask[j * rect.w + i] = 1;
+            count++;
+          }
+        }
+      }
+      // Fallback: if detection picks up almost nothing, treat the whole rect as mark
+      if (count < rect.w * rect.h * 0.02) {
+        mask.fill(1);
+        return mask;
+      }
+      return dilateMask(mask, rect.w, rect.h, 2);
+    }
+    function dilateMask(mask, w, h, n) {
+      let cur = mask;
+      for (let k = 0; k < n; k++) {
+        const next = new Uint8Array(cur);
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            if (cur[y * w + x]) continue;
+            if ((x > 0 && cur[y * w + x - 1]) || (x < w - 1 && cur[y * w + x + 1]) ||
+                (y > 0 && cur[(y - 1) * w + x]) || (y < h - 1 && cur[(y + 1) * w + x])) {
+              next[y * w + x] = 1;
+            }
+          }
+        }
+        cur = next;
+      }
+      return cur;
+    }
+
     // ---- Inpainting (iterative Laplace diffusion, Gauss-Seidel w/ SOR) ----
-    async function inpaintRegion(fullImg, rect) {
+    async function inpaintRegion(fullImg, rect, useSmart, sensitivity) {
       // Work on a padded crop for efficiency
       const PAD = Math.max(16, Math.round(Math.max(rect.w, rect.h) * 0.5));
       const x0 = Math.max(0, rect.x - PAD);
@@ -564,6 +711,11 @@
       const x1 = Math.min(fullImg.width, rect.x + rect.w + PAD);
       const y1 = Math.min(fullImg.height, rect.y + rect.h + PAD);
       const cw = x1 - x0, ch = y1 - y0;
+
+      // Build per-pixel mask inside the rect (either smart or full)
+      const rectMask = useSmart
+        ? detectMarkPixels(fullImg, rect, sensitivity)
+        : (() => { const m = new Uint8Array(rect.w * rect.h); m.fill(1); return m; })();
 
       const src = fullImg.data;
       const fw = fullImg.width;
@@ -579,7 +731,8 @@
           buf[dIdx + 2] = src[sIdx + 2];
           const gx = x0 + i, gy = y0 + j;
           if (gx >= rect.x && gx < rect.x + rect.w && gy >= rect.y && gy < rect.y + rect.h) {
-            mask[j * cw + i] = 1;
+            const li = (gy - rect.y) * rect.w + (gx - rect.x);
+            if (rectMask[li]) mask[j * cw + i] = 1;
           }
         }
       }
@@ -669,6 +822,9 @@
 
     // ---- File load ----
     async function loadFile(file) {
+      if (file.type.startsWith('video/')) {
+        return loadVideoFile(file);
+      }
       if (!file.type.startsWith('image/')) return;
       originalFile = file;
       const bmp = await createImageBitmap(file);
@@ -699,6 +855,261 @@
 
     bindDropzone(dz, fi, (files) => loadFile(files[0]));
 
+    // ---- Video mode ----
+    const videoArea = document.getElementById('videoArea');
+    const srcVideo = document.getElementById('srcVideo');
+    const videoMeta = document.getElementById('videoMeta');
+    const vFname = document.getElementById('vFname');
+    const vStatus = document.getElementById('vStatus');
+    let currentVideoFile = null;
+    let videoDetectMode = 'smart';
+
+    const vrW = document.getElementById('vrW');
+    const vrH = document.getElementById('vrH');
+    const vrR = document.getElementById('vrR');
+    const vrB = document.getElementById('vrB');
+    const vvW = document.getElementById('vvW');
+    const vvH = document.getElementById('vvH');
+    const vvR = document.getElementById('vvR');
+    const vvB = document.getElementById('vvB');
+    function syncVideoLabels() {
+      vvW.textContent = vrW.value + '%';
+      vvH.textContent = vrH.value + '%';
+      vvR.textContent = vrR.value + '%';
+      vvB.textContent = vrB.value + '%';
+    }
+    [vrW, vrH, vrR, vrB].forEach(s => s.addEventListener('input', () => {
+      syncVideoLabels();
+      document.querySelectorAll('.preset[data-vp]').forEach(p => p.classList.remove('active'));
+    }));
+    document.querySelectorAll('.preset[data-vp]').forEach(btn => btn.addEventListener('click', () => {
+      vrW.value = btn.dataset.w; vrH.value = btn.dataset.h;
+      vrR.value = btn.dataset.r; vrB.value = btn.dataset.b;
+      syncVideoLabels();
+      document.querySelectorAll('.preset[data-vp]').forEach(p => p.classList.toggle('active', p === btn));
+    }));
+    document.querySelectorAll('.preset[data-vmode]').forEach(btn => btn.addEventListener('click', () => {
+      videoDetectMode = btn.dataset.vmode;
+      document.querySelectorAll('.preset[data-vmode]').forEach(p => p.classList.toggle('active', p === btn));
+    }));
+
+    document.getElementById('vReset').addEventListener('click', () => {
+      currentVideoFile = null;
+      srcVideo.pause(); srcVideo.removeAttribute('src'); srcVideo.load();
+      videoArea.classList.add('hidden');
+      dz.classList.remove('hidden');
+      vStatus.innerHTML = '';
+    });
+
+    async function loadVideoFile(file) {
+      currentVideoFile = file;
+      srcVideo.src = URL.createObjectURL(file);
+      dz.classList.add('hidden');
+      workArea.classList.add('hidden');
+      videoArea.classList.remove('hidden');
+      vStatus.innerHTML = '';
+      const base = file.name.replace(/\.[^.]+$/, '');
+      vFname.value = safeFilename(base + '_clean', 'clean');
+      await new Promise(res => { srcVideo.onloadedmetadata = res; });
+      videoMeta.innerHTML = `
+        <span>📐 ${srcVideo.videoWidth} × ${srcVideo.videoHeight}</span>
+        <span>⏱ ${srcVideo.duration.toFixed(1)}秒</span>
+        <span>💾 ${fmtSize(file.size)}</span>
+      `;
+    }
+
+    function getVideoMaskRect(vw, vh) {
+      const w = Math.max(4, Math.round(vw * (parseFloat(vrW.value) / 100)));
+      const h = Math.max(4, Math.round(vh * (parseFloat(vrH.value) / 100)));
+      const offR = Math.round(vw * (parseFloat(vrR.value) / 100));
+      const offB = Math.round(vh * (parseFloat(vrB.value) / 100));
+      const x = Math.max(0, Math.min(vw - w, vw - w - offR));
+      const y = Math.max(0, Math.min(vh - h, vh - h - offB));
+      return { x, y, w, h };
+    }
+
+    // Lighter per-frame inpaint: few iterations, Gauss-Seidel SOR on per-frame mask
+    function fastFrameInpaint(ctx, rect, useSmart, sensitivity) {
+      const data = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
+      const rectMask = useSmart
+        ? detectMarkPixels(data, rect, sensitivity)
+        : (() => { const m = new Uint8Array(rect.w * rect.h); m.fill(1); return m; })();
+
+      const PAD = Math.max(10, Math.round(Math.max(rect.w, rect.h) * 0.35));
+      const x0 = Math.max(0, rect.x - PAD);
+      const y0 = Math.max(0, rect.y - PAD);
+      const x1 = Math.min(data.width, rect.x + rect.w + PAD);
+      const y1 = Math.min(data.height, rect.y + rect.h + PAD);
+      const cw = x1 - x0, ch = y1 - y0;
+      const src = data.data;
+      const fw = data.width;
+      const buf = new Float32Array(cw * ch * 3);
+      const mask = new Uint8Array(cw * ch);
+      for (let j = 0; j < ch; j++) {
+        for (let i = 0; i < cw; i++) {
+          const sIdx = ((y0 + j) * fw + (x0 + i)) * 4;
+          const dIdx = (j * cw + i) * 3;
+          buf[dIdx] = src[sIdx]; buf[dIdx+1] = src[sIdx+1]; buf[dIdx+2] = src[sIdx+2];
+          const gx = x0 + i, gy = y0 + j;
+          if (gx >= rect.x && gx < rect.x + rect.w && gy >= rect.y && gy < rect.y + rect.h) {
+            const li = (gy - rect.y) * rect.w + (gx - rect.x);
+            if (rectMask[li]) mask[j * cw + i] = 1;
+          }
+        }
+      }
+      // Seed masked pixels from boundary average
+      let br = 0, bg = 0, bb = 0, bn = 0;
+      for (let j = 1; j < ch - 1; j++) {
+        for (let i = 1; i < cw - 1; i++) {
+          if (mask[j*cw+i]) continue;
+          if (mask[j*cw+i-1] || mask[j*cw+i+1] || mask[(j-1)*cw+i] || mask[(j+1)*cw+i]) {
+            const idx = (j*cw+i)*3;
+            br += buf[idx]; bg += buf[idx+1]; bb += buf[idx+2]; bn++;
+          }
+        }
+      }
+      if (bn > 0) {
+        br /= bn; bg /= bn; bb /= bn;
+        for (let k = 0; k < mask.length; k++) {
+          if (!mask[k]) continue;
+          const idx = k * 3;
+          buf[idx] = br; buf[idx+1] = bg; buf[idx+2] = bb;
+        }
+      }
+      const omega = 1.85;
+      const iterations = Math.min(120, Math.max(40, Math.round(Math.max(rect.w, rect.h) * 0.8)));
+      for (let iter = 0; iter < iterations; iter++) {
+        for (let j = 1; j < ch - 1; j++) {
+          for (let i = 1; i < cw - 1; i++) {
+            if (!mask[j*cw+i]) continue;
+            const idx = (j*cw+i)*3;
+            const up = ((j-1)*cw+i)*3, dn = ((j+1)*cw+i)*3;
+            const lt = (j*cw+(i-1))*3, rt = (j*cw+(i+1))*3;
+            for (let c = 0; c < 3; c++) {
+              const avg = (buf[up+c] + buf[dn+c] + buf[lt+c] + buf[rt+c]) * 0.25;
+              buf[idx+c] = buf[idx+c] + omega * (avg - buf[idx+c]);
+            }
+          }
+        }
+      }
+      // Write back into ImageData and put on the canvas
+      for (let j = 0; j < ch; j++) {
+        for (let i = 0; i < cw; i++) {
+          if (!mask[j*cw+i]) continue;
+          const dIdx = (j*cw+i)*3;
+          const sIdx = ((y0+j)*fw + (x0+i))*4;
+          src[sIdx] = Math.max(0, Math.min(255, Math.round(buf[dIdx])));
+          src[sIdx+1] = Math.max(0, Math.min(255, Math.round(buf[dIdx+1])));
+          src[sIdx+2] = Math.max(0, Math.min(255, Math.round(buf[dIdx+2])));
+        }
+      }
+      ctx.putImageData(data, 0, 0);
+    }
+
+    document.getElementById('vProcess').addEventListener('click', async () => {
+      if (!currentVideoFile) return;
+      const btn = document.getElementById('vProcess');
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = '処理中...';
+      vStatus.innerHTML = '';
+      try {
+        const vw = srcVideo.videoWidth, vh = srcVideo.videoHeight;
+        const rect = getVideoMaskRect(vw, vh);
+        const useSmart = videoDetectMode === 'smart';
+        const sensitivity = 25;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = vw; canvas.height = vh;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+        const canvasStream = canvas.captureStream(30);
+        // Add audio track from the original video
+        try {
+          if (typeof srcVideo.captureStream === 'function') {
+            const src = srcVideo.captureStream();
+            src.getAudioTracks().forEach(t => canvasStream.addTrack(t));
+          }
+        } catch (e) { /* audio optional */ }
+
+        // Pick supported mime type
+        const mimeCandidates = [
+          'video/webm;codecs=vp9,opus',
+          'video/webm;codecs=vp8,opus',
+          'video/webm',
+          'video/mp4',
+        ];
+        let mime = '';
+        for (const m of mimeCandidates) {
+          if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) { mime = m; break; }
+        }
+        const recorder = new MediaRecorder(canvasStream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : {});
+        const chunks = [];
+        recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+        const stopped = new Promise(res => { recorder.onstop = res; });
+
+        srcVideo.currentTime = 0;
+        srcVideo.muted = true; // avoid double audio; audio track comes from captureStream
+        srcVideo.playbackRate = 1;
+        await srcVideo.play();
+        recorder.start(500);
+
+        let frames = 0;
+        const duration = srcVideo.duration || 0;
+        vStatus.innerHTML = `
+          <div class="progress-wrap">
+            <div class="progress-label"><span id="vpgText">処理中...</span><span id="vpgPct">0%</span></div>
+            <div class="progress-bar"><span id="vpgBar"></span></div>
+          </div>`;
+        const vpgBar = document.getElementById('vpgBar');
+        const vpgPct = document.getElementById('vpgPct');
+        const vpgText = document.getElementById('vpgText');
+
+        const haveRVFC = typeof srcVideo.requestVideoFrameCallback === 'function';
+        const onFrame = () => {
+          if (srcVideo.ended || srcVideo.paused) return;
+          ctx.drawImage(srcVideo, 0, 0, vw, vh);
+          fastFrameInpaint(ctx, rect, useSmart, sensitivity);
+          frames++;
+          if (duration > 0) {
+            const pct = Math.min(99, Math.round(srcVideo.currentTime / duration * 100));
+            vpgBar.style.width = pct + '%';
+            vpgPct.textContent = pct + '%';
+            vpgText.textContent = `処理中 ${srcVideo.currentTime.toFixed(1)} / ${duration.toFixed(1)}秒`;
+          }
+          if (haveRVFC) srcVideo.requestVideoFrameCallback(onFrame);
+          else requestAnimationFrame(onFrame);
+        };
+        if (haveRVFC) srcVideo.requestVideoFrameCallback(onFrame);
+        else requestAnimationFrame(onFrame);
+
+        await new Promise(res => { srcVideo.onended = res; });
+        recorder.stop();
+        await stopped;
+
+        const blob = new Blob(chunks, { type: mime || 'video/webm' });
+        const ext = (mime && mime.includes('mp4')) ? 'mp4' : 'webm';
+        vpgBar.style.width = '100%';
+        vpgPct.textContent = '100%';
+        vpgText.textContent = `✅ 処理完了 (${frames}フレーム / ${fmtSize(blob.size)})`;
+
+        const dlName = safeFilename(vFname.value, 'clean') + '.' + ext;
+        downloadBlob(blob, dlName);
+        vStatus.insertAdjacentHTML('beforeend', `
+          <div class="alert success">✅ ${dlName} を書き出しました</div>
+          <div class="btn-row">
+            <button class="btn btn-secondary" id="vRedl">⬇️ もう一度ダウンロード</button>
+          </div>
+        `);
+        document.getElementById('vRedl').addEventListener('click', () => downloadBlob(blob, dlName));
+      } catch (e) {
+        vStatus.innerHTML = `<div class="alert error">動画処理に失敗: ${String(e.message || e)}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
+    });
+
     document.getElementById('resetBtn').addEventListener('click', () => {
       originalFile = null; originalImageData = null; processedImageData = null;
       workArea.classList.add('hidden');
@@ -714,7 +1125,8 @@
       btn.textContent = '処理中...';
       try {
         const rect = getMaskRect();
-        processedImageData = await inpaintRegion(originalImageData, rect);
+        const sensitivity = parseFloat(rS.value);
+        processedImageData = await inpaintRegion(originalImageData, rect, detectMode === 'smart', sensitivity);
         viewMode = 'after';
         document.querySelectorAll('.ba-tab').forEach(t => t.classList.toggle('active', t.dataset.ba === 'after'));
         drawCanvas(processedImageData);
