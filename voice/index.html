@@ -432,17 +432,20 @@
       <h2>録音後エディタ</h2>
       <audio id="playback" controls></audio>
       <div class="meta" id="audioMeta" style="margin-top:0.5rem;"></div>
-      <div class="btn-row">
-        <button class="btn btn-secondary" id="autoDiaBtn">🤖 話者を自動分類</button>
-      </div>
       <div class="field">
-        <label>話者(タップで名前編集)</label>
+        <label>👥 話者に名前を付ける <span id="spkCountLabel" style="color:#64748b;font-weight:500;"></span></label>
         <div class="speakers-edit" id="speakersEdit"></div>
+        <div style="font-size:0.72rem;color:#64748b;padding:0.35rem 0.25rem 0;">
+          声の特徴で自動分類済みです。A/B/…を実名やあだ名に書き換えると文字起こしにも反映されます。
+        </div>
       </div>
-      <div class="field">
-        <label>発言セグメント (編集可)</label>
-        <div id="segList"></div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="autoDiaBtn" style="flex:0 0 auto;width:auto;padding:0.55rem 0.9rem;min-height:auto;font-size:0.82rem;">🔄 うまく分かれていない場合は再分類</button>
       </div>
+      <details style="margin-top:0.9rem;">
+        <summary style="cursor:pointer;font-size:0.82rem;color:#475569;padding:0.25rem 0;">発言セグメント詳細を見る (必要な場合だけ個別修正)</summary>
+        <div id="segList" style="margin-top:0.4rem;"></div>
+      </details>
       <div class="field">
         <label for="txtFormat">テキスト出力の形式 (NotebookLM向け)</label>
         <select id="txtFormat">
@@ -885,6 +888,8 @@
         <span>📝 ${segments.length}発言</span>
       `;
       editorPanel.classList.remove('hidden');
+      // Auto-classify once, silently (no prompt).
+      autoClusterSpeakers();
       editorPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
       renderSpeakersEdit();
       renderSegList();
@@ -893,11 +898,14 @@
     function renderSpeakersEdit() {
       const counts = speakers.map(() => 0);
       segments.forEach(s => { if (s.speaker != null) counts[s.speaker] = (counts[s.speaker] || 0) + 1; });
+      // Only show speakers that actually have segments assigned
+      const usedIdxs = speakers.map((_, i) => i).filter(i => counts[i] > 0);
       speakersEditEl.innerHTML = '';
-      speakers.forEach((name, i) => {
+      usedIdxs.forEach(i => {
+        const name = speakers[i];
         const chip = document.createElement('div');
         chip.className = 'spk-edit';
-        chip.innerHTML = `<input type="text" value="${escapeHtml(name)}" data-idx="${i}" /><span class="cnt">${counts[i] || 0}件</span>`;
+        chip.innerHTML = `<input type="text" value="${escapeHtml(name)}" data-idx="${i}" placeholder="例: 山田" /><span class="cnt">${counts[i]}件</span>`;
         const input = chip.querySelector('input');
         input.addEventListener('input', () => {
           speakers[i] = input.value || ('話者' + String.fromCharCode('A'.charCodeAt(0) + i));
@@ -905,6 +913,8 @@
         });
         speakersEditEl.appendChild(chip);
       });
+      const lbl = document.getElementById('spkCountLabel');
+      if (lbl) lbl.textContent = usedIdxs.length ? `(${usedIdxs.length}人検出)` : '';
     }
 
     function renderSegList() {
@@ -936,29 +946,41 @@
     }
 
     // ---- Automatic speaker clustering (heuristic) ----
-    // Simple k-means over 2D features [pitch (Hz), centroid (Hz)] normalized.
-    function autoClusterSpeakers() {
-      const featsIdx = segments.map((s, i) => s.feat ? i : -1).filter(i => i >= 0);
-      if (featsIdx.length < 2) {
-        alert('声の特徴量が足りません (短すぎる録音か、発言が少ない)。');
-        return;
+    // Fully automatic: picks K 2–5 by silhouette, no prompt.
+    function silhouetteScore(pts, assign, K) {
+      if (K < 2) return -1;
+      const n = pts.length;
+      let total = 0, count = 0;
+      for (let i = 0; i < n; i++) {
+        const ci = assign[i];
+        let aSum = 0, aN = 0;
+        for (let j = 0; j < n; j++) {
+          if (i === j || assign[j] !== ci) continue;
+          const d = Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]);
+          aSum += d; aN++;
+        }
+        if (aN === 0) continue;
+        const a = aSum / aN;
+        let bMin = Infinity;
+        for (let k = 0; k < K; k++) {
+          if (k === ci) continue;
+          let bSum = 0, bN = 0;
+          for (let j = 0; j < n; j++) {
+            if (assign[j] !== k) continue;
+            const d = Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]);
+            bSum += d; bN++;
+          }
+          if (bN > 0) bMin = Math.min(bMin, bSum / bN);
+        }
+        if (bMin === Infinity) continue;
+        total += (bMin - a) / Math.max(a, bMin);
+        count++;
       }
-      const kPrompt = prompt('話者は何人いますか? (2〜6)', Math.min(6, Math.max(2, speakers.length)));
-      if (!kPrompt) return;
-      const K = Math.max(2, Math.min(6, parseInt(kPrompt, 10) || 2));
+      return count > 0 ? total / count : -1;
+    }
 
-      // Normalize features
-      const raw = featsIdx.map(i => [segments[i].feat.pitch, segments[i].feat.centroid]);
-      const mean = [0, 0], std = [1, 1];
-      for (const r of raw) { mean[0] += r[0]; mean[1] += r[1]; }
-      mean[0] /= raw.length; mean[1] /= raw.length;
-      let v0 = 0, v1 = 0;
-      for (const r of raw) { v0 += (r[0] - mean[0]) ** 2; v1 += (r[1] - mean[1]) ** 2; }
-      std[0] = Math.sqrt(v0 / raw.length) || 1;
-      std[1] = Math.sqrt(v1 / raw.length) || 1;
-      const pts = raw.map(r => [(r[0] - mean[0]) / std[0], (r[1] - mean[1]) / std[1]]);
-
-      // Seed centroids with k-means++ lite: pick the k most spread points
+    function runKMeans(pts, K) {
+      if (!pts.length) return [];
       const centroids = [pts[0].slice()];
       while (centroids.length < K) {
         let best = 0, bestDist = -1;
@@ -972,8 +994,6 @@
         }
         centroids.push(pts[best].slice());
       }
-
-      // Lloyd iterations
       const assign = new Array(pts.length).fill(0);
       for (let iter = 0; iter < 30; iter++) {
         let changed = 0;
@@ -999,25 +1019,63 @@
         }
         if (!changed) break;
       }
+      return { assign, centroids };
+    }
 
-      // Order clusters by average pitch (low → high) so speaker names are stable
-      const avgPitch = centroids.map((c, k) => {
-        let sum = 0, n = 0;
-        for (let i = 0; i < pts.length; i++) if (assign[i] === k) { sum += raw[i][0]; n++; }
-        return { k, avg: n ? sum / n : 0 };
-      }).sort((a, b) => a.avg - b.avg);
-      const remap = {};
-      avgPitch.forEach((x, order) => { remap[x.k] = order; });
+    function autoClusterSpeakers() {
+      const featsIdx = segments.map((s, i) => s.feat ? i : -1).filter(i => i >= 0);
+      if (featsIdx.length < 4) {
+        // Too little data — treat as single speaker
+        featsIdx.forEach(i => { segments[i].speaker = 0; });
+        while (speakers.length < 1) speakers.push('話者A');
+        renderSpeakersEdit();
+        renderSegList();
+        return;
+      }
+      // Normalize [pitch, centroid]
+      const raw = featsIdx.map(i => [segments[i].feat.pitch, segments[i].feat.centroid]);
+      const mean = [0, 0];
+      for (const r of raw) { mean[0] += r[0]; mean[1] += r[1]; }
+      mean[0] /= raw.length; mean[1] /= raw.length;
+      let v0 = 0, v1 = 0;
+      for (const r of raw) { v0 += (r[0] - mean[0]) ** 2; v1 += (r[1] - mean[1]) ** 2; }
+      const std = [Math.sqrt(v0 / raw.length) || 1, Math.sqrt(v1 / raw.length) || 1];
+      const pts = raw.map(r => [(r[0] - mean[0]) / std[0], (r[1] - mean[1]) / std[1]]);
 
-      // Ensure we have K speakers
-      while (speakers.length < K) speakers.push('話者' + String.fromCharCode('A'.charCodeAt(0) + speakers.length));
-      speakers.length = Math.max(speakers.length, K);
-
-      // Apply assignments
-      for (let j = 0; j < featsIdx.length; j++) {
-        segments[featsIdx[j]].speaker = remap[assign[j]];
+      const kMax = Math.min(5, Math.floor(pts.length / 2));
+      let bestK = 1, bestScore = -1, bestAssign = null;
+      for (let K = 2; K <= kMax; K++) {
+        const { assign } = runKMeans(pts, K);
+        const s = silhouetteScore(pts, assign, K);
+        if (s > bestScore) { bestScore = s; bestK = K; bestAssign = assign; }
+      }
+      // If no clear separation, fall back to single speaker
+      const SILHOUETTE_THRESHOLD = 0.18;
+      if (!bestAssign || bestScore < SILHOUETTE_THRESHOLD) {
+        featsIdx.forEach(i => { segments[i].speaker = 0; });
+        while (speakers.length < 1) speakers.push('話者A');
+        renderSpeakersEdit();
+        renderSegList();
+        return;
       }
 
+      // Order clusters by ascending mean pitch (低い声→話者A で安定)
+      const perK = Array.from({ length: bestK }, () => ({ sum: 0, n: 0 }));
+      for (let j = 0; j < featsIdx.length; j++) {
+        perK[bestAssign[j]].sum += raw[j][0];
+        perK[bestAssign[j]].n += 1;
+      }
+      const order = perK.map((x, k) => ({ k, avg: x.n ? x.sum / x.n : 0 }))
+        .sort((a, b) => a.avg - b.avg);
+      const remap = {};
+      order.forEach((x, idx) => { remap[x.k] = idx; });
+
+      while (speakers.length < bestK) {
+        speakers.push('話者' + String.fromCharCode('A'.charCodeAt(0) + speakers.length));
+      }
+      for (let j = 0; j < featsIdx.length; j++) {
+        segments[featsIdx[j]].speaker = remap[bestAssign[j]];
+      }
       renderSpeakersEdit();
       renderSegList();
     }
@@ -1084,34 +1142,58 @@
     })();
 
     // ---- Transcript text generation ----
+    // Merge consecutive segments from the same speaker into one turn.
+    function buildTurns() {
+      const turns = [];
+      let cur = null;
+      for (const s of segments) {
+        if (cur && cur.speaker === s.speaker) {
+          cur.parts.push(s);
+        } else {
+          cur = { speaker: s.speaker, parts: [s] };
+          turns.push(cur);
+        }
+      }
+      return turns;
+    }
+
     function buildTranscriptText(format) {
       const title = (titleEl.value || '録音').trim();
       const dateStr = new Date().toLocaleString('ja-JP');
       const totalSec = recordedBlob ? ((performance.now() - startedAt) / 1000) : 0;
+      const usedSpeakers = speakers.filter((_, i) => segments.some(s => s.speaker === i));
       const header = [
         `# ${title}`,
         `収録日時: ${dateStr}`,
         `長さ: ${fmtHMS(totalSec)}`,
-        `話者: ${speakers.filter((_, i) => segments.some(s => s.speaker === i)).join(', ')}`,
+        `話者: ${usedSpeakers.join(', ')}`,
         '',
       ].join('\n');
 
+      const turns = buildTurns();
+      // Join all parts of a turn with a space (for clean/timestamped) or a newline (for dialog)
       if (format === 'timestamped') {
-        const body = segments.map(s =>
-          `[${fmtHMS(s.t)}] ${speakers[s.speaker] || '話者?'}: ${s.text}`
-        ).join('\n');
+        const body = turns.map(t => {
+          const name = speakers[t.speaker] || '話者?';
+          const text = t.parts.map(p => p.text).join(' ');
+          return `[${fmtHMS(t.parts[0].t)}] ${name}: ${text}`;
+        }).join('\n\n');
         return header + body + '\n';
       }
       if (format === 'dialog') {
-        const body = segments.map(s =>
-          `${speakers[s.speaker] || '話者?'}:\n${s.text}`
-        ).join('\n\n');
+        const body = turns.map(t => {
+          const name = speakers[t.speaker] || '話者?';
+          const text = t.parts.map(p => p.text).join('\n');
+          return `${name}:\n${text}`;
+        }).join('\n\n');
         return header + body + '\n';
       }
-      // clean (default)
-      const body = segments.map(s =>
-        `${speakers[s.speaker] || '話者?'}: ${s.text}`
-      ).join('\n');
+      // clean (default): speaker name only when it changes
+      const body = turns.map(t => {
+        const name = speakers[t.speaker] || '話者?';
+        const text = t.parts.map(p => p.text).join(' ');
+        return `${name}: ${text}`;
+      }).join('\n\n');
       return header + body + '\n';
     }
 
