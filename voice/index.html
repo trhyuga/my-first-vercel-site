@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>録音 & 文字起こし | ひゅうがのTR-Labo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .brand {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 0.7rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    .back-btn {
+      width: 36px; height: 36px;
+      border-radius: 9px;
+      border: 1px solid #e2e8f0;
+      background: #fff;
+      color: #475569;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .back-btn:active { background: #f1f5f9; }
+    .logo {
+      width: 34px; height: 34px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800;
+      font-size: 0.78rem;
+      box-shadow: 0 4px 10px rgba(14,165,233,0.25);
+    }
+    .brand-name {
+      font-size: 1rem;
+      font-weight: 700;
+      flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    main { max-width: 760px; margin: 0 auto; padding: 1.25rem 1rem 2rem; }
+    .hero { text-align: center; padding: 0.25rem 0 1rem; }
+    .hero h1 {
+      font-size: clamp(1.4rem, 4.8vw, 1.85rem);
+      font-weight: 800;
+      letter-spacing: -0.015em;
+      margin-bottom: 0.5rem;
+    }
+    .hero h1 .accent {
+      background: linear-gradient(135deg, #0284c7, #06b6d4);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p { color: #64748b; font-size: 0.88rem; line-height: 1.65; }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+    .panel h2 {
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 0.65rem;
+      color: #0f172a;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.7rem; }
+    .field:first-child { margin-top: 0; }
+    .field label {
+      font-size: 0.78rem; color: #475569; font-weight: 600;
+      padding: 0 0.1rem;
+    }
+    .field input[type="text"], .field select {
+      background: #fff;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+      padding: 0.65rem 0.75rem;
+      border-radius: 9px;
+      font-family: inherit;
+      font-size: 0.92rem;
+      width: 100%;
+      -webkit-appearance: none; appearance: none;
+    }
+    .field input:focus, .field select:focus {
+      outline: none; border-color: #38bdf8;
+      box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+    }
+
+    .record-area {
+      background: #0f172a;
+      color: white;
+      border-radius: 16px;
+      padding: 1.5rem 1rem;
+      text-align: center;
+      margin-top: 1rem;
+    }
+    .record-area.rec {
+      background: linear-gradient(135deg, #7f1d1d, #0f172a);
+    }
+    .timer {
+      font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+      font-size: 2.3rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+      margin-bottom: 0.35rem;
+    }
+    .rec-state {
+      font-size: 0.82rem;
+      opacity: 0.7;
+      margin-bottom: 0.9rem;
+      display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+    }
+    .rec-state .dot {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: #64748b;
+    }
+    .rec-state.live .dot { background: #ef4444; animation: blink 1s infinite; }
+    @keyframes blink { 50% { opacity: 0.25; } }
+
+    button.btn {
+      border: none;
+      border-radius: 11px;
+      padding: 0.85rem 1rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      font-family: inherit;
+      transition: transform 0.08s, opacity 0.15s;
+      min-height: 48px;
+      color: #fff;
+    }
+    button.btn:active { transform: scale(0.98); opacity: 0.92; }
+    button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-rec {
+      background: linear-gradient(135deg, #ef4444, #f97316);
+      box-shadow: 0 4px 14px rgba(239,68,68,0.3);
+      width: 100%;
+      min-height: 56px;
+      font-size: 1rem;
+    }
+    .btn-stop {
+      background: #fff; color: #0f172a; border: 1px solid #cbd5e1;
+      width: 100%; min-height: 56px; font-size: 1rem;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+      box-shadow: 0 4px 14px rgba(14,165,233,0.28);
+      width: 100%;
+    }
+    .btn-secondary { background: #fff; color: #0f172a; border: 1px solid #cbd5e1; width: 100%; }
+    .btn-row { display: flex; gap: 0.5rem; margin-top: 0.65rem; }
+    .btn-row .btn { flex: 1; }
+
+    .alert {
+      padding: 0.7rem 0.85rem;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      line-height: 1.55;
+      margin-top: 0.6rem;
+    }
+    .alert.info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .alert.success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .alert.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .alert.warn { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+
+    .hidden { display: none !important; }
+    .meta { font-size: 0.75rem; color: #64748b; display: flex; gap: 0.75rem; flex-wrap: wrap; }
+
+    footer {
+      max-width: 760px; margin: 0 auto;
+      padding: 1rem; color: #94a3b8;
+      font-size: 0.74rem; text-align: center;
+      padding-bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
+    }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">🎙️ 録音 & 文字起こし</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>録音しながら、<span class="accent">しゃべった人ごとに</span>文字起こし。</h1>
+      <p>小さな容量でNotebookLMに渡せる音声+テキストを、端末内だけで生成。</p>
+    </section>
+
+    <div class="panel" id="settingsPanel">
+      <h2>収録設定</h2>
+      <div class="field">
+        <label for="bitrate">音質 / 容量</label>
+        <select id="bitrate">
+          <option value="12000">12 kbps (極小・1h≈5.5MB)</option>
+          <option value="24000" selected>24 kbps (小・1h≈11MB・推奨)</option>
+          <option value="48000">48 kbps (標準・1h≈22MB)</option>
+          <option value="96000">96 kbps (高音質・1h≈43MB)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="lang">文字起こし言語</label>
+        <select id="lang">
+          <option value="ja-JP" selected>日本語</option>
+          <option value="en-US">English (US)</option>
+          <option value="en-GB">English (UK)</option>
+          <option value="zh-CN">中文 (简体)</option>
+          <option value="ko-KR">한국어</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="title">収録タイトル (ファイル名)</label>
+        <input type="text" id="title" placeholder="例: 企画会議 2026-04-23" />
+      </div>
+      <div id="capsMsg"></div>
+    </div>
+
+    <div class="record-area" id="recordArea">
+      <div class="rec-state" id="recState"><span class="dot"></span><span id="recStateText">待機中</span></div>
+      <div class="timer" id="timer">00:00:00</div>
+      <button class="btn btn-rec" id="recBtn">🎙️ 録音開始</button>
+      <button class="btn btn-stop hidden" id="stopBtn">■ 停止</button>
+    </div>
+
+    <p class="alert info" style="margin-top:1rem;">
+      🔒 録音も文字起こしも端末内処理。ネット経由で音声がサーバーに送られることはありません (一部ブラウザの音声認識は除く)。
+    </p>
+  </main>
+
+  <footer>© ひゅうがのTR-Labo</footer>
+
+  <script>
+    // ---- helpers ----
+    function pad(n, w=2) { return String(n).padStart(w, '0'); }
+    function fmtHMS(sec) {
+      sec = Math.max(0, Math.floor(sec));
+      return pad(Math.floor(sec / 3600)) + ':' + pad(Math.floor(sec / 60) % 60) + ':' + pad(sec % 60);
+    }
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1024 / 1024).toFixed(2) + ' MB';
+    }
+    function safeFilename(name, fallback) {
+      let out = (name || fallback || 'recording').trim();
+      out = out.replace(/[\\/:*?"<>|]/g, '_');
+      return out;
+    }
+    function todayStamp() {
+      const d = new Date();
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + '_' + pad(d.getHours()) + pad(d.getMinutes());
+    }
+
+    // ---- capability detection ----
+    const hasMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const hasSR = typeof SR === 'function';
+    (function showCaps() {
+      const box = document.getElementById('capsMsg');
+      const lines = [];
+      if (!hasMedia) lines.push('<div class="alert error">マイクにアクセスできません (このブラウザは非対応)。</div>');
+      if (!hasSR) lines.push('<div class="alert warn">このブラウザは自動文字起こしに非対応です。録音のみ動作します (iPhoneのSafariなど)。文字起こしはNotebookLMやPCのChromeで後処理できます。</div>');
+      box.innerHTML = lines.join('');
+    })();
+
+    // Pick a supported mime type for audio recording.
+    function pickAudioMime() {
+      const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/ogg;codecs=opus',
+        'audio/mp4;codecs=mp4a.40.2',
+        'audio/mp4',
+        'audio/webm',
+      ];
+      for (const m of candidates) {
+        if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m;
+      }
+      return '';
+    }
+    function extFromMime(m) {
+      if (!m) return 'webm';
+      if (m.includes('ogg')) return 'ogg';
+      if (m.includes('mp4')) return 'm4a';
+      return 'webm';
+    }
+
+    // ---- state ----
+    const recBtn = document.getElementById('recBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const recordArea = document.getElementById('recordArea');
+    const recState = document.getElementById('recState');
+    const recStateText = document.getElementById('recStateText');
+    const timerEl = document.getElementById('timer');
+    const titleEl = document.getElementById('title');
+    const bitrateEl = document.getElementById('bitrate');
+    titleEl.value = '録音_' + todayStamp();
+
+    let mediaStream = null;
+    let recorder = null;
+    let chunks = [];
+    let startedAt = 0;
+    let timerHandle = null;
+    let recordedBlob = null;
+    let recordedMime = '';
+
+    function updateTimer() {
+      const sec = (performance.now() - startedAt) / 1000;
+      timerEl.textContent = fmtHMS(sec);
+    }
+
+    async function startRecording() {
+      if (!hasMedia) return;
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+            sampleRate: 16000,
+          },
+        });
+      } catch (e) {
+        alert('マイクへのアクセスが拒否されました: ' + (e.message || e));
+        return;
+      }
+      const mime = pickAudioMime();
+      recordedMime = mime;
+      const bps = parseInt(bitrateEl.value, 10);
+      try {
+        recorder = new MediaRecorder(mediaStream, mime ? { mimeType: mime, audioBitsPerSecond: bps } : { audioBitsPerSecond: bps });
+      } catch (e) {
+        alert('録音を開始できません: ' + (e.message || e));
+        return;
+      }
+      chunks = [];
+      recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.onstop = () => {
+        const type = recorder.mimeType || mime || 'audio/webm';
+        recordedBlob = new Blob(chunks, { type });
+        recordedMime = type;
+        onRecordingStopped();
+      };
+      recorder.start(1000);
+      startedAt = performance.now();
+      timerHandle = setInterval(updateTimer, 250);
+      recordArea.classList.add('rec');
+      recState.classList.add('live');
+      recStateText.textContent = '録音中';
+      recBtn.classList.add('hidden');
+      stopBtn.classList.remove('hidden');
+    }
+
+    function stopRecording() {
+      if (!recorder) return;
+      try { recorder.stop(); } catch (e) {}
+      if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+      if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+    }
+
+    function onRecordingStopped() {
+      recState.classList.remove('live');
+      recStateText.textContent = '停止しました';
+      recBtn.classList.remove('hidden');
+      recBtn.textContent = '🎙️ 続けて録音';
+      stopBtn.classList.add('hidden');
+      recordArea.classList.remove('rec');
+
+      // Temporary: show a basic download for Step 1.
+      // The proper post-recording editor arrives in Step 4.
+      const info = document.createElement('div');
+      info.className = 'alert success';
+      info.style.marginTop = '0.7rem';
+      info.innerHTML = `録音完了: ${fmtSize(recordedBlob.size)} / 形式 ${recordedMime || '(既定)'}<br>次のステップで文字起こし・話者分割・保存が統合されます。`;
+      const old = recordArea.querySelector('.alert');
+      if (old) old.remove();
+      recordArea.appendChild(info);
+    }
+
+    recBtn.addEventListener('click', startRecording);
+    stopBtn.addEventListener('click', stopRecording);
+  </script>
+</body>
+</html>
