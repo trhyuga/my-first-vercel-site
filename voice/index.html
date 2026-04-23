@@ -229,6 +229,91 @@
     .live-transcript .interim { opacity: 0.5; font-style: italic; }
     .live-transcript .empty { opacity: 0.4; font-style: italic; }
 
+    .editor .seg-row {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0.55rem 0;
+      border-bottom: 1px solid #f1f5f9;
+      align-items: flex-start;
+    }
+    .editor .seg-row:last-child { border-bottom: none; }
+    .seg-time {
+      font-size: 0.72rem;
+      color: #64748b;
+      font-variant-numeric: tabular-nums;
+      flex: 0 0 auto;
+      padding-top: 0.5rem;
+      width: 58px;
+    }
+    .seg-spk-sel {
+      flex: 0 0 auto;
+      border: 1px solid #cbd5e1;
+      border-radius: 7px;
+      padding: 0.4rem 0.5rem;
+      font-size: 0.78rem;
+      background: #fff;
+      color: #0f172a;
+      -webkit-appearance: none; appearance: none;
+    }
+    .seg-text {
+      flex: 1;
+      border: 1px solid transparent;
+      background: transparent;
+      color: #0f172a;
+      font-family: inherit;
+      font-size: 0.88rem;
+      line-height: 1.55;
+      resize: vertical;
+      min-height: 38px;
+      padding: 0.35rem 0.4rem;
+      border-radius: 7px;
+    }
+    .seg-text:focus { outline: none; border-color: #38bdf8; background: #f0f9ff; }
+    .seg-del {
+      flex: 0 0 auto;
+      width: 32px; height: 32px;
+      min-height: auto;
+      background: #fff;
+      border: 1px solid #fecaca;
+      color: #ef4444;
+      border-radius: 7px;
+      font-size: 0.85rem;
+      padding: 0;
+      cursor: pointer;
+    }
+
+    .speakers-edit {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-bottom: 0.6rem;
+    }
+    .spk-edit {
+      display: flex;
+      align-items: center;
+      background: #f1f5f9;
+      border-radius: 999px;
+      padding: 0.25rem 0.3rem 0.25rem 0.75rem;
+    }
+    .spk-edit input {
+      border: none;
+      background: transparent;
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #0f172a;
+      width: 92px;
+      font-family: inherit;
+      padding: 0;
+    }
+    .spk-edit input:focus { outline: none; }
+    .spk-edit .cnt {
+      font-size: 0.68rem;
+      color: #64748b;
+      margin-right: 0.35rem;
+    }
+
+    audio { width: 100%; margin-top: 0.5rem; }
+
     button.btn {
       border: none;
       border-radius: 11px;
@@ -340,6 +425,23 @@
       <div style="margin-top:0.75rem;">
         <button class="btn btn-rec" id="recBtn">🎙️ 録音開始</button>
         <button class="btn btn-stop hidden" id="stopBtn">■ 停止</button>
+      </div>
+    </div>
+
+    <div class="panel editor hidden" id="editorPanel">
+      <h2>録音後エディタ</h2>
+      <audio id="playback" controls></audio>
+      <div class="meta" id="audioMeta" style="margin-top:0.5rem;"></div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="autoDiaBtn">🤖 話者を自動分類</button>
+      </div>
+      <div class="field">
+        <label>話者(タップで名前編集)</label>
+        <div class="speakers-edit" id="speakersEdit"></div>
+      </div>
+      <div class="field">
+        <label>発言セグメント (編集可)</label>
+        <div id="segList"></div>
       </div>
     </div>
 
@@ -742,17 +844,168 @@
       recBtn.textContent = '🎙️ 続けて録音';
       stopBtn.classList.add('hidden');
       recordArea.classList.remove('rec');
-
-      // Temporary: show a basic download for Step 1.
-      // The proper post-recording editor arrives in Step 4.
-      const info = document.createElement('div');
-      info.className = 'alert success';
-      info.style.marginTop = '0.7rem';
-      info.innerHTML = `録音完了: ${fmtSize(recordedBlob.size)} / 形式 ${recordedMime || '(既定)'}<br>次のステップで文字起こし・話者分割・保存が統合されます。`;
-      const old = recordArea.querySelector('.alert');
-      if (old) old.remove();
-      recordArea.appendChild(info);
+      document.getElementById('speakers').classList.add('hidden');
+      document.getElementById('liveTranscript').classList.add('hidden');
+      showEditor();
     }
+
+    // ---- Post-recording editor ----
+    const editorPanel = document.getElementById('editorPanel');
+    const playback = document.getElementById('playback');
+    const audioMeta = document.getElementById('audioMeta');
+    const segListEl = document.getElementById('segList');
+    const speakersEditEl = document.getElementById('speakersEdit');
+
+    function showEditor() {
+      if (!recordedBlob) return;
+      const url = URL.createObjectURL(recordedBlob);
+      playback.src = url;
+      const dur = (performance.now() - startedAt) / 1000;
+      audioMeta.innerHTML = `
+        <span>⏱ ${fmtHMS(dur)}</span>
+        <span>💾 ${fmtSize(recordedBlob.size)}</span>
+        <span>🎵 ${recordedMime || 'audio'}</span>
+        <span>📝 ${segments.length}発言</span>
+      `;
+      editorPanel.classList.remove('hidden');
+      editorPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      renderSpeakersEdit();
+      renderSegList();
+    }
+
+    function renderSpeakersEdit() {
+      const counts = speakers.map(() => 0);
+      segments.forEach(s => { if (s.speaker != null) counts[s.speaker] = (counts[s.speaker] || 0) + 1; });
+      speakersEditEl.innerHTML = '';
+      speakers.forEach((name, i) => {
+        const chip = document.createElement('div');
+        chip.className = 'spk-edit';
+        chip.innerHTML = `<input type="text" value="${escapeHtml(name)}" data-idx="${i}" /><span class="cnt">${counts[i] || 0}件</span>`;
+        const input = chip.querySelector('input');
+        input.addEventListener('input', () => {
+          speakers[i] = input.value || ('話者' + String.fromCharCode('A'.charCodeAt(0) + i));
+          renderSegList();
+        });
+        speakersEditEl.appendChild(chip);
+      });
+    }
+
+    function renderSegList() {
+      segListEl.innerHTML = '';
+      segments.forEach((s, i) => {
+        const row = document.createElement('div');
+        row.className = 'seg-row';
+        const opts = speakers.map((n, j) => `<option value="${j}"${j === s.speaker ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('');
+        row.innerHTML = `
+          <span class="seg-time">${fmtHMS(s.t)}</span>
+          <select class="seg-spk-sel">${opts}</select>
+          <textarea class="seg-text" rows="1">${escapeHtml(s.text)}</textarea>
+          <button class="seg-del" aria-label="削除">✕</button>
+        `;
+        const ta = row.querySelector('.seg-text');
+        ta.addEventListener('input', () => { s.text = ta.value; });
+        ta.addEventListener('focus', () => { try { playback.currentTime = s.t; } catch (e) {} });
+        row.querySelector('.seg-spk-sel').addEventListener('change', (e) => {
+          s.speaker = parseInt(e.target.value, 10);
+          renderSpeakersEdit();
+        });
+        row.querySelector('.seg-del').addEventListener('click', () => {
+          segments.splice(i, 1);
+          renderSpeakersEdit();
+          renderSegList();
+        });
+        segListEl.appendChild(row);
+      });
+    }
+
+    // ---- Automatic speaker clustering (heuristic) ----
+    // Simple k-means over 2D features [pitch (Hz), centroid (Hz)] normalized.
+    function autoClusterSpeakers() {
+      const featsIdx = segments.map((s, i) => s.feat ? i : -1).filter(i => i >= 0);
+      if (featsIdx.length < 2) {
+        alert('声の特徴量が足りません (短すぎる録音か、発言が少ない)。');
+        return;
+      }
+      const kPrompt = prompt('話者は何人いますか? (2〜6)', Math.min(6, Math.max(2, speakers.length)));
+      if (!kPrompt) return;
+      const K = Math.max(2, Math.min(6, parseInt(kPrompt, 10) || 2));
+
+      // Normalize features
+      const raw = featsIdx.map(i => [segments[i].feat.pitch, segments[i].feat.centroid]);
+      const mean = [0, 0], std = [1, 1];
+      for (const r of raw) { mean[0] += r[0]; mean[1] += r[1]; }
+      mean[0] /= raw.length; mean[1] /= raw.length;
+      let v0 = 0, v1 = 0;
+      for (const r of raw) { v0 += (r[0] - mean[0]) ** 2; v1 += (r[1] - mean[1]) ** 2; }
+      std[0] = Math.sqrt(v0 / raw.length) || 1;
+      std[1] = Math.sqrt(v1 / raw.length) || 1;
+      const pts = raw.map(r => [(r[0] - mean[0]) / std[0], (r[1] - mean[1]) / std[1]]);
+
+      // Seed centroids with k-means++ lite: pick the k most spread points
+      const centroids = [pts[0].slice()];
+      while (centroids.length < K) {
+        let best = 0, bestDist = -1;
+        for (let i = 0; i < pts.length; i++) {
+          let m = Infinity;
+          for (const c of centroids) {
+            const d = (pts[i][0] - c[0]) ** 2 + (pts[i][1] - c[1]) ** 2;
+            if (d < m) m = d;
+          }
+          if (m > bestDist) { bestDist = m; best = i; }
+        }
+        centroids.push(pts[best].slice());
+      }
+
+      // Lloyd iterations
+      const assign = new Array(pts.length).fill(0);
+      for (let iter = 0; iter < 30; iter++) {
+        let changed = 0;
+        for (let i = 0; i < pts.length; i++) {
+          let bi = 0, bd = Infinity;
+          for (let k = 0; k < K; k++) {
+            const d = (pts[i][0] - centroids[k][0]) ** 2 + (pts[i][1] - centroids[k][1]) ** 2;
+            if (d < bd) { bd = d; bi = k; }
+          }
+          if (assign[i] !== bi) { assign[i] = bi; changed++; }
+        }
+        const sums = Array.from({ length: K }, () => [0, 0, 0]);
+        for (let i = 0; i < pts.length; i++) {
+          sums[assign[i]][0] += pts[i][0];
+          sums[assign[i]][1] += pts[i][1];
+          sums[assign[i]][2] += 1;
+        }
+        for (let k = 0; k < K; k++) {
+          if (sums[k][2] > 0) {
+            centroids[k][0] = sums[k][0] / sums[k][2];
+            centroids[k][1] = sums[k][1] / sums[k][2];
+          }
+        }
+        if (!changed) break;
+      }
+
+      // Order clusters by average pitch (low → high) so speaker names are stable
+      const avgPitch = centroids.map((c, k) => {
+        let sum = 0, n = 0;
+        for (let i = 0; i < pts.length; i++) if (assign[i] === k) { sum += raw[i][0]; n++; }
+        return { k, avg: n ? sum / n : 0 };
+      }).sort((a, b) => a.avg - b.avg);
+      const remap = {};
+      avgPitch.forEach((x, order) => { remap[x.k] = order; });
+
+      // Ensure we have K speakers
+      while (speakers.length < K) speakers.push('話者' + String.fromCharCode('A'.charCodeAt(0) + speakers.length));
+      speakers.length = Math.max(speakers.length, K);
+
+      // Apply assignments
+      for (let j = 0; j < featsIdx.length; j++) {
+        segments[featsIdx[j]].speaker = remap[assign[j]];
+      }
+
+      renderSpeakersEdit();
+      renderSegList();
+    }
+
+    document.getElementById('autoDiaBtn').addEventListener('click', autoClusterSpeakers);
 
     recBtn.addEventListener('click', startRecording);
     stopBtn.addEventListener('click', stopRecording);
