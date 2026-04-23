@@ -330,14 +330,6 @@
         <p style="font-size:0.82rem;color:#475569;line-height:1.6;margin-bottom:0.6rem;" id="detectHint">
           動画を <b>ぼかしたい人が写っているシーン</b> で一時停止してから「顔を検出」をタップ。検出された顔をタップで選択できます。
         </p>
-        <div class="field" style="margin-top:0;">
-          <label>検出の感度</label>
-          <div class="mode-row">
-            <div class="mode-chip" data-sens="fast">🏃 速い<span class="sub">正面の顔・軽量</span></div>
-            <div class="mode-chip active" data-sens="balanced">⚖️ 標準<span class="sub">ふつう</span></div>
-            <div class="mode-chip" data-sens="sensitive">🔍 細かく検出<span class="sub">横顔・小さい顔も拾う</span></div>
-          </div>
-        </div>
         <div class="field">
           <label>識別の厳しさ <span style="color:#94a3b8;font-weight:400;">(別人を間違えて掛けないか)</span></label>
           <div class="mode-row">
@@ -555,35 +547,23 @@
             if (faceapi.tf.ready) await faceapi.tf.ready();
           }
         } catch (e) { /* fall back to whatever backend TF picked */ }
-        await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+        // Always load SSD (good recall for profiles / small faces) + landmarks
+        // + recognition. One-time download; cached afterwards.
+        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
         await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
         await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-        modelsReady = true;
-        detectStatus.innerHTML = '';
-      }
-      if (sensitivity === 'sensitive' && !ssdLoaded) {
-        detectStatus.innerHTML = '<div class="alert info">高精度モデル (SSD) を読み込み中…</div>';
-        await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
         ssdLoaded = true;
+        modelsReady = true;
         detectStatus.innerHTML = '';
       }
     }
 
     function detectorOptions() {
-      if (sensitivity === 'sensitive' && ssdLoaded) {
-        return new faceapi.SsdMobilenetv1Options({ minConfidence: 0.2, maxResults: 200 });
-      }
-      if (sensitivity === 'fast') {
-        return new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.55 });
-      }
-      // balanced
-      return new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.35 });
+      // One fixed detector across selection + processing: SSD MobileNet v1,
+      // tuned for recall so profiles / small faces are not missed.
+      return new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3, maxResults: 100 });
     }
 
-    document.querySelectorAll('.mode-chip[data-sens]').forEach(chip => chip.addEventListener('click', () => {
-      sensitivity = chip.dataset.sens;
-      document.querySelectorAll('.mode-chip[data-sens]').forEach(c => c.classList.toggle('active', c === chip));
-    }));
     document.querySelectorAll('.mode-chip[data-strict]').forEach(chip => chip.addEventListener('click', () => {
       const k = chip.dataset.strict;
       MATCH_THRESHOLD = (k === 'strict') ? 0.40 : (k === 'loose') ? 0.58 : 0.48;
@@ -982,16 +962,25 @@
         recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
         const stopped = new Promise(res => { recorder.onstop = res; });
 
-        const detOpts = (sensitivity === 'sensitive' && ssdLoaded)
-          ? new faceapi.SsdMobilenetv1Options({ minConfidence: 0.25, maxResults: 200 })
-          : new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.4 });
+        // Always SSD during video — good recall for profiles / small faces.
+        const detOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3, maxResults: 100 });
 
-        const STICKY_FRAMES = 30;
-        let lastMatches = [];
-        let lastDetectTimeMs = 0;
-        let prevSnapshot = null;
-        let stickyLeft = 0;
-        let detectRunning = false;
+        // Track-based pipeline:
+        //  - Run a full detection every DETECT_INTERVAL_MS (~4 fps).
+        //  - On detection, each face box gets matched to an existing track by
+        //    IoU / center-distance. New tracks are created for unmatched boxes;
+        //    ghost tracks are dropped after MAX_GHOST_MS without a match.
+        //  - Identity (shouldBlur) is decided on detection only, then FROZEN
+        //    on the track. Between detections we just follow the box by
+        //    velocity — no descriptor compares, no ML work on intermediate
+        //    frames. That removes GPU contention, keeps the canvas at source
+        //    framerate, and stops 別人ぼかし from flip-flopping.
+        const DETECT_INTERVAL_MS = 250;
+        const MAX_GHOST_MS = 1500;
+        let tracks = [];          // {id, box, vx, vy, shouldBlur, detectedAtMs}
+        let nextTrackId = 1;
+        let lastDetectAtMs = -Infinity;
+        let detectBusy = false;
 
         // Muted must be set BEFORE play() so iOS Safari allows inline playback.
         srcVideo.muted = true;
@@ -1005,102 +994,136 @@
 
         const haveRVFC = typeof srcVideo.requestVideoFrameCallback === 'function';
 
+        function boxIoU(a, b) {
+          const x1 = Math.max(a.x, b.x);
+          const y1 = Math.max(a.y, b.y);
+          const x2 = Math.min(a.x + a.width, b.x + b.width);
+          const y2 = Math.min(a.y + a.height, b.y + b.height);
+          const iw = Math.max(0, x2 - x1), ih = Math.max(0, y2 - y1);
+          const inter = iw * ih;
+          const area = a.width * a.height + b.width * b.height - inter;
+          return area > 0 ? inter / area : 0;
+        }
+        function centerDist(a, b) {
+          const ax = a.x + a.width / 2, ay = a.y + a.height / 2;
+          const bx = b.x + b.width / 2, by = b.y + b.height / 2;
+          return Math.hypot(ax - bx, ay - by);
+        }
+
         async function runDetection() {
+          const needsDescriptor = (blurMode !== 'all');
           try {
-            if (blurMode === 'all') {
-              const dets = await faceapi.detectAllFaces(srcVideo, detOpts);
-              return dets.map(d => ({ box: d.box }));
+            let raw;
+            if (needsDescriptor) {
+              raw = await faceapi.detectAllFaces(srcVideo, detOpts)
+                .withFaceLandmarks().withFaceDescriptors();
+            } else {
+              raw = await faceapi.detectAllFaces(srcVideo, detOpts);
             }
-            const dets = await faceapi.detectAllFaces(srcVideo, detOpts)
-              .withFaceLandmarks()
-              .withFaceDescriptors();
-            const matches = [];
-            for (const d of dets) {
-              const dist = selectedDescriptors.length ? minDistanceToSelected(d.descriptor) : Infinity;
-              const isMatched = dist < MATCH_THRESHOLD;
-              if (blurMode === 'selected' && isMatched) matches.push({ box: d.detection.box });
-              if (blurMode === 'others' && !isMatched) matches.push({ box: d.detection.box });
+            const now = performance.now();
+            const items = raw.map(r => ({
+              box: needsDescriptor ? r.detection.box : r.box,
+              descriptor: needsDescriptor ? r.descriptor : null,
+            }));
+
+            // Greedy match each detection to an existing track, using IoU first
+            // and falling back to center distance when IoU is zero (e.g. the
+            // face jumped outside the previous box).
+            const usedTracks = new Set();
+            const newTracks = [];
+            for (const it of items) {
+              let bestI = -1, bestIoU = 0, bestDist = Infinity;
+              const refDim = Math.max(it.box.width, it.box.height);
+              for (let i = 0; i < tracks.length; i++) {
+                if (usedTracks.has(i)) continue;
+                const iou = boxIoU(it.box, tracks[i].box);
+                const d = centerDist(it.box, tracks[i].box);
+                if (iou > bestIoU) { bestIoU = iou; bestI = i; bestDist = d; }
+                else if (bestIoU === 0 && d < bestDist && d < refDim * 1.5) {
+                  bestDist = d; bestI = i;
+                }
+              }
+
+              // Identity: decided only on detection frames, not every frame.
+              let shouldBlur;
+              if (blurMode === 'all') shouldBlur = true;
+              else {
+                const dist = (it.descriptor && selectedDescriptors.length)
+                  ? minDistanceToSelected(it.descriptor) : Infinity;
+                const isSelected = dist < MATCH_THRESHOLD;
+                shouldBlur = (blurMode === 'selected') ? isSelected : !isSelected;
+              }
+
+              if (bestI >= 0 && (bestIoU > 0.2 || bestDist < refDim * 1.2)) {
+                const t = tracks[bestI];
+                const dtSec = Math.max(0.02, (now - t.detectedAtMs) / 1000);
+                const prevCx = t.box.x + t.box.width / 2;
+                const prevCy = t.box.y + t.box.height / 2;
+                const curCx = it.box.x + it.box.width / 2;
+                const curCy = it.box.y + it.box.height / 2;
+                const vx = (curCx - prevCx) / dtSec;
+                const vy = (curCy - prevCy) / dtSec;
+                // Smooth the velocity so a jittery detection does not make the
+                // blur swing around.
+                t.vx = (t.vx || 0) * 0.4 + vx * 0.6;
+                t.vy = (t.vy || 0) * 0.4 + vy * 0.6;
+                t.box = it.box;
+                t.shouldBlur = shouldBlur;
+                t.detectedAtMs = now;
+                usedTracks.add(bestI);
+              } else {
+                newTracks.push({
+                  id: nextTrackId++,
+                  box: it.box,
+                  vx: 0, vy: 0,
+                  shouldBlur,
+                  detectedAtMs: now,
+                });
+              }
             }
-            return matches;
-          } catch (e) { return []; }
+
+            // Drop ghosts.
+            tracks = tracks.filter((t, i) => usedTracks.has(i) || (now - t.detectedAtMs) < MAX_GHOST_MS);
+            tracks = tracks.concat(newTracks);
+          } catch (e) { /* skip this detection pass */ }
         }
 
-        function boxCenter(b) { return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; }
-        function assignVelocities(newMatches, prev) {
-          if (!prev || !prev.matches.length) {
-            for (const m of newMatches) { m.vx = 0; m.vy = 0; m.cx = boxCenter(m.box).x; m.cy = boxCenter(m.box).y; }
-            return;
-          }
-          const dt = Math.max(0.016, (performance.now() - prev.time) / 1000);
-          for (const m of newMatches) {
-            const mc = boxCenter(m.box);
-            // Nearest previous match by center distance, within a plausible range.
-            let best = null, bestD = Infinity;
-            for (const p of prev.matches) {
-              const d = Math.hypot(mc.x - p.cx, mc.y - p.cy);
-              if (d < bestD) { bestD = d; best = p; }
-            }
-            const maxJump = Math.max(m.box.width, 80) * 1.8;
-            if (best && bestD < maxJump) {
-              m.vx = (mc.x - best.cx) / dt;
-              m.vy = (mc.y - best.cy) / dt;
-            } else {
-              m.vx = 0; m.vy = 0;
-            }
-            m.cx = mc.x; m.cy = mc.y;
-          }
-        }
-
-        function scheduleDetection() {
-          if (detectRunning) return;
-          detectRunning = true;
-          runDetection().then(matches => {
-            if (matches.length > 0) {
-              assignVelocities(matches, prevSnapshot);
-              prevSnapshot = { time: performance.now(), matches };
-              lastMatches = matches;
-              lastDetectTimeMs = performance.now();
-              stickyLeft = STICKY_FRAMES;
-            } else if (stickyLeft > 0) {
-              stickyLeft--;
-            } else {
-              lastMatches = [];
-            }
-          }).finally(() => { detectRunning = false; });
+        function scheduleDetectionIfDue() {
+          const now = performance.now();
+          if (detectBusy) return;
+          if (now - lastDetectAtMs < DETECT_INTERVAL_MS) return;
+          detectBusy = true;
+          lastDetectAtMs = now;
+          runDetection().finally(() => { detectBusy = false; });
         }
 
         const processFrame = () => {
           if (srcVideo.ended || srcVideo.paused) return;
-          // Draw + blur IMMEDIATELY so captureStream gets a fresh frame every
-          // time the source decodes one. No awaits on this path.
+          // Draw the source frame every time — this is what MediaRecorder
+          // captures. No awaits on this path.
           outCtx.drawImage(srcVideo, 0, 0, vw, vh);
-          // Extrapolate box positions forward using velocity so the blur keeps
-          // up with a moving face while the next detection is in flight.
-          const ageSec = Math.min(0.6, Math.max(0, (performance.now() - lastDetectTimeMs) / 1000));
-          const stale = Math.max(0, STICKY_FRAMES - stickyLeft);
-          const basePadExtra = Math.min(0.25, stale * 0.01);
-          for (const m of lastMatches) {
-            const ex = m.box.x + (m.vx || 0) * ageSec;
-            const ey = m.box.y + (m.vy || 0) * ageSec;
-            // Speed-adaptive padding: if the face is moving fast, grow the
-            // blur box in proportion to expected displacement. This covers
-            // prediction error + the half-frame the face keeps moving after
-            // this draw lands.
-            const speed = Math.hypot(m.vx || 0, m.vy || 0); // px/sec
-            const refDim = Math.max(m.box.width, m.box.height) || 100;
-            const speedPadFrac = Math.min(0.45, (speed * ageSec * 0.55) / refDim);
-            const padExtra = basePadExtra + speedPadFrac;
-            const predictedBox = { x: ex, y: ey, width: m.box.width, height: m.box.height };
-            applyBlurToBox(outCtx, predictedBox, out, padExtra);
+
+          const now = performance.now();
+          for (const t of tracks) {
+            if (!t.shouldBlur) continue;
+            const ageSec = Math.min(DETECT_INTERVAL_MS / 1000 + 0.3, (now - t.detectedAtMs) / 1000);
+            const px = t.box.x + (t.vx || 0) * ageSec;
+            const py = t.box.y + (t.vy || 0) * ageSec;
+            // Wider blur when the face is moving fast so prediction error does
+            // not leave the face exposed for a frame or two.
+            const speed = Math.hypot(t.vx || 0, t.vy || 0);
+            const refDim = Math.max(t.box.width, t.box.height) || 100;
+            const padExtra = Math.min(0.45, (speed * ageSec * 0.55) / refDim);
+            applyBlurToBox(outCtx, { x: px, y: py, width: t.box.width, height: t.box.height }, out, padExtra);
           }
 
-          // Kick off a background detection if none is running.
-          scheduleDetection();
+          // Schedule the next detection only when the interval has elapsed.
+          scheduleDetectionIfDue();
 
-          const now = srcVideo.currentTime;
+          const nowSec = srcVideo.currentTime;
           if (srcVideo.duration > 0) {
-            const pct = Math.min(99, (now / srcVideo.duration) * 100);
-            processProgress(pct, `処理中 ${now.toFixed(1)} / ${srcVideo.duration.toFixed(1)}秒`);
+            const pct = Math.min(99, (nowSec / srcVideo.duration) * 100);
+            processProgress(pct, `処理中 ${nowSec.toFixed(1)} / ${srcVideo.duration.toFixed(1)}秒 · 追跡中 ${tracks.filter(t => t.shouldBlur).length}人`);
           }
           if (haveRVFC) srcVideo.requestVideoFrameCallback(processFrame);
           else requestAnimationFrame(processFrame);
