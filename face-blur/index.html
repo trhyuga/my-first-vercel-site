@@ -716,7 +716,7 @@
     });
 
     // ---- Full-video processing ----
-    const MATCH_THRESHOLD = 0.55; // face descriptor distance (smaller = more similar)
+    const MATCH_THRESHOLD = 0.62; // face descriptor distance (smaller = more similar)
     let processedBlob = null;
 
     function euclidean(a, b) {
@@ -733,13 +733,54 @@
       return m;
     }
 
+    // Reliable cross-browser blur: iterative bilinear downscale → upscale.
+    // `ctx.filter = 'blur()'` silently no-ops in some WebKit paths (especially
+    // when source == destination), which is why the previous filter-based
+    // approach often produced no visible blur. Downscale/upscale is a box-blur
+    // approximation that works consistently everywhere.
+    function makeBlurredPatch(srcCanvas, sx, sy, sw, sh, strength) {
+      const steps = Math.max(1, Math.min(6, Math.round(strength / 8)));
+      let w = Math.max(1, sw), h = Math.max(1, sh);
+      let cur = document.createElement('canvas');
+      cur.width = w; cur.height = h;
+      cur.getContext('2d').drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, w, h);
+      for (let i = 0; i < steps; i++) {
+        const nw = Math.max(1, Math.round(w / 2));
+        const nh = Math.max(1, Math.round(h / 2));
+        const nxt = document.createElement('canvas');
+        nxt.width = nw; nxt.height = nh;
+        const nctx = nxt.getContext('2d');
+        nctx.imageSmoothingEnabled = true;
+        nctx.imageSmoothingQuality = 'low';
+        nctx.drawImage(cur, 0, 0, w, h, 0, 0, nw, nh);
+        cur = nxt; w = nw; h = nh;
+      }
+      const patch = document.createElement('canvas');
+      patch.width = sw; patch.height = sh;
+      const pctx = patch.getContext('2d');
+      pctx.imageSmoothingEnabled = true;
+      pctx.imageSmoothingQuality = 'high';
+      pctx.drawImage(cur, 0, 0, w, h, 0, 0, sw, sh);
+      // Optional extra gaussian softening on top; if filter is unsupported the
+      // draw is a no-op and we still have the downscale blur.
+      try {
+        const extra = document.createElement('canvas');
+        extra.width = sw; extra.height = sh;
+        const ectx = extra.getContext('2d');
+        ectx.filter = `blur(${Math.max(2, Math.round(strength / 4))}px)`;
+        ectx.drawImage(patch, 0, 0);
+        ectx.filter = 'none';
+        return extra;
+      } catch (e) { return patch; }
+    }
+
     function applyBlurToBox(ctx, box, srcCanvas, extraPadFraction) {
       const x = Math.max(0, Math.floor(box.x));
       const y = Math.max(0, Math.floor(box.y));
       const w = Math.min(srcCanvas.width - x, Math.ceil(box.width));
       const h = Math.min(srcCanvas.height - y, Math.ceil(box.height));
       if (w <= 1 || h <= 1) return;
-      const basePad = 0.12 + (extraPadFraction || 0);
+      const basePad = 0.14 + (extraPadFraction || 0);
       const pad = Math.round(Math.min(w, h) * basePad);
       const px = Math.max(0, x - pad);
       const py = Math.max(0, y - pad);
@@ -757,15 +798,7 @@
         return;
       }
 
-      // Build the blurred/pixelated patch on an offscreen canvas first.
-      // Reading the same canvas we are writing to + filter + clip can silently
-      // no-op on some browsers (especially Safari/iOS); routing through a
-      // separate target guarantees the effect actually lands.
-      const patch = document.createElement('canvas');
-      patch.width = pw;
-      patch.height = ph;
-      const pctx = patch.getContext('2d');
-
+      let patch;
       if (blurShape === 'pixel') {
         const cellSize = Math.max(6, Math.round(strength * 0.8));
         const tinyW = Math.max(1, Math.round(pw / cellSize));
@@ -775,16 +808,15 @@
         const tctx = tiny.getContext('2d');
         tctx.imageSmoothingEnabled = false;
         tctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, tinyW, tinyH);
+        patch = document.createElement('canvas');
+        patch.width = pw; patch.height = ph;
+        const pctx = patch.getContext('2d');
         pctx.imageSmoothingEnabled = false;
         pctx.drawImage(tiny, 0, 0, tinyW, tinyH, 0, 0, pw, ph);
       } else {
-        // Gaussian blur
-        pctx.filter = `blur(${strength}px)`;
-        pctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, pw, ph);
-        pctx.filter = 'none';
+        patch = makeBlurredPatch(srcCanvas, px, py, pw, ph, strength);
       }
 
-      // Composite the patch back through an ellipse clip so the edges stay soft.
       ctx.save();
       ctx.beginPath();
       ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
@@ -890,19 +922,35 @@
         } catch (e) { /* audio optional */ }
 
         const mime = pickSupportedMime();
-        const recorder = new MediaRecorder(canvasStream, mime ? { mimeType: mime, videoBitsPerSecond: 6_000_000 } : {});
+        // Target roughly the source's bitrate so re-encode doesn't halve quality.
+        const srcDurSec = srcVideo.duration || 10;
+        const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
+        const targetBps = Math.max(4_000_000, Math.min(24_000_000, srcBps));
+        const recorder = new MediaRecorder(canvasStream, mime ? { mimeType: mime, videoBitsPerSecond: targetBps } : {});
         const chunks = [];
         recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
         const stopped = new Promise(res => { recorder.onstop = res; });
 
-        // Detector options follow the sensitivity chip
-        const detOpts = detectorOptions();
-        // Detect every Nth decoded frame; carry the last boxes forward on the
-        // in-between frames. Drops per-frame detection cost by ~66% so the
-        // real-time MediaRecorder pipeline keeps up and the output stays smooth.
-        const DETECT_INTERVAL = 3;
-        let frameCount = 0;
+        // Auto-upgrade detector to SSD (sensitive) during video processing —
+        // it's noticeably better at profiles / close-ups where Tiny misses.
+        if (!ssdLoaded) {
+          processProgress(0, '高精度モデル (SSD) を読み込み中…');
+          try { await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL); ssdLoaded = true; }
+          catch (e) { /* keep whatever is loaded */ }
+        }
+        const detOpts = ssdLoaded
+          ? new faceapi.SsdMobilenetv1Options({ minConfidence: 0.2, maxResults: 200 })
+          : detectorOptions();
+
+        // Keep detection OFF the per-frame draw path so MediaRecorder never
+        // starves. Detection runs async; when a new result arrives, update the
+        // box list. If detection briefly returns zero (occlusion, motion blur,
+        // profile angle), keep the last known boxes for STICKY_FRAMES frames so
+        // the blur does not flicker off.
+        const STICKY_FRAMES = 30; // ~1s @ 30fps
         let lastMatches = [];
+        let stickyLeft = 0;
+        let detectRunning = false;
 
         srcVideo.pause();
         srcVideo.currentTime = 0;
@@ -914,54 +962,69 @@
         processProgress(0, '処理開始…');
 
         const haveRVFC = typeof srcVideo.requestVideoFrameCallback === 'function';
-        recorder.start(800);
-        await srcVideo.play();
 
         async function runDetection() {
-          const matches = [];
           try {
             if (blurMode === 'all') {
               const dets = await faceapi.detectAllFaces(srcVideo, detOpts);
-              for (const d of dets) matches.push({ box: d.box });
-            } else {
-              const dets = await faceapi.detectAllFaces(srcVideo, detOpts)
-                .withFaceLandmarks()
-                .withFaceDescriptors();
-              for (const d of dets) {
-                const dist = selectedDescriptors.length ? minDistanceToSelected(d.descriptor) : Infinity;
-                const isMatched = dist < MATCH_THRESHOLD;
-                if (blurMode === 'selected' && isMatched) matches.push({ box: d.detection.box });
-                if (blurMode === 'others' && !isMatched) matches.push({ box: d.detection.box });
-              }
+              return dets.map(d => ({ box: d.box }));
             }
-          } catch (e) { /* skip this frame on error */ }
-          return matches;
+            const dets = await faceapi.detectAllFaces(srcVideo, detOpts)
+              .withFaceLandmarks()
+              .withFaceDescriptors();
+            const matches = [];
+            for (const d of dets) {
+              const dist = selectedDescriptors.length ? minDistanceToSelected(d.descriptor) : Infinity;
+              const isMatched = dist < MATCH_THRESHOLD;
+              if (blurMode === 'selected' && isMatched) matches.push({ box: d.detection.box });
+              if (blurMode === 'others' && !isMatched) matches.push({ box: d.detection.box });
+            }
+            return matches;
+          } catch (e) { return []; }
         }
 
-        const processFrame = async () => {
+        function scheduleDetection() {
+          if (detectRunning) return;
+          detectRunning = true;
+          runDetection().then(matches => {
+            if (matches.length > 0) {
+              lastMatches = matches;
+              stickyLeft = STICKY_FRAMES;
+            } else if (stickyLeft > 0) {
+              stickyLeft--;
+            } else {
+              lastMatches = [];
+            }
+          }).finally(() => { detectRunning = false; });
+        }
+
+        const processFrame = () => {
           if (srcVideo.ended || srcVideo.paused) return;
+          // Draw + blur IMMEDIATELY so captureStream gets a fresh frame every
+          // time the source decodes one. No awaits on this path.
           outCtx.drawImage(srcVideo, 0, 0, vw, vh);
-
-          // Detect on frame 0 and every Nth frame; reuse last boxes between.
-          if (frameCount % DETECT_INTERVAL === 0) {
-            lastMatches = await runDetection();
-          }
-          frameCount++;
-
-          // Slightly expand boxes on non-detect frames so a moving face stays covered.
-          const padExtra = (frameCount % DETECT_INTERVAL === 1) ? 0 : 0.08;
+          // Extra padding scales with how stale the boxes are, so moving faces
+          // stay covered between detections.
+          const stale = Math.max(0, STICKY_FRAMES - stickyLeft);
+          const padExtra = Math.min(0.2, stale * 0.01);
           for (const m of lastMatches) applyBlurToBox(outCtx, m.box, out, padExtra);
+
+          // Kick off a background detection if none is running.
+          scheduleDetection();
 
           const now = srcVideo.currentTime;
           if (srcVideo.duration > 0) {
             const pct = Math.min(99, (now / srcVideo.duration) * 100);
             processProgress(pct, `処理中 ${now.toFixed(1)} / ${srcVideo.duration.toFixed(1)}秒`);
           }
-          if (haveRVFC) srcVideo.requestVideoFrameCallback(() => processFrame());
-          else requestAnimationFrame(() => processFrame());
+          if (haveRVFC) srcVideo.requestVideoFrameCallback(processFrame);
+          else requestAnimationFrame(processFrame);
         };
-        if (haveRVFC) srcVideo.requestVideoFrameCallback(() => processFrame());
-        else requestAnimationFrame(() => processFrame());
+
+        recorder.start(800);
+        await srcVideo.play();
+        if (haveRVFC) srcVideo.requestVideoFrameCallback(processFrame);
+        else requestAnimationFrame(processFrame);
 
         await new Promise(res => { srcVideo.onended = res; });
         // Give the recorder one last chunk before stopping
