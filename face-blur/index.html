@@ -338,6 +338,14 @@
             <div class="mode-chip" data-sens="sensitive">🔍 細かく検出<span class="sub">横顔・小さい顔も拾う</span></div>
           </div>
         </div>
+        <div class="field">
+          <label>識別の厳しさ <span style="color:#94a3b8;font-weight:400;">(別人を間違えて掛けないか)</span></label>
+          <div class="mode-row">
+            <div class="mode-chip" data-strict="strict">🎯 厳しめ<span class="sub">他人を取りにくい</span></div>
+            <div class="mode-chip active" data-strict="normal">⚖️ 標準</div>
+            <div class="mode-chip" data-strict="loose">🫥 ゆるめ<span class="sub">自分を取りこぼしにくい</span></div>
+          </div>
+        </div>
         <div class="btn-row" style="margin-top:0.6rem;">
           <button class="btn btn-secondary" id="detectBtn">🔍 顔を検出</button>
           <button class="btn btn-secondary hidden" id="clearSelBtn">選択を解除</button>
@@ -576,6 +584,11 @@
       sensitivity = chip.dataset.sens;
       document.querySelectorAll('.mode-chip[data-sens]').forEach(c => c.classList.toggle('active', c === chip));
     }));
+    document.querySelectorAll('.mode-chip[data-strict]').forEach(chip => chip.addEventListener('click', () => {
+      const k = chip.dataset.strict;
+      MATCH_THRESHOLD = (k === 'strict') ? 0.40 : (k === 'loose') ? 0.58 : 0.48;
+      document.querySelectorAll('.mode-chip[data-strict]').forEach(c => c.classList.toggle('active', c === chip));
+    }));
 
     function clearFaces() {
       faceLayer.innerHTML = '';
@@ -724,7 +737,10 @@
     });
 
     // ---- Full-video processing ----
-    const MATCH_THRESHOLD = 0.62; // face descriptor distance (smaller = more similar)
+    // Match threshold (euclidean distance between 128D descriptors).
+    // Smaller = stricter (less likely to blur a different person by mistake).
+    // 0.48 is a tighter balance than the old 0.62 default. User chip overrides.
+    let MATCH_THRESHOLD = 0.48;
     let processedBlob = null;
 
     function euclidean(a, b) {
@@ -950,7 +966,12 @@
         const stopped = new Promise(res => { recorder.onstop = res; });
 
         // Respect the sensitivity chip; do NOT force SSD (slower) during video.
-        const detOpts = detectorOptions();
+        // Use a smaller 320 input for video to cut detection latency (less GPU
+        // contention with the per-frame canvas draw) while still leaving
+        // 「細かく検出」 routed to SSD if the user chose that.
+        const detOpts = (sensitivity === 'sensitive' && ssdLoaded)
+          ? new faceapi.SsdMobilenetv1Options({ minConfidence: 0.25, maxResults: 200 })
+          : new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.4 });
 
         // Keep detection OFF the per-frame draw path so MediaRecorder never
         // starves. Detection runs async; when a new result arrives, update the
@@ -1047,12 +1068,20 @@
           outCtx.drawImage(srcVideo, 0, 0, vw, vh);
           // Extrapolate box positions forward using velocity so the blur keeps
           // up with a moving face while the next detection is in flight.
-          const ageSec = Math.min(0.35, Math.max(0, (performance.now() - lastDetectTimeMs) / 1000));
+          const ageSec = Math.min(0.6, Math.max(0, (performance.now() - lastDetectTimeMs) / 1000));
           const stale = Math.max(0, STICKY_FRAMES - stickyLeft);
-          const padExtra = Math.min(0.25, stale * 0.01);
+          const basePadExtra = Math.min(0.25, stale * 0.01);
           for (const m of lastMatches) {
             const ex = m.box.x + (m.vx || 0) * ageSec;
             const ey = m.box.y + (m.vy || 0) * ageSec;
+            // Speed-adaptive padding: if the face is moving fast, grow the
+            // blur box in proportion to expected displacement. This covers
+            // prediction error + the half-frame the face keeps moving after
+            // this draw lands.
+            const speed = Math.hypot(m.vx || 0, m.vy || 0); // px/sec
+            const refDim = Math.max(m.box.width, m.box.height) || 100;
+            const speedPadFrac = Math.min(0.45, (speed * ageSec * 0.55) / refDim);
+            const padExtra = basePadExtra + speedPadFrac;
             const predictedBox = { x: ex, y: ey, width: m.box.width, height: m.box.height };
             applyBlurToBox(outCtx, predictedBox, out, padExtra);
           }
