@@ -737,32 +737,57 @@
       return m;
     }
 
-    // Fast two-step blur: single downscale (kills high frequencies reliably
-    // on every browser) + one upscale with native gaussian filter for
-    // smoothness. Two canvases, two drawImage calls — ~5x faster than the
-    // previous multi-step variant, which matters because applyBlurToBox runs
-    // per-face per-frame during video processing.
+    // Canvas pool to avoid allocating a few canvases per face per frame (big
+    // GC win on mobile). Canvases are bucketed by rounded-up size so a
+    // slightly-changing face doesn't bypass the cache. OffscreenCanvas is
+    // used when available — cheaper than DOM canvases.
+    const canvasPool = new Map(); // key "w_h" -> Canvas[]
+    function bucketKey(w, h) { return `${Math.ceil(w / 16) * 16}_${Math.ceil(h / 16) * 16}`; }
+    function rentCanvas(w, h) {
+      const key = bucketKey(w, h);
+      const pool = canvasPool.get(key);
+      if (pool && pool.length) {
+        const c = pool.pop();
+        return c;
+      }
+      const bw = Math.ceil(w / 16) * 16;
+      const bh = Math.ceil(h / 16) * 16;
+      if (typeof OffscreenCanvas !== 'undefined') {
+        return new OffscreenCanvas(bw, bh);
+      }
+      const c = document.createElement('canvas');
+      c.width = bw; c.height = bh;
+      return c;
+    }
+    function releaseCanvas(c) {
+      const key = bucketKey(c.width, c.height);
+      let pool = canvasPool.get(key);
+      if (!pool) { pool = []; canvasPool.set(key, pool); }
+      if (pool.length < 8) pool.push(c);
+    }
+
+    // Fast two-step blur: single downscale + upscale with native gaussian.
+    // Uses canvas pool to skip allocation on most frames.
     function makeBlurredPatch(srcCanvas, sx, sy, sw, sh, strength) {
       const factor = Math.max(2, Math.round(strength / 3));
       const tinyW = Math.max(2, Math.round(sw / factor));
       const tinyH = Math.max(2, Math.round(sh / factor));
-      const tiny = document.createElement('canvas');
-      tiny.width = tinyW; tiny.height = tinyH;
+      const tiny = rentCanvas(tinyW, tinyH);
       const tctx = tiny.getContext('2d');
+      tctx.clearRect(0, 0, tiny.width, tiny.height);
       tctx.imageSmoothingEnabled = true;
       tctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, tinyW, tinyH);
 
-      const patch = document.createElement('canvas');
-      patch.width = sw; patch.height = sh;
+      const patch = rentCanvas(sw, sh);
       const pctx = patch.getContext('2d');
+      pctx.clearRect(0, 0, patch.width, patch.height);
       pctx.imageSmoothingEnabled = true;
       pctx.imageSmoothingQuality = 'high';
-      // Native filter adds gaussian softness on top of the downscale blur.
-      // If Safari silently ignores it, the downscale blur is still fully in
-      // place — no visible regression.
       pctx.filter = `blur(${Math.max(3, Math.round(strength / 3))}px)`;
       pctx.drawImage(tiny, 0, 0, tinyW, tinyH, 0, 0, sw, sh);
       pctx.filter = 'none';
+      releaseCanvas(tiny);
+      patch._bw = sw; patch._bh = sh;
       return patch;
     }
 
@@ -780,39 +805,38 @@
       const ph = Math.min(srcCanvas.height - py, h + pad * 2);
       const strength = parseFloat(blurRange.value) || 40;
 
-      // Build the patch first (black-fill / blur / mosaic).
-      let patch;
+      // Build the patch first (black-fill / blur / mosaic) using pooled canvases.
+      let patch, patchIsPooled = true;
       if (blurShape === 'fill') {
-        patch = document.createElement('canvas');
-        patch.width = pw; patch.height = ph;
+        patch = rentCanvas(pw, ph);
         const pctx = patch.getContext('2d');
+        pctx.clearRect(0, 0, patch.width, patch.height);
         pctx.fillStyle = '#000';
         pctx.fillRect(0, 0, pw, ph);
       } else if (blurShape === 'pixel') {
         const cellSize = Math.max(6, Math.round(strength * 0.8));
         const tinyW = Math.max(2, Math.round(pw / cellSize));
         const tinyH = Math.max(2, Math.round(ph / cellSize));
-        const tiny = document.createElement('canvas');
-        tiny.width = tinyW; tiny.height = tinyH;
+        const tiny = rentCanvas(tinyW, tinyH);
         const tctx = tiny.getContext('2d');
+        tctx.clearRect(0, 0, tiny.width, tiny.height);
         tctx.imageSmoothingEnabled = false;
         tctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, tinyW, tinyH);
-        patch = document.createElement('canvas');
-        patch.width = pw; patch.height = ph;
+        patch = rentCanvas(pw, ph);
         const pctx = patch.getContext('2d');
+        pctx.clearRect(0, 0, patch.width, patch.height);
         pctx.imageSmoothingEnabled = false;
         pctx.drawImage(tiny, 0, 0, tinyW, tinyH, 0, 0, pw, ph);
+        releaseCanvas(tiny);
       } else {
         patch = makeBlurredPatch(srcCanvas, px, py, pw, ph, strength);
       }
 
-      // Soft-edged elliptical mask: full opacity in the center, fade to 0 at
-      // the rim so the blurred area blends into the surroundings instead of
-      // stopping on a hard oval line.
-      const masked = document.createElement('canvas');
-      masked.width = pw; masked.height = ph;
+      // Soft-edged elliptical mask.
+      const masked = rentCanvas(pw, ph);
       const mctx = masked.getContext('2d');
-      mctx.drawImage(patch, 0, 0);
+      mctx.clearRect(0, 0, masked.width, masked.height);
+      mctx.drawImage(patch, 0, 0, pw, ph, 0, 0, pw, ph);
       mctx.globalCompositeOperation = 'destination-in';
       mctx.save();
       mctx.translate(pw / 2, ph / 2);
@@ -830,6 +854,8 @@
       mctx.globalCompositeOperation = 'source-over';
 
       ctx.drawImage(masked, 0, 0, pw, ph, px, py, pw, ph);
+      releaseCanvas(patch);
+      releaseCanvas(masked);
     }
 
     function pickSupportedMime() {
@@ -976,7 +1002,14 @@
         //    frames. That removes GPU contention, keeps the canvas at source
         //    framerate, and stops 別人ぼかし from flip-flopping.
         const DETECT_INTERVAL_MS = 400;
+        // Once a person has been marked for blur, keep the track alive for up
+        // to this long even when no face is detected (turned head, profile,
+        // occlusion). Detection re-matching by position will reset the age.
+        const PERSIST_BLUR_MS = 5000;
         const MAX_GHOST_MS = 1800;
+        // Predict this far ahead of "now" so the blur leads the face instead
+        // of chasing it by one frame.
+        const LOOKAHEAD_MS = 80;
         // Expand a face box to cover the whole head (hair up, chin/neck down,
         // ears on each side). The user wants the person's head, not just the
         // facial rectangle, continuously covered.
@@ -991,9 +1024,7 @@
             height: fb.height + upPad + downPad,
           };
         }
-        // Each track carries the latest detected box (face) + display box
-        // (smoothed head-sized region actually drawn). Display box eases toward
-        // predicted target so detection bumps never make the blur pop.
+        // Each track carries the latest detected box + smoothed velocity.
         let tracks = [];
         let nextTrackId = 1;
         let lastDetectAtMs = -Infinity;
@@ -1107,8 +1138,15 @@
               }
             }
 
-            // Drop ghosts.
-            tracks = tracks.filter((t, i) => usedTracks.has(i) || (now - t.detectedAtMs) < MAX_GHOST_MS);
+            // Drop ghost tracks. Persistent rule: a track that has already
+            // been marked shouldBlur=true is kept for PERSIST_BLUR_MS so that
+            // a turned-away head or momentary occlusion doesn't un-blur.
+            tracks = tracks.filter((t, i) => {
+              if (usedTracks.has(i)) return true;
+              const age = now - t.detectedAtMs;
+              if (t.shouldBlur) return age < PERSIST_BLUR_MS;
+              return age < MAX_GHOST_MS;
+            });
             tracks = tracks.concat(newTracks);
           } catch (e) { /* skip this detection pass */ }
         }
@@ -1127,41 +1165,33 @@
           outCtx.drawImage(srcVideo, 0, 0, vw, vh);
 
           const now = performance.now();
+          const lookSec = LOOKAHEAD_MS / 1000;
           for (const t of tracks) {
             if (!t.shouldBlur) continue;
-            const ageSec = Math.min(DETECT_INTERVAL_MS / 1000 + 0.4, (now - t.detectedAtMs) / 1000);
-            // Predicted face-box center at this instant.
-            const predCx = (t.box.x + t.box.width / 2) + (t.vx || 0) * ageSec;
-            const predCy = (t.box.y + t.box.height / 2) + (t.vy || 0) * ageSec;
-            const predW = t.box.width;
-            const predH = t.box.height;
+            // Age since last detection; also add lookahead so the blur is
+            // placed slightly AHEAD of where the face is right now.
+            const ageSec = (now - t.detectedAtMs) / 1000;
+            const futureSec = ageSec + lookSec;
 
-            // Seed display on first draw.
-            if (t.displayCx == null) {
-              t.displayCx = predCx; t.displayCy = predCy;
-              t.displayW = predW;   t.displayH = predH;
-            }
-            // Smooth the display toward the prediction so detection bumps do
-            // not snap the blur box. Center moves faster than size.
-            const easeC = 0.35, easeS = 0.15;
-            t.displayCx += (predCx - t.displayCx) * easeC;
-            t.displayCy += (predCy - t.displayCy) * easeC;
-            t.displayW  += (predW  - t.displayW ) * easeS;
-            t.displayH  += (predH  - t.displayH ) * easeS;
-
-            // Face → head box, so hair / chin / ears stay covered continuously.
+            // Direct velocity extrapolation — no smoothing, no catch-up.
+            // Detection updates are applied immediately on the next frame.
+            const predCx = (t.box.x + t.box.width / 2) + (t.vx || 0) * futureSec;
+            const predCy = (t.box.y + t.box.height / 2) + (t.vy || 0) * futureSec;
             const faceBox = {
-              x: t.displayCx - t.displayW / 2,
-              y: t.displayCy - t.displayH / 2,
-              width: t.displayW,
-              height: t.displayH,
+              x: predCx - t.box.width / 2,
+              y: predCy - t.box.height / 2,
+              width: t.box.width,
+              height: t.box.height,
             };
             const headBox = faceToHeadBox(faceBox);
 
-            // Extra padding scales with speed so fast motion still stays inside.
-            const speed = Math.hypot(t.vx || 0, t.vy || 0);
+            // Uncertainty grows with how long ago we last saw the face
+            // (振り返り / occlusion) and with motion speed.
             const refDim = Math.max(headBox.width, headBox.height) || 100;
-            const padExtra = Math.min(0.35, (speed * ageSec * 0.4) / refDim);
+            const speed = Math.hypot(t.vx || 0, t.vy || 0);
+            const speedPadFrac = (speed * futureSec * 0.5) / refDim;
+            const stalePadFrac = Math.min(0.6, ageSec * 0.12);
+            const padExtra = Math.min(0.7, speedPadFrac + stalePadFrac);
             applyBlurToBox(outCtx, headBox, out, padExtra);
           }
 
