@@ -443,6 +443,23 @@
         <label>発言セグメント (編集可)</label>
         <div id="segList"></div>
       </div>
+      <div class="field">
+        <label for="txtFormat">テキスト出力の形式 (NotebookLM向け)</label>
+        <select id="txtFormat">
+          <option value="clean" selected>クリーン (話者: 発言)</option>
+          <option value="timestamped">タイムスタンプ付き [時] 話者: 発言</option>
+          <option value="dialog">対話台本 (空行区切り)</option>
+        </select>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="saveAudioBtn">🎙️ 音声を保存</button>
+        <button class="btn btn-primary" id="saveTextBtn">📝 文字起こしを保存</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="previewTextBtn">📋 テキストをプレビュー/コピー</button>
+      </div>
+      <div id="saveHint" class="alert info" style="font-size:0.78rem;"></div>
+      <div id="saveStatus"></div>
     </div>
 
     <p class="alert info" style="margin-top:1rem;">
@@ -1006,6 +1023,141 @@
     }
 
     document.getElementById('autoDiaBtn').addEventListener('click', autoClusterSpeakers);
+
+    // ---- Smart save (Web Share / FS Access / anchor) ----
+    const hasShare = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
+    const hasFSSave = typeof window.showSaveFilePicker === 'function';
+    function canShareFile(file) {
+      try { return hasShare && navigator.canShare({ files: [file] }); } catch (e) { return false; }
+    }
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    }
+    async function smartSave(blob, filename) {
+      const mime = blob.type || 'application/octet-stream';
+      if (hasShare) {
+        const file = new File([blob], filename, { type: mime });
+        if (canShareFile(file)) {
+          try {
+            await navigator.share({ files: [file] });
+            return { ok: true, text: '共有シートで選んだ場所に保存しました' };
+          } catch (e) {
+            if (e && e.name === 'AbortError') return { ok: false, text: 'キャンセルしました' };
+          }
+        }
+      }
+      if (hasFSSave) {
+        try {
+          const extMatch = filename.match(/\.[^.]+$/);
+          const ext = extMatch ? extMatch[0] : '';
+          const handle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: ext ? [{ description: ext.slice(1).toUpperCase(), accept: { [mime]: [ext] } }] : [],
+          });
+          const w = await handle.createWritable();
+          await w.write(blob);
+          await w.close();
+          return { ok: true, text: '選択した場所に保存しました' };
+        } catch (e) {
+          if (e && e.name === 'AbortError') return { ok: false, text: 'キャンセルしました' };
+        }
+      }
+      downloadBlob(blob, filename);
+      return { ok: true, text: 'ブラウザの「ダウンロード」フォルダに保存しました' };
+    }
+
+    (function setHint() {
+      const el = document.getElementById('saveHint');
+      if (!el) return;
+      if (hasShare) {
+        el.innerHTML = '📱 共有シートから「<b>"ファイル"に保存</b>」で <b>iCloud Drive / この端末</b>、NotebookLMアプリが入っていれば直接受け渡しも可能です。';
+      } else if (hasFSSave) {
+        el.innerHTML = '💻 保存先ダイアログが開くので、任意のフォルダを選べます。NotebookLMの「ソースを追加」にドラッグで取り込めます。';
+      } else {
+        el.innerHTML = 'ℹ️ ダウンロードフォルダに保存されます。NotebookLMにそのままアップロードできます。';
+      }
+    })();
+
+    // ---- Transcript text generation ----
+    function buildTranscriptText(format) {
+      const title = (titleEl.value || '録音').trim();
+      const dateStr = new Date().toLocaleString('ja-JP');
+      const totalSec = recordedBlob ? ((performance.now() - startedAt) / 1000) : 0;
+      const header = [
+        `# ${title}`,
+        `収録日時: ${dateStr}`,
+        `長さ: ${fmtHMS(totalSec)}`,
+        `話者: ${speakers.filter((_, i) => segments.some(s => s.speaker === i)).join(', ')}`,
+        '',
+      ].join('\n');
+
+      if (format === 'timestamped') {
+        const body = segments.map(s =>
+          `[${fmtHMS(s.t)}] ${speakers[s.speaker] || '話者?'}: ${s.text}`
+        ).join('\n');
+        return header + body + '\n';
+      }
+      if (format === 'dialog') {
+        const body = segments.map(s =>
+          `${speakers[s.speaker] || '話者?'}:\n${s.text}`
+        ).join('\n\n');
+        return header + body + '\n';
+      }
+      // clean (default)
+      const body = segments.map(s =>
+        `${speakers[s.speaker] || '話者?'}: ${s.text}`
+      ).join('\n');
+      return header + body + '\n';
+    }
+
+    function audioExt() {
+      if (!recordedMime) return 'webm';
+      if (recordedMime.includes('ogg')) return 'ogg';
+      if (recordedMime.includes('mp4')) return 'm4a';
+      return 'webm';
+    }
+
+    function showSaveStatus(res, extra) {
+      const box = document.getElementById('saveStatus');
+      const cls = res.ok ? 'success' : 'info';
+      box.innerHTML = `<div class="alert ${cls}">${extra ? '✅ ' + extra + ' / ' : ''}${res.text}</div>`;
+    }
+
+    document.getElementById('saveAudioBtn').addEventListener('click', async () => {
+      if (!recordedBlob) return;
+      const base = safeFilename(titleEl.value, 'recording');
+      const res = await smartSave(recordedBlob, base + '.' + audioExt());
+      showSaveStatus(res, `音声 (${fmtSize(recordedBlob.size)})`);
+    });
+
+    document.getElementById('saveTextBtn').addEventListener('click', async () => {
+      if (!segments.length) { alert('文字起こしがありません'); return; }
+      const fmt = document.getElementById('txtFormat').value;
+      const text = buildTranscriptText(fmt);
+      const base = safeFilename(titleEl.value, 'transcript');
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const res = await smartSave(blob, base + '.txt');
+      showSaveStatus(res, `文字起こし (${fmtSize(blob.size)})`);
+    });
+
+    document.getElementById('previewTextBtn').addEventListener('click', async () => {
+      const fmt = document.getElementById('txtFormat').value;
+      const text = buildTranscriptText(fmt);
+      try {
+        await navigator.clipboard.writeText(text);
+        document.getElementById('saveStatus').innerHTML = `<div class="alert success">📋 クリップボードにコピーしました (${text.length}文字)</div>`;
+      } catch (e) {
+        // fallback: show in a textarea modal-like
+        const win = window.open('', '_blank');
+        if (win) { win.document.body.innerText = text; }
+        else alert(text.slice(0, 500) + (text.length > 500 ? '…' : ''));
+      }
+    });
 
     recBtn.addEventListener('click', startRecording);
     stopBtn.addEventListener('click', stopRecording);
