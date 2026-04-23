@@ -3,201 +3,221 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#0f0c29" />
-  <title>ひゅうがのページ</title>
+  <meta name="theme-color" content="#0ea5e9" />
+  <title>ひゅうがのTR-Labo</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { min-height: 100%; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
-      background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
       min-height: 100vh;
       min-height: 100dvh;
-      color: white;
-      -webkit-font-smoothing: antialiased;
-      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
     }
-    .container {
-      max-width: 520px;
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .brand {
+      max-width: 960px;
       margin: 0 auto;
-      padding: 2rem 1rem 1.5rem;
-    }
-    .hero {
-      text-align: center;
-      margin-bottom: 1.75rem;
-    }
-    .avatar {
-      width: 72px; height: 72px; border-radius: 50%;
-      background: linear-gradient(135deg, #f093fb, #f5576c);
-      margin: 0 auto 0.75rem;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 1.9rem;
-    }
-    h1 {
-      font-size: 1.8rem; margin-bottom: 0.25rem;
-      background: linear-gradient(135deg, #f093fb, #f5576c);
-      -webkit-background-clip: text; background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    p.subtitle { font-size: 0.9rem; opacity: 0.55; }
-
-    .tools-label {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.15em;
-      opacity: 0.5;
-      margin-bottom: 0.75rem;
-      padding-left: 0.25rem;
-    }
-    .tools {
-      display: flex;
-      flex-direction: column;
-      gap: 0.9rem;
-      margin-bottom: 2rem;
-    }
-    .tool {
+      padding: 0.85rem 1.25rem;
       display: flex;
       align-items: center;
-      gap: 1rem;
-      padding: 1.1rem 1.2rem;
-      border-radius: 18px;
-      text-decoration: none;
-      color: white;
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.12);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      transition: transform 0.12s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-      position: relative;
-      overflow: hidden;
-      -webkit-tap-highlight-color: transparent;
+      gap: 0.7rem;
     }
-    .tool::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background: var(--tint);
-      opacity: 0.13;
-      pointer-events: none;
-    }
-    .tool:active {
-      transform: scale(0.98);
-    }
-    .tool:hover {
-      border-color: rgba(255,255,255,0.25);
-      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-    }
-    .tool .icon {
-      width: 56px;
-      height: 56px;
-      border-radius: 14px;
-      background: var(--tint);
+    .logo {
+      width: 38px; height: 38px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 1.8rem;
-      flex-shrink: 0;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.25);
-    }
-    .tool .body {
-      flex: 1;
-      min-width: 0;
-    }
-    .tool .title {
-      font-size: 1.05rem;
-      font-weight: 700;
-      margin-bottom: 0.2rem;
-    }
-    .tool .desc {
+      color: white;
+      font-weight: 800;
       font-size: 0.82rem;
-      opacity: 0.7;
-      line-height: 1.45;
+      letter-spacing: 0.02em;
+      box-shadow: 0 4px 10px rgba(14,165,233,0.25);
+    }
+    .brand-name {
+      font-size: 1.02rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 2.25rem 1.25rem 2rem;
+    }
+    .hero {
+      padding: 0.5rem 0 2rem;
+    }
+    .hero h1 {
+      font-size: clamp(1.65rem, 5.5vw, 2.3rem);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.3;
+      color: #0f172a;
+      margin-bottom: 0.85rem;
+    }
+    .hero h1 .accent {
+      background: linear-gradient(135deg, #0284c7, #06b6d4);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      font-size: 0.96rem;
+      color: #475569;
+      line-height: 1.75;
+      max-width: 580px;
+    }
+    .section-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin: 0 0 0.9rem;
+      padding: 0 0.15rem;
+    }
+    .section-head h2 {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #0f172a;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+    .section-head .count {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      font-variant-numeric: tabular-nums;
+    }
+    .tools {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 0.85rem;
+    }
+    .tool {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 1.1rem 1.1rem;
+      text-decoration: none;
+      color: inherit;
+      display: flex;
+      gap: 0.9rem;
+      align-items: flex-start;
+      transition: border-color 0.15s, transform 0.08s, box-shadow 0.2s;
+      -webkit-tap-highlight-color: transparent;
+      position: relative;
+    }
+    .tool:active { transform: scale(0.985); }
+    .tool:hover {
+      border-color: #7dd3fc;
+      box-shadow: 0 6px 20px rgba(14,165,233,0.10);
+    }
+    .tool .icon {
+      width: 44px; height: 44px;
+      border-radius: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      flex-shrink: 0;
+      background: #e0f2fe;
+    }
+    .tool.sky .icon { background: #e0f2fe; }
+    .tool.mint .icon { background: #d1fae5; }
+    .tool.rose .icon { background: #fce7f3; }
+    .tool .body { flex: 1; min-width: 0; padding-top: 0.05rem; }
+    .tool .t {
+      font-size: 0.98rem;
+      font-weight: 700;
+      margin-bottom: 0.22rem;
+      color: #0f172a;
+      letter-spacing: -0.005em;
+    }
+    .tool .d {
+      font-size: 0.8rem;
+      color: #64748b;
+      line-height: 1.55;
     }
     .tool .arrow {
-      font-size: 1.4rem;
-      opacity: 0.5;
+      color: #cbd5e1;
+      font-size: 1.15rem;
       flex-shrink: 0;
+      align-self: center;
+      transition: transform 0.2s, color 0.15s;
     }
-    .tool.pink { --tint: linear-gradient(135deg, #f093fb, #f5576c); }
-    .tool.blue { --tint: linear-gradient(135deg, #4facfe, #00f2fe); }
-    .tool.green { --tint: linear-gradient(135deg, #43e97b, #38f9d7); }
-
-    .about {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 14px;
-      padding: 1rem 1.2rem;
-      margin-bottom: 1rem;
+    .tool:hover .arrow { color: #0ea5e9; transform: translateX(3px); }
+    footer {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0.5rem 1.25rem 2rem;
+      color: #94a3b8;
+      font-size: 0.76rem;
       text-align: center;
+      padding-bottom: calc(env(safe-area-inset-bottom) + 2rem);
     }
-    .about p {
-      font-size: 0.85rem;
-      line-height: 1.65;
-      opacity: 0.75;
-    }
-    .badges {
-      text-align: center;
-      margin-bottom: 1.5rem;
-    }
-    .badge {
-      display: inline-block;
-      background: linear-gradient(135deg, #f093fb, #f5576c);
-      color: white;
-      padding: 0.3rem 0.85rem;
-      border-radius: 999px;
-      font-size: 0.72rem;
-      font-weight: bold;
-      margin: 0.2rem;
-      opacity: 0.8;
-    }
-    .footer { text-align: center; opacity: 0.3; font-size: 0.75rem; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="hero">
-      <div class="avatar">🌊</div>
-      <h1>ひゅうが</h1>
-      <p class="subtitle">My first Vercel site</p>
+  <header class="site">
+    <div class="brand">
+      <div class="logo">TR</div>
+      <div class="brand-name">ひゅうがのTR-Labo</div>
+    </div>
+  </header>
+  <main>
+    <section class="hero">
+      <h1>日常のちょっとした作業を、<br><span class="accent">ブラウザで瞬時に。</span></h1>
+      <p>仕事や趣味で役立つ軽量ツールを積み上げていく研究棚 (ラボ) です。すべての処理は端末内で完結するので、ファイルはどこにもアップロードされません。</p>
+    </section>
+
+    <div class="section-head">
+      <h2>ツール</h2>
+      <span class="count" id="toolCount"></span>
     </div>
 
-    <p class="tools-label">ツール</p>
-    <div class="tools">
-      <a class="tool pink" href="./play.html">
+    <div class="tools" id="tools">
+      <a class="tool sky" href="./play.html">
         <div class="icon">🎮</div>
         <div class="body">
-          <div class="title">HTMLゲームランナー</div>
-          <div class="desc">AIが書いたHTMLを貼り付けてスマホで即プレイ。履歴・お気に入り・デバッグログ付き</div>
+          <div class="t">HTMLゲームランナー</div>
+          <div class="d">AIが書いたHTMLを貼り付けてそのままプレイ。履歴・お気に入り・デバッグログ対応。</div>
         </div>
-        <span class="arrow">›</span>
+        <span class="arrow">→</span>
       </a>
-      <a class="tool blue" href="./bg-remove/">
+      <a class="tool rose" href="./bg-remove/">
         <div class="icon">🎨</div>
         <div class="body">
-          <div class="title">背景透過ツール</div>
-          <div class="desc">画像をアップするだけで背景を自動除去、透過PNGとしてダウンロード</div>
+          <div class="t">背景透過ツール</div>
+          <div class="d">画像をアップするだけでAIが背景を自動除去、透過PNGとしてダウンロード。</div>
         </div>
-        <span class="arrow">›</span>
+        <span class="arrow">→</span>
       </a>
-      <a class="tool green" href="./pdf/">
+      <a class="tool mint" href="./pdf/">
         <div class="icon">📄</div>
         <div class="body">
-          <div class="title">PDFツール</div>
-          <div class="desc">結合・分割・回転・圧縮・画像変換・透かし・パスワード… すべて端末内処理</div>
+          <div class="t">PDFツール</div>
+          <div class="d">結合・分割・回転・圧縮・画像変換・透かし・パスワードなど、11機能をひとまとめに。</div>
         </div>
-        <span class="arrow">›</span>
+        <span class="arrow">→</span>
       </a>
     </div>
-
-    <div class="about">
-      <p>GitHubとVercelを連携して<br>初めてデプロイしたページです!</p>
-    </div>
-    <div class="badges">
-      <span class="badge">GitHub</span>
-      <span class="badge">Vercel</span>
-      <span class="badge">HTML</span>
-    </div>
-    <p class="footer">Deployed with Vercel 🚀</p>
-  </div>
+  </main>
+  <footer>© ひゅうがのTR-Labo</footer>
+  <script>
+    const n = document.querySelectorAll('#tools .tool').length;
+    document.getElementById('toolCount').textContent = n + '件';
+  </script>
 </body>
 </html>
