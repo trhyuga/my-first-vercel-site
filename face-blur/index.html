@@ -419,9 +419,18 @@
 
     // ---- Media kind abstraction ----
     let mediaKind = 'video'; // 'video' | 'image'
+    let originalSize = 0;    // bytes, captured at load time for later comparison
     function mediaElement() { return mediaKind === 'image' ? srcImage : srcVideo; }
     function mediaWidth() { return mediaKind === 'image' ? srcImage.naturalWidth : srcVideo.videoWidth; }
     function mediaHeight() { return mediaKind === 'image' ? srcImage.naturalHeight : srcVideo.videoHeight; }
+    function sizeCompareHtml(outBytes) {
+      if (!originalSize) return `💾 ${fmtSize(outBytes)}`;
+      const diff = outBytes - originalSize;
+      const pct = Math.round(Math.abs(diff) / originalSize * 100);
+      const sign = diff <= 0 ? `-${pct}%` : `+${pct}%`;
+      const color = diff <= 0 ? '#065f46' : '#92400e';
+      return `元 ${fmtSize(originalSize)} → 出力 <b>${fmtSize(outBytes)}</b> <span style="color:${color};font-weight:600;">(${sign})</span>`;
+    }
 
     function bindDropzone(zone, input, onFiles) {
       zone.addEventListener('click', () => input.click());
@@ -446,6 +455,7 @@
 
     async function loadVideo(file) {
       mediaKind = 'video';
+      originalSize = file.size;
       srcImage.style.display = 'none';
       srcVideo.style.display = '';
       srcVideo.src = URL.createObjectURL(file);
@@ -458,7 +468,7 @@
         <span>🎬 動画</span>
         <span>📐 ${srcVideo.videoWidth} × ${srcVideo.videoHeight}</span>
         <span>⏱ ${fmtDur(srcVideo.duration)}</span>
-        <span>💾 ${fmtSize(file.size)}</span>
+        <span><b>💾 ${fmtSize(file.size)}</b></span>
         <span>📄 ${file.name}</span>
       `;
       // Show detection hint for video
@@ -470,6 +480,7 @@
 
     async function loadImage(file) {
       mediaKind = 'image';
+      originalSize = file.size;
       srcVideo.pause();
       srcVideo.style.display = 'none';
       srcImage.style.display = '';
@@ -485,7 +496,7 @@
       videoMeta.innerHTML = `
         <span>🖼️ 写真</span>
         <span>📐 ${srcImage.naturalWidth} × ${srcImage.naturalHeight}</span>
-        <span>💾 ${fmtSize(file.size)}</span>
+        <span><b>💾 ${fmtSize(file.size)}</b></span>
         <span>📄 ${file.name}</span>
       `;
       const hint = document.getElementById('detectHint');
@@ -692,8 +703,15 @@
       if (!outName.value) {
         const src = fi.files && fi.files[0];
         const base = src ? src.name.replace(/\.[^.]+$/, '') : 'video';
-        outName.value = safeFilename(base + '_blurred', 'blurred');
+        outName.value = safeFilename(base + 'v', 'videov');
       }
+      updateStartBtn();
+    });
+    srcImage.addEventListener('load', () => {
+      if (mediaKind !== 'image') return;
+      const src = fi.files && fi.files[0];
+      const base = src ? src.name.replace(/\.[^.]+$/, '') : 'photo';
+      outName.value = safeFilename(base + 'v', 'photov');
       updateStartBtn();
     });
 
@@ -721,7 +739,6 @@
       const w = Math.min(srcCanvas.width - x, Math.ceil(box.width));
       const h = Math.min(srcCanvas.height - y, Math.ceil(box.height));
       if (w <= 1 || h <= 1) return;
-      // 「アゴ・髪際まで」の基本余裕 + 非検出フレームでの動き補正分
       const basePad = 0.12 + (extraPadFraction || 0);
       const pad = Math.round(Math.min(w, h) * basePad);
       const px = Math.max(0, x - pad);
@@ -729,35 +746,50 @@
       const pw = Math.min(srcCanvas.width - px, w + pad * 2);
       const ph = Math.min(srcCanvas.height - py, h + pad * 2);
       const strength = parseFloat(blurRange.value) || 24;
-      ctx.save();
+
       if (blurShape === 'fill') {
+        ctx.save();
         ctx.fillStyle = '#000';
         ctx.beginPath();
         ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
         ctx.fill();
-      } else if (blurShape === 'pixel') {
+        ctx.restore();
+        return;
+      }
+
+      // Build the blurred/pixelated patch on an offscreen canvas first.
+      // Reading the same canvas we are writing to + filter + clip can silently
+      // no-op on some browsers (especially Safari/iOS); routing through a
+      // separate target guarantees the effect actually lands.
+      const patch = document.createElement('canvas');
+      patch.width = pw;
+      patch.height = ph;
+      const pctx = patch.getContext('2d');
+
+      if (blurShape === 'pixel') {
         const cellSize = Math.max(6, Math.round(strength * 0.8));
         const tinyW = Math.max(1, Math.round(pw / cellSize));
         const tinyH = Math.max(1, Math.round(ph / cellSize));
-        const tmp = document.createElement('canvas');
-        tmp.width = tinyW; tmp.height = tinyH;
-        const tctx = tmp.getContext('2d');
+        const tiny = document.createElement('canvas');
+        tiny.width = tinyW; tiny.height = tinyH;
+        const tctx = tiny.getContext('2d');
         tctx.imageSmoothingEnabled = false;
         tctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, tinyW, tinyH);
-        ctx.imageSmoothingEnabled = false;
-        // Clip to ellipse so it doesn't look like a square
-        ctx.beginPath();
-        ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
-        ctx.clip();
-        ctx.drawImage(tmp, 0, 0, tinyW, tinyH, px, py, pw, ph);
+        pctx.imageSmoothingEnabled = false;
+        pctx.drawImage(tiny, 0, 0, tinyW, tinyH, 0, 0, pw, ph);
       } else {
-        // Gaussian blur via canvas filter
-        ctx.filter = `blur(${strength}px)`;
-        ctx.beginPath();
-        ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
-        ctx.clip();
-        ctx.drawImage(srcCanvas, px, py, pw, ph, px, py, pw, ph);
+        // Gaussian blur
+        pctx.filter = `blur(${strength}px)`;
+        pctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, pw, ph);
+        pctx.filter = 'none';
       }
+
+      // Composite the patch back through an ellipse clip so the edges stay soft.
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(patch, 0, 0, pw, ph, px, py, pw, ph);
       ctx.restore();
     }
 
@@ -827,7 +859,8 @@
       window._blurredBlob = blob;
       processStatus.insertAdjacentHTML('beforeend', `
         <div class="alert success" style="margin-top:0.5rem;">
-          ${toBlur.length}箇所をぼかしました・${fmtSize(blob.size)}・${ext.toUpperCase()}
+          ${toBlur.length}箇所をぼかしました・${ext.toUpperCase()}<br>
+          ${sizeCompareHtml(blob.size)}
         </div>
         <div class="btn-row" id="postActions"></div>
       `);
@@ -943,7 +976,8 @@
         processProgress(100, '✅ 処理完了');
         processStatus.insertAdjacentHTML('beforeend', `
           <div class="alert success" style="margin-top:0.5rem;">
-            処理後のサイズ: ${fmtSize(processedBlob.size)}・形式: ${ext.toUpperCase()}
+            形式: ${ext.toUpperCase()}<br>
+            ${sizeCompareHtml(processedBlob.size)}
           </div>
           <div class="btn-row" id="postActions"></div>
         `);
