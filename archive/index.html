@@ -627,6 +627,7 @@
     }
 
     function resetExtract() {
+      if (currentZipReader) { try { currentZipReader.close(); } catch (e) {} currentZipReader = null; }
       currentArchive = null;
       currentArchiveFile = null;
       currentEntries = [];
@@ -657,47 +658,116 @@
       return /[\x80-\xFF]{2,}/.test(name);
     }
 
-    async function loadArchive(file, password) {
-      extractBody.innerHTML = '<div class="panel"><p style="color:#64748b;font-size:0.88rem;">アーカイブを解析中...</p></div>';
+    async function sniffIsZip(file) {
+      if (/\.zip$/i.test(file.name) || file.type === 'application/zip') return true;
       try {
-        await initLibarchive();
-        currentArchiveFile = file;
-        const archive = await Archive.open(file);
-        currentArchive = archive;
+        const buf = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+        return buf[0] === 0x50 && buf[1] === 0x4B && (buf[2] === 0x03 || buf[2] === 0x05 || buf[2] === 0x07);
+      } catch (e) { return false; }
+    }
 
-        let passwordNeeded = false;
-        try {
-          if (password) await archive.usePassword(password);
-          if (typeof archive.hasEncryptedData === 'function') {
-            const enc = await archive.hasEncryptedData();
-            if (enc && !password) passwordNeeded = true;
+    let currentZipReader = null;
+
+    async function loadZipArchive(file, password) {
+      if (currentZipReader) { try { await currentZipReader.close(); } catch (e) {} currentZipReader = null; }
+      zip.configure({ useWebWorkers: true });
+      const reader = new zip.ZipReader(new zip.BlobReader(file), password ? { password } : {});
+      const rawEntries = await reader.getEntries();
+      currentZipReader = reader;
+
+      const anyEncrypted = rawEntries.some(e => e.encrypted);
+      let needPassword = anyEncrypted && !password;
+
+      // If a password was supplied, sanity-check by trying to extract the first encrypted entry
+      if (anyEncrypted && password) {
+        const sample = rawEntries.find(e => e.encrypted && !e.directory);
+        if (sample) {
+          try {
+            const w = new zip.BlobWriter();
+            await sample.getData(w, { password, checkPasswordOnly: true });
+          } catch (e) {
+            throw new Error('パスワードが違います');
           }
-        } catch (e) { /* some formats don't expose this */ }
+        }
+      }
 
-        const files = await archive.getFilesArray();
-        currentEntries = files.map(f => ({
-          path: (f.path ? (f.path + '/') : '') + f.file.name,
-          origPath: (f.path ? (f.path + '/') : '') + f.file.name,
-          size: f.file.size != null ? f.file.size : (f.file._size || null),
+      currentEntries = rawEntries.map(e => {
+        const p = e.filename || '';
+        return {
+          path: p,
+          origPath: p,
+          size: e.uncompressedSize ?? 0,
+          selected: !e.directory,
+          isDir: !!e.directory,
+          encrypted: !!e.encrypted,
+          extractFn: async () => {
+            const w = new zip.BlobWriter();
+            return await e.getData(w, password ? { password } : {});
+          },
+        };
+      });
+      return needPassword;
+    }
+
+    async function loadGenericArchive(file, password) {
+      await initLibarchive();
+      const archive = await Archive.open(file);
+      currentArchive = archive;
+      let needPassword = false;
+      try {
+        if (password) await archive.usePassword(password);
+        if (typeof archive.hasEncryptedData === 'function') {
+          const enc = await archive.hasEncryptedData();
+          if (enc && !password) needPassword = true;
+        }
+      } catch (e) { /* ignore */ }
+      const files = await archive.getFilesArray();
+      currentEntries = files.map(f => {
+        const p = (f.path ? (f.path + '/') : '') + (f.file.name || '');
+        return {
+          path: p,
+          origPath: p,
+          size: f.file.size != null ? f.file.size : (f.file._size || 0),
           selected: true,
           isDir: false,
-          raw: f,
-        }));
-        const hasMojibake = currentEntries.some(e => likelyMojibake(e.path));
-        window._mojibake = hasMojibake;
+          encrypted: false,
+          extractFn: async () => {
+            const result = (typeof f.file.extract === 'function') ? await f.file.extract() : f.file;
+            return result instanceof Blob ? result : new Blob([result]);
+          },
+        };
+      });
+      return needPassword;
+    }
+
+    async function loadArchive(file, password) {
+      extractBody.innerHTML = '<div class="panel"><p style="color:#64748b;font-size:0.88rem;">アーカイブを解析中...</p></div>';
+      currentArchiveFile = file;
+      currentPassword = password || '';
+      try {
+        const isZip = await sniffIsZip(file);
+        const needPassword = isZip
+          ? await loadZipArchive(file, password)
+          : await loadGenericArchive(file, password);
+
+        window._mojibake = currentEntries.some(e => likelyMojibake(e.path));
         renderExtract();
-        if (passwordNeeded) {
+        if (needPassword) {
           const pwPanel = document.getElementById('pwPanel');
           if (pwPanel) pwPanel.classList.remove('hidden');
         }
       } catch (e) {
         const msg = String(e && e.message || e);
-        if (/passphrase|password|encrypted/i.test(msg)) {
-          currentArchiveFile = file;
+        if (/passphrase|password|encrypted|パスワード/i.test(msg)) {
           currentEntries = [];
           renderExtract();
           const pwPanel = document.getElementById('pwPanel');
-          if (pwPanel) pwPanel.classList.remove('hidden');
+          if (pwPanel) {
+            pwPanel.classList.remove('hidden');
+            if (password) {
+              pwPanel.insertAdjacentHTML('afterbegin', `<div class="alert error" style="margin:0 0 0.6rem;">${escapeHtml(msg)}</div>`);
+            }
+          }
         } else {
           extractBody.innerHTML = `<div class="alert error">解析に失敗しました: ${escapeHtml(msg)}</div>
             <div class="btn-row"><button class="btn btn-secondary" id="resetExtract">別のファイル</button></div>`;
@@ -730,11 +800,8 @@
         for (let i = 0; i < selected.length; i++) {
           const e = selected[i];
           pgText.textContent = `(${i + 1}/${selected.length}) ${e.path}`;
-          const blob = await e.raw.file.extract
-            ? await e.raw.file.extract()
-            : e.raw.file;
-          const fileBlob = blob instanceof Blob ? blob : new Blob([blob]);
-          extracted.push({ path: e.path, blob: fileBlob });
+          const blob = await e.extractFn();
+          extracted.push({ path: e.path, blob });
           const pct = Math.round((i + 1) / selected.length * 100);
           pgBar.style.width = pct + '%';
           pgPct.textContent = pct + '%';
