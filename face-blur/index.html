@@ -782,23 +782,20 @@
       const py = Math.max(0, y - pad);
       const pw = Math.min(srcCanvas.width - px, w + pad * 2);
       const ph = Math.min(srcCanvas.height - py, h + pad * 2);
-      const strength = parseFloat(blurRange.value) || 24;
+      const strength = parseFloat(blurRange.value) || 40;
 
-      if (blurShape === 'fill') {
-        ctx.save();
-        ctx.fillStyle = '#000';
-        ctx.beginPath();
-        ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-        return;
-      }
-
+      // Build the patch first (black-fill / blur / mosaic).
       let patch;
-      if (blurShape === 'pixel') {
+      if (blurShape === 'fill') {
+        patch = document.createElement('canvas');
+        patch.width = pw; patch.height = ph;
+        const pctx = patch.getContext('2d');
+        pctx.fillStyle = '#000';
+        pctx.fillRect(0, 0, pw, ph);
+      } else if (blurShape === 'pixel') {
         const cellSize = Math.max(6, Math.round(strength * 0.8));
-        const tinyW = Math.max(1, Math.round(pw / cellSize));
-        const tinyH = Math.max(1, Math.round(ph / cellSize));
+        const tinyW = Math.max(2, Math.round(pw / cellSize));
+        const tinyH = Math.max(2, Math.round(ph / cellSize));
         const tiny = document.createElement('canvas');
         tiny.width = tinyW; tiny.height = tinyH;
         const tctx = tiny.getContext('2d');
@@ -813,12 +810,30 @@
         patch = makeBlurredPatch(srcCanvas, px, py, pw, ph, strength);
       }
 
-      ctx.save();
-      ctx.beginPath();
-      ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.drawImage(patch, 0, 0, pw, ph, px, py, pw, ph);
-      ctx.restore();
+      // Soft-edged elliptical mask: full opacity in the center, fade to 0 at
+      // the rim so the blurred area blends into the surroundings instead of
+      // stopping on a hard oval line.
+      const masked = document.createElement('canvas');
+      masked.width = pw; masked.height = ph;
+      const mctx = masked.getContext('2d');
+      mctx.drawImage(patch, 0, 0);
+      mctx.globalCompositeOperation = 'destination-in';
+      mctx.save();
+      mctx.translate(pw / 2, ph / 2);
+      const s = Math.min(pw, ph) / 2;
+      mctx.scale(pw / 2 / s, ph / 2 / s);
+      const grad = mctx.createRadialGradient(0, 0, s * 0.55, 0, 0, s);
+      grad.addColorStop(0,    'rgba(0,0,0,1)');
+      grad.addColorStop(0.65, 'rgba(0,0,0,0.92)');
+      grad.addColorStop(1,    'rgba(0,0,0,0)');
+      mctx.fillStyle = grad;
+      mctx.beginPath();
+      mctx.arc(0, 0, s, 0, Math.PI * 2);
+      mctx.fill();
+      mctx.restore();
+      mctx.globalCompositeOperation = 'source-over';
+
+      ctx.drawImage(masked, 0, 0, pw, ph, px, py, pw, ph);
     }
 
     function pickSupportedMime() {
@@ -908,8 +923,11 @@
         out.width = vw; out.height = vh;
         const outCtx = out.getContext('2d', { willReadFrequently: true });
 
-        // Build output stream: processed canvas video + original audio track
-        const canvasStream = out.captureStream(30);
+        // Build output stream: processed canvas video + original audio track.
+        // Use 60 fps to cover iPhone 60 fps videos without halving the frame
+        // rate; canvas.captureStream treats this as a ceiling, so 30 fps
+        // sources still end up at 30 fps.
+        const canvasStream = out.captureStream(60);
         try {
           if (typeof srcVideo.captureStream === 'function') {
             const s = srcVideo.captureStream();
@@ -1141,8 +1159,22 @@
       const actions = document.getElementById('postActions');
       if (!actions) return;
       const ext = window._blurredExt || 'webm';
+      const blob = window._blurredBlob;
+      const previewUrl = blob ? URL.createObjectURL(blob) : '';
+      const previewMarkup = blob && mediaKind === 'video'
+        ? `<div style="margin-top:0.75rem;">
+             <div style="font-size:0.78rem;color:#475569;font-weight:600;margin-bottom:0.35rem;">👁 プレビュー (保存前にここで確認できます)</div>
+             <video src="${previewUrl}" controls playsinline style="width:100%;max-height:60vh;background:#000;border-radius:10px;"></video>
+           </div>`
+        : blob && mediaKind === 'image'
+          ? `<div style="margin-top:0.75rem;">
+               <div style="font-size:0.78rem;color:#475569;font-weight:600;margin-bottom:0.35rem;">👁 プレビュー</div>
+               <img src="${previewUrl}" style="width:100%;max-height:60vh;background:#000;border-radius:10px;object-fit:contain;" />
+             </div>`
+          : '';
       actions.innerHTML = `
-        <div class="field" style="margin-top:0.2rem;">
+        ${previewMarkup}
+        <div class="field" style="margin-top:0.75rem;">
           <label for="saveName">ファイル名 <span style="color:#94a3b8;font-weight:400;">(拡張子 .${ext} は自動付与)</span></label>
           <input type="text" id="saveName" />
         </div>
