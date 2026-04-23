@@ -612,6 +612,202 @@
       }
       updateStartBtn();
     });
+
+    // ---- Full-video processing ----
+    const MATCH_THRESHOLD = 0.55; // face descriptor distance (smaller = more similar)
+    let processedBlob = null;
+
+    function euclidean(a, b) {
+      let s = 0;
+      for (let i = 0; i < a.length; i++) { const d = a[i] - b[i]; s += d * d; }
+      return Math.sqrt(s);
+    }
+    function minDistanceToSelected(desc) {
+      let m = Infinity;
+      for (const ref of selectedDescriptors) {
+        const d = euclidean(desc, ref);
+        if (d < m) m = d;
+      }
+      return m;
+    }
+
+    function applyBlurToBox(ctx, box, srcCanvas) {
+      const x = Math.max(0, Math.floor(box.x));
+      const y = Math.max(0, Math.floor(box.y));
+      const w = Math.min(srcCanvas.width - x, Math.ceil(box.width));
+      const h = Math.min(srcCanvas.height - y, Math.ceil(box.height));
+      if (w <= 1 || h <= 1) return;
+      // Slight padding around the face for the 「アゴ・髪際まで」余裕
+      const pad = Math.round(Math.min(w, h) * 0.12);
+      const px = Math.max(0, x - pad);
+      const py = Math.max(0, y - pad);
+      const pw = Math.min(srcCanvas.width - px, w + pad * 2);
+      const ph = Math.min(srcCanvas.height - py, h + pad * 2);
+      const strength = parseFloat(blurRange.value) || 24;
+      ctx.save();
+      if (blurShape === 'fill') {
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (blurShape === 'pixel') {
+        const cellSize = Math.max(6, Math.round(strength * 0.8));
+        const tinyW = Math.max(1, Math.round(pw / cellSize));
+        const tinyH = Math.max(1, Math.round(ph / cellSize));
+        const tmp = document.createElement('canvas');
+        tmp.width = tinyW; tmp.height = tinyH;
+        const tctx = tmp.getContext('2d');
+        tctx.imageSmoothingEnabled = false;
+        tctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, tinyW, tinyH);
+        ctx.imageSmoothingEnabled = false;
+        // Clip to ellipse so it doesn't look like a square
+        ctx.beginPath();
+        ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(tmp, 0, 0, tinyW, tinyH, px, py, pw, ph);
+      } else {
+        // Gaussian blur via canvas filter
+        ctx.filter = `blur(${strength}px)`;
+        ctx.beginPath();
+        ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(srcCanvas, px, py, pw, ph, px, py, pw, ph);
+      }
+      ctx.restore();
+    }
+
+    function pickSupportedMime() {
+      const candidates = [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+        'video/mp4',
+      ];
+      for (const m of candidates) {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m;
+      }
+      return '';
+    }
+
+    function processProgress(pct, text) {
+      processStatus.innerHTML = `
+        <div class="progress-wrap">
+          <div class="progress-label"><span>${text}</span><span>${Math.round(pct)}%</span></div>
+          <div class="progress-bar"><span style="width:${Math.round(pct)}%"></span></div>
+        </div>
+      `;
+    }
+
+    startBtn.addEventListener('click', async () => {
+      if (!srcVideo.videoWidth) return;
+      startBtn.disabled = true;
+      const origText = startBtn.textContent;
+      startBtn.textContent = '準備中…';
+      try {
+        await ensureModels();
+        const vw = srcVideo.videoWidth, vh = srcVideo.videoHeight;
+        const out = document.createElement('canvas');
+        out.width = vw; out.height = vh;
+        const outCtx = out.getContext('2d', { willReadFrequently: true });
+
+        // Build output stream: processed canvas video + original audio track
+        const canvasStream = out.captureStream(30);
+        try {
+          if (typeof srcVideo.captureStream === 'function') {
+            const s = srcVideo.captureStream();
+            s.getAudioTracks().forEach(t => canvasStream.addTrack(t));
+          }
+        } catch (e) { /* audio optional */ }
+
+        const mime = pickSupportedMime();
+        const recorder = new MediaRecorder(canvasStream, mime ? { mimeType: mime, videoBitsPerSecond: 6_000_000 } : {});
+        const chunks = [];
+        recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+        const stopped = new Promise(res => { recorder.onstop = res; });
+
+        // Scene-independent detector options
+        const detOpts = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.35 });
+
+        srcVideo.pause();
+        srcVideo.currentTime = 0;
+        srcVideo.muted = true; // audio comes from captureStream
+        srcVideo.playbackRate = 1;
+
+        clearFaces();
+        faceLayer.style.display = 'none';
+        processProgress(0, '処理開始…');
+
+        let lastT = 0;
+        const haveRVFC = typeof srcVideo.requestVideoFrameCallback === 'function';
+        recorder.start(800);
+        await srcVideo.play();
+
+        const processFrame = async () => {
+          if (srcVideo.ended || srcVideo.paused) return;
+          outCtx.drawImage(srcVideo, 0, 0, vw, vh);
+
+          let matches = [];
+          try {
+            if (blurMode === 'all') {
+              const dets = await faceapi.detectAllFaces(srcVideo, detOpts);
+              matches = dets.map(d => ({ box: d.box }));
+            } else {
+              const dets = await faceapi.detectAllFaces(srcVideo, detOpts)
+                .withFaceLandmarks()
+                .withFaceDescriptors();
+              for (const d of dets) {
+                const dist = selectedDescriptors.length ? minDistanceToSelected(d.descriptor) : Infinity;
+                const isMatched = dist < MATCH_THRESHOLD;
+                if (blurMode === 'selected' && isMatched) matches.push({ box: d.detection.box });
+                if (blurMode === 'others' && !isMatched) matches.push({ box: d.detection.box });
+              }
+            }
+          } catch (e) { /* detection may fail on some frames, skip */ }
+
+          for (const m of matches) applyBlurToBox(outCtx, m.box, out);
+
+          const now = srcVideo.currentTime;
+          if (srcVideo.duration > 0) {
+            const pct = Math.min(99, (now / srcVideo.duration) * 100);
+            processProgress(pct, `処理中 ${now.toFixed(1)} / ${srcVideo.duration.toFixed(1)}秒`);
+          }
+          lastT = now;
+          if (haveRVFC) srcVideo.requestVideoFrameCallback(() => processFrame());
+          else requestAnimationFrame(() => processFrame());
+        };
+        if (haveRVFC) srcVideo.requestVideoFrameCallback(() => processFrame());
+        else requestAnimationFrame(() => processFrame());
+
+        await new Promise(res => { srcVideo.onended = res; });
+        // Give the recorder one last chunk before stopping
+        await new Promise(r => setTimeout(r, 150));
+        recorder.stop();
+        await stopped;
+
+        faceLayer.style.display = '';
+        const type = mime || 'video/webm';
+        processedBlob = new Blob(chunks, { type });
+        const ext = type.includes('mp4') ? 'mp4' : 'webm';
+        processProgress(100, '✅ 処理完了');
+        processStatus.insertAdjacentHTML('beforeend', `
+          <div class="alert success" style="margin-top:0.5rem;">
+            処理後のサイズ: ${fmtSize(processedBlob.size)}・形式: ${ext.toUpperCase()}
+          </div>
+          <div class="btn-row" id="postActions"></div>
+        `);
+        window._blurredExt = ext;
+        window._blurredBlob = processedBlob;
+        // Save buttons are wired in Step 5
+        renderSaveButtons && renderSaveButtons();
+      } catch (e) {
+        processStatus.innerHTML = `<div class="alert error">失敗: ${String(e.message || e)}</div>`;
+      } finally {
+        startBtn.disabled = false;
+        startBtn.textContent = origText;
+      }
+    });
+    // placeholder until Step 5
+    window.renderSaveButtons = () => {};
   </script>
 </body>
 </html>
