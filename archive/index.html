@@ -667,10 +667,171 @@
       document.getElementById('fiExtract'),
       (files) => { const f = files[0]; if (f) loadArchive(f); }
     );
+    // ---- Compress UI ----
+    const compressBody = document.getElementById('compressBody');
+    const compressFiles = []; // File[]
+
+    function renderCompress() {
+      if (!compressFiles.length) { compressBody.innerHTML = ''; return; }
+      const totalSize = compressFiles.reduce((s, f) => s + f.size, 0);
+
+      compressBody.innerHTML = `
+        <div class="panel">
+          <h2>追加されたファイル</h2>
+          <div class="info-row"><span class="k">件数</span><span class="v">${compressFiles.length}件</span></div>
+          <div class="info-row"><span class="k">合計</span><span class="v">${fmtSize(totalSize)}</span></div>
+          <div class="file-list" id="cmpList"></div>
+          <div class="btn-row" style="margin-top:0.6rem;">
+            <button class="btn btn-secondary" id="cmpAdd">+ 追加</button>
+            <button class="btn btn-secondary" id="cmpClear">クリア</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>圧縮設定</h2>
+          <div class="field">
+            <label for="cmpLevel">圧縮レベル</label>
+            <select id="cmpLevel">
+              <option value="0">無圧縮 (格納のみ・最速)</option>
+              <option value="3">速い</option>
+              <option value="6" selected>標準</option>
+              <option value="9">最高圧縮</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cmpPw">パスワード (任意・AES-256)</label>
+            <input type="password" id="cmpPw" autocomplete="new-password" placeholder="暗号化しない場合は空欄" />
+          </div>
+          <div class="field">
+            <label for="cmpPw2">確認 (入力時のみ)</label>
+            <input type="password" id="cmpPw2" autocomplete="new-password" />
+          </div>
+          <div class="field">
+            <label for="cmpName">出力ファイル名</label>
+            <input type="text" id="cmpName" value="archive" />
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn-primary" id="cmpRun">🗜️ 圧縮してダウンロード</button>
+        </div>
+
+        <div id="cmpResult"></div>
+      `;
+
+      const list = document.getElementById('cmpList');
+      list.innerHTML = compressFiles.map((f, i) => `
+        <div class="file-row">
+          <span class="name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+          <span class="size">${fmtSize(f.size)}</span>
+          <button class="act-btn" data-del="${i}" aria-label="削除">✕</button>
+        </div>
+      `).join('');
+      list.querySelectorAll('[data-del]').forEach(b =>
+        b.addEventListener('click', () => { compressFiles.splice(parseInt(b.dataset.del, 10), 1); renderCompress(); })
+      );
+      document.getElementById('cmpAdd').addEventListener('click', () => document.getElementById('fiCompress').click());
+      document.getElementById('cmpClear').addEventListener('click', () => { compressFiles.length = 0; renderCompress(); });
+      document.getElementById('cmpRun').addEventListener('click', doCompress);
+    }
+
+    async function doCompress() {
+      if (!compressFiles.length) return;
+      const level = parseInt(document.getElementById('cmpLevel').value, 10);
+      const pw = document.getElementById('cmpPw').value;
+      const pw2 = document.getElementById('cmpPw2').value;
+      const name = safeFilename(document.getElementById('cmpName').value, 'archive');
+      const resultBox = document.getElementById('cmpResult');
+      const btn = document.getElementById('cmpRun');
+
+      if (pw && pw !== pw2) {
+        resultBox.innerHTML = '<div class="alert error">確認用パスワードが一致しません</div>';
+        return;
+      }
+      if (!window.zip) {
+        resultBox.innerHTML = '<div class="alert error">zip.js の読み込みに失敗しました</div>';
+        return;
+      }
+
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = '圧縮中...';
+      resultBox.innerHTML = `
+        <div class="progress-wrap">
+          <div class="progress-label"><span id="zpgText">準備中...</span><span id="zpgPct">0%</span></div>
+          <div class="progress-bar"><span id="zpgBar"></span></div>
+        </div>
+      `;
+      const bar = document.getElementById('zpgBar');
+      const pct = document.getElementById('zpgPct');
+      const txt = document.getElementById('zpgText');
+
+      try {
+        zip.configure({ useWebWorkers: true });
+        const writer = new zip.ZipWriter(new zip.BlobWriter('application/zip'), {
+          password: pw || undefined,
+          encryptionStrength: pw ? 3 : undefined,
+          level,
+          bufferedWrite: true,
+        });
+
+        const total = compressFiles.reduce((s, f) => s + f.size, 0);
+        let done = 0;
+        for (let i = 0; i < compressFiles.length; i++) {
+          const f = compressFiles[i];
+          txt.textContent = `(${i + 1}/${compressFiles.length}) ${f.name}`;
+          await writer.add(f.name, new zip.BlobReader(f), {
+            level,
+            onprogress: async (loaded) => {
+              const pctVal = Math.min(100, Math.round((done + loaded) / Math.max(total, 1) * 100));
+              bar.style.width = pctVal + '%';
+              pct.textContent = pctVal + '%';
+            }
+          });
+          done += f.size;
+          const pctVal = Math.round(done / Math.max(total, 1) * 100);
+          bar.style.width = pctVal + '%';
+          pct.textContent = pctVal + '%';
+        }
+
+        txt.textContent = '仕上げ中...';
+        const blob = await writer.close();
+        bar.style.width = '100%';
+        pct.textContent = '100%';
+        txt.textContent = '完了';
+
+        window._zipOutput = blob;
+        window._zipOutputName = name + '.zip';
+
+        const ratio = Math.round((1 - blob.size / Math.max(total, 1)) * 100);
+        resultBox.insertAdjacentHTML('beforeend', `
+          <div class="alert success">
+            ${fmtSize(total)} → <b>${fmtSize(blob.size)}</b> (${ratio >= 0 ? ratio + '% 削減' : '+' + Math.abs(ratio) + '%'})${pw ? ' · 🔒 AES-256暗号化' : ''}
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="zipDl">⬇️ ダウンロード</button>
+          </div>
+        `);
+        document.getElementById('zipDl').addEventListener('click', () => {
+          downloadBlob(blob, name + '.zip');
+        });
+        // 即ダウンロードもトリガー(モバイルでワンタップの体験)
+        downloadBlob(blob, name + '.zip');
+      } catch (e) {
+        resultBox.innerHTML = `<div class="alert error">圧縮に失敗: ${escapeHtml(String(e.message || e))}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
+    }
+
     bindDropzone(
       document.getElementById('dzCompress'),
       document.getElementById('fiCompress'),
-      (files) => { console.log('compress selected:', files); /* step 3 で実装 */ }
+      (files) => {
+        for (const f of files) compressFiles.push(f);
+        renderCompress();
+      }
     );
   </script>
 </body>
