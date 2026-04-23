@@ -232,6 +232,31 @@
     }
     .check-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: #0ea5e9; }
 
+    .presets {
+      display: flex;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.5rem;
+    }
+    .preset {
+      padding: 0.4rem 0.75rem;
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      color: #334155;
+      font-size: 0.82rem;
+      font-weight: 600;
+      border-radius: 999px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .preset:active { transform: scale(0.96); }
+    .preset.active {
+      background: #e0f2fe;
+      border-color: #38bdf8;
+      color: #0369a1;
+    }
+
     button.btn {
       border: none;
       border-radius: 11px;
@@ -318,13 +343,20 @@
 
       <div class="panel">
         <h2>除去範囲 (右下からのオフセット)</h2>
-        <div class="field">
-          <label>幅 <span class="val" id="vW">12%</span></label>
-          <input type="range" id="rW" min="2" max="35" value="12" />
+        <div class="presets" id="presets">
+          <button class="preset active" data-p="star" data-w="10" data-h="10" data-r="2" data-b="2">⭐ 星マーク</button>
+          <button class="preset" data-p="sora" data-w="14" data-h="10" data-r="3" data-b="3">☁️ Soraの雲</button>
+          <button class="preset" data-p="sora-big" data-w="18" data-h="12" data-r="3" data-b="3">☁️ Sora (大)</button>
+          <button class="preset" data-p="mj" data-w="9" data-h="9" data-r="2" data-b="2">🎨 Midjourney</button>
+          <button class="preset" data-p="big" data-w="22" data-h="16" data-r="2" data-b="2">📦 右下広め</button>
         </div>
         <div class="field">
-          <label>高さ <span class="val" id="vH">12%</span></label>
-          <input type="range" id="rH" min="2" max="35" value="12" />
+          <label>幅 <span class="val" id="vW">10%</span></label>
+          <input type="range" id="rW" min="2" max="35" value="10" />
+        </div>
+        <div class="field">
+          <label>高さ <span class="val" id="vH">10%</span></label>
+          <input type="range" id="rH" min="2" max="35" value="10" />
         </div>
         <div class="field">
           <label>右からのオフセット <span class="val" id="vR">2%</span></label>
@@ -464,7 +496,20 @@
       vR.textContent = rR.value + '%';
       vB.textContent = rB.value + '%';
     }
-    [rW, rH, rR, rB].forEach(s => s.addEventListener('input', () => { updateMaskLabels(); drawMaskOverlay(); }));
+    [rW, rH, rR, rB].forEach(s => s.addEventListener('input', () => {
+      updateMaskLabels(); drawMaskOverlay();
+      document.querySelectorAll('.preset').forEach(p => p.classList.remove('active'));
+    }));
+
+    document.querySelectorAll('.preset').forEach(btn => btn.addEventListener('click', () => {
+      rW.value = btn.dataset.w;
+      rH.value = btn.dataset.h;
+      rR.value = btn.dataset.r;
+      rB.value = btn.dataset.b;
+      updateMaskLabels();
+      drawMaskOverlay();
+      document.querySelectorAll('.preset').forEach(p => p.classList.toggle('active', p === btn));
+    }));
 
     // ---- Mask geometry (in image coordinates) ----
     function getMaskRect() {
