@@ -333,8 +333,8 @@
         <div class="field">
           <label>識別の厳しさ <span style="color:#94a3b8;font-weight:400;">(別人を間違えて掛けないか)</span></label>
           <div class="mode-row">
-            <div class="mode-chip" data-strict="strict">🎯 厳しめ<span class="sub">他人を取りにくい</span></div>
-            <div class="mode-chip active" data-strict="normal">⚖️ 標準</div>
+            <div class="mode-chip active" data-strict="strict">🎯 厳しめ<span class="sub">他人を取りにくい (推奨)</span></div>
+            <div class="mode-chip" data-strict="normal">⚖️ 標準</div>
             <div class="mode-chip" data-strict="loose">🫥 ゆるめ<span class="sub">自分を取りこぼしにくい</span></div>
           </div>
         </div>
@@ -718,9 +718,9 @@
 
     // ---- Full-video processing ----
     // Match threshold (euclidean distance between 128D descriptors).
-    // Smaller = stricter (less likely to blur a different person by mistake).
-    // 0.48 is a tighter balance than the old 0.62 default. User chip overrides.
-    let MATCH_THRESHOLD = 0.48;
+    // Default 0.40 (厳しめ) — identity is decided only at detection time and
+    // then frozen on the track, so a tight threshold does not cause flicker.
+    let MATCH_THRESHOLD = 0.40;
     let processedBlob = null;
 
     function euclidean(a, b) {
@@ -975,9 +975,26 @@
         //    velocity — no descriptor compares, no ML work on intermediate
         //    frames. That removes GPU contention, keeps the canvas at source
         //    framerate, and stops 別人ぼかし from flip-flopping.
-        const DETECT_INTERVAL_MS = 250;
-        const MAX_GHOST_MS = 1500;
-        let tracks = [];          // {id, box, vx, vy, shouldBlur, detectedAtMs}
+        const DETECT_INTERVAL_MS = 400;
+        const MAX_GHOST_MS = 1800;
+        // Expand a face box to cover the whole head (hair up, chin/neck down,
+        // ears on each side). The user wants the person's head, not just the
+        // facial rectangle, continuously covered.
+        function faceToHeadBox(fb) {
+          const upPad = fb.height * 0.55;    // hair
+          const downPad = fb.height * 0.25;  // chin, upper neck
+          const sidePad = fb.width * 0.30;   // ears, hair at sides
+          return {
+            x: fb.x - sidePad,
+            y: fb.y - upPad,
+            width: fb.width + sidePad * 2,
+            height: fb.height + upPad + downPad,
+          };
+        }
+        // Each track carries the latest detected box (face) + display box
+        // (smoothed head-sized region actually drawn). Display box eases toward
+        // predicted target so detection bumps never make the blur pop.
+        let tracks = [];
         let nextTrackId = 1;
         let lastDetectAtMs = -Infinity;
         let detectBusy = false;
@@ -1056,7 +1073,7 @@
 
               if (bestI >= 0 && (bestIoU > 0.2 || bestDist < refDim * 1.2)) {
                 const t = tracks[bestI];
-                const dtSec = Math.max(0.02, (now - t.detectedAtMs) / 1000);
+                const dtSec = Math.max(0.05, (now - t.detectedAtMs) / 1000);
                 const prevCx = t.box.x + t.box.width / 2;
                 const prevCy = t.box.y + t.box.height / 2;
                 const curCx = it.box.x + it.box.width / 2;
@@ -1065,10 +1082,14 @@
                 const vy = (curCy - prevCy) / dtSec;
                 // Smooth the velocity so a jittery detection does not make the
                 // blur swing around.
-                t.vx = (t.vx || 0) * 0.4 + vx * 0.6;
-                t.vy = (t.vy || 0) * 0.4 + vy * 0.6;
+                t.vx = (t.vx || 0) * 0.5 + vx * 0.5;
+                t.vy = (t.vy || 0) * 0.5 + vy * 0.5;
                 t.box = it.box;
-                t.shouldBlur = shouldBlur;
+                // Once a track has been marked to blur, KEEP blurring it even
+                // if a later detection is uncertain — the same person walking
+                // into shadow or briefly turning away shouldn't un-blur. Only
+                // a confirmed "definitely not" updates the flag back.
+                if (shouldBlur) t.shouldBlur = true;
                 t.detectedAtMs = now;
                 usedTracks.add(bestI);
               } else {
@@ -1078,6 +1099,10 @@
                   vx: 0, vy: 0,
                   shouldBlur,
                   detectedAtMs: now,
+                  displayCx: it.box.x + it.box.width / 2,
+                  displayCy: it.box.y + it.box.height / 2,
+                  displayW: it.box.width,
+                  displayH: it.box.height,
                 });
               }
             }
@@ -1099,25 +1124,47 @@
 
         const processFrame = () => {
           if (srcVideo.ended || srcVideo.paused) return;
-          // Draw the source frame every time — this is what MediaRecorder
-          // captures. No awaits on this path.
           outCtx.drawImage(srcVideo, 0, 0, vw, vh);
 
           const now = performance.now();
           for (const t of tracks) {
             if (!t.shouldBlur) continue;
-            const ageSec = Math.min(DETECT_INTERVAL_MS / 1000 + 0.3, (now - t.detectedAtMs) / 1000);
-            const px = t.box.x + (t.vx || 0) * ageSec;
-            const py = t.box.y + (t.vy || 0) * ageSec;
-            // Wider blur when the face is moving fast so prediction error does
-            // not leave the face exposed for a frame or two.
+            const ageSec = Math.min(DETECT_INTERVAL_MS / 1000 + 0.4, (now - t.detectedAtMs) / 1000);
+            // Predicted face-box center at this instant.
+            const predCx = (t.box.x + t.box.width / 2) + (t.vx || 0) * ageSec;
+            const predCy = (t.box.y + t.box.height / 2) + (t.vy || 0) * ageSec;
+            const predW = t.box.width;
+            const predH = t.box.height;
+
+            // Seed display on first draw.
+            if (t.displayCx == null) {
+              t.displayCx = predCx; t.displayCy = predCy;
+              t.displayW = predW;   t.displayH = predH;
+            }
+            // Smooth the display toward the prediction so detection bumps do
+            // not snap the blur box. Center moves faster than size.
+            const easeC = 0.35, easeS = 0.15;
+            t.displayCx += (predCx - t.displayCx) * easeC;
+            t.displayCy += (predCy - t.displayCy) * easeC;
+            t.displayW  += (predW  - t.displayW ) * easeS;
+            t.displayH  += (predH  - t.displayH ) * easeS;
+
+            // Face → head box, so hair / chin / ears stay covered continuously.
+            const faceBox = {
+              x: t.displayCx - t.displayW / 2,
+              y: t.displayCy - t.displayH / 2,
+              width: t.displayW,
+              height: t.displayH,
+            };
+            const headBox = faceToHeadBox(faceBox);
+
+            // Extra padding scales with speed so fast motion still stays inside.
             const speed = Math.hypot(t.vx || 0, t.vy || 0);
-            const refDim = Math.max(t.box.width, t.box.height) || 100;
-            const padExtra = Math.min(0.45, (speed * ageSec * 0.55) / refDim);
-            applyBlurToBox(outCtx, { x: px, y: py, width: t.box.width, height: t.box.height }, out, padExtra);
+            const refDim = Math.max(headBox.width, headBox.height) || 100;
+            const padExtra = Math.min(0.35, (speed * ageSec * 0.4) / refDim);
+            applyBlurToBox(outCtx, headBox, out, padExtra);
           }
 
-          // Schedule the next detection only when the interval has elapsed.
           scheduleDetectionIfDue();
 
           const nowSec = srcVideo.currentTime;
