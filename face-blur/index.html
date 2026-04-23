@@ -1242,6 +1242,19 @@
         const type = mime || 'video/webm';
         processedBlob = new Blob(chunks, { type });
         const ext = type.includes('mp4') ? 'mp4' : 'webm';
+
+        // Memory cleanup — iOS Safari will silently reload the tab if it
+        // thinks we're using too much. After building the final Blob we no
+        // longer need any of these.
+        chunks.length = 0;
+        try { canvasStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+        try { canvasPool.clear(); } catch (e) {}
+        tracks = [];
+        // Drop the big output canvas backing store too
+        try { out.width = 1; out.height = 1; } catch (e) {}
+        // Free the srcVideo's decoded frames: pause and rewind
+        try { srcVideo.pause(); srcVideo.currentTime = 0; } catch (e) {}
+
         processProgress(100, '✅ 処理完了');
         processStatus.insertAdjacentHTML('beforeend', `
           <div class="alert success" style="margin-top:0.5rem;">
@@ -1349,10 +1362,16 @@
       const ext = window._blurredExt || 'webm';
       const blob = window._blurredBlob;
       const previewUrl = blob ? URL.createObjectURL(blob) : '';
+      // Video preview: preload="none" + lazy-load on user tap. Decoding a just-
+      // finished 100MB+ blob into a <video> immediately after encoding often
+      // pushes iOS Safari over its memory ceiling and the tab silently
+      // reloads — we avoid that by not decoding unless the user asks.
       const previewMarkup = blob && mediaKind === 'video'
         ? `<div style="margin-top:0.75rem;">
-             <div style="font-size:0.78rem;color:#475569;font-weight:600;margin-bottom:0.35rem;">👁 プレビュー (保存前にここで確認できます)</div>
-             <video src="${previewUrl}" controls playsinline style="width:100%;max-height:60vh;background:#000;border-radius:10px;"></video>
+             <div style="font-size:0.78rem;color:#475569;font-weight:600;margin-bottom:0.35rem;">👁 プレビュー (保存前に確認したいとき)</div>
+             <div id="previewSlot" style="width:100%;aspect-ratio:16/9;background:#0f172a;border-radius:10px;display:flex;align-items:center;justify-content:center;">
+               <button class="btn btn-secondary" id="showPreviewBtn" style="width:auto;min-width:160px;">▶ プレビューを表示</button>
+             </div>
            </div>`
         : blob && mediaKind === 'image'
           ? `<div style="margin-top:0.75rem;">
@@ -1401,6 +1420,26 @@
         processStatus.innerHTML = '';
         window._blurredBlob = null;
       });
+      const showPreviewBtn = document.getElementById('showPreviewBtn');
+      if (showPreviewBtn) {
+        showPreviewBtn.addEventListener('click', () => {
+          const slot = document.getElementById('previewSlot');
+          if (!slot) return;
+          slot.style.aspectRatio = '';
+          slot.style.minHeight = '';
+          slot.innerHTML = '';
+          const v = document.createElement('video');
+          v.src = previewUrl;
+          v.controls = true;
+          v.playsInline = true;
+          v.preload = 'metadata';
+          v.style.width = '100%';
+          v.style.maxHeight = '60vh';
+          v.style.borderRadius = '10px';
+          v.style.background = '#000';
+          slot.appendChild(v);
+        });
+      }
 
       const isVideo = (mediaKind === 'video');
       const mp4Note = isVideo
