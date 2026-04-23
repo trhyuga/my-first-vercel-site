@@ -503,22 +503,36 @@
         <div id="segList" style="margin-top:0.4rem;"></div>
       </details>
       <div class="field">
-        <label for="txtFormat">テキスト出力の形式 (NotebookLM向け)</label>
+        <label for="txtFormat">テキストのレイアウト (NotebookLM向け)</label>
         <select id="txtFormat">
           <option value="clean" selected>クリーン (話者: 発言)</option>
           <option value="timestamped">タイムスタンプ付き [時] 話者: 発言</option>
           <option value="dialog">対話台本 (空行区切り)</option>
         </select>
       </div>
+      <div class="field">
+        <label>💾 ダウンロード形式</label>
+        <div style="font-size:0.72rem;color:#64748b;padding:0 0.25rem 0.45rem;">
+          NotebookLMは <b>MP3 / WAV</b> と <b>PDF / TXT</b> を取り込めます。WebMは非対応なので自動で変換します。
+        </div>
+      </div>
       <div class="btn-row">
-        <button class="btn btn-primary" id="saveAudioBtn">🎙️ 音声を保存</button>
-        <button class="btn btn-primary" id="saveTextBtn">📝 文字起こしを保存</button>
+        <button class="btn btn-primary" id="saveMp3Btn">🎙️ MP3で保存 (小)</button>
+        <button class="btn btn-secondary" id="saveWavBtn">🔊 WAV (ロスレス・大)</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="saveTxtBtn">📝 TXTで保存</button>
+        <button class="btn btn-secondary" id="savePdfBtn">📄 PDFで保存</button>
       </div>
       <div class="btn-row">
         <button class="btn btn-secondary" id="previewTextBtn">📋 テキストをプレビュー/コピー</button>
       </div>
       <div id="saveHint" class="alert info" style="font-size:0.78rem;"></div>
       <div id="saveStatus"></div>
+      <div id="convertProgress" class="progress-wrap hidden" style="margin-top:0.5rem;">
+        <div style="font-size:0.82rem;display:flex;justify-content:space-between;margin-bottom:0.3rem;"><span id="cpText">変換中...</span><span id="cpPct">0%</span></div>
+        <div style="height:6px;background:#e2e8f0;border-radius:999px;overflow:hidden;"><span id="cpBar" style="display:block;width:0%;height:100%;background:linear-gradient(90deg,#0ea5e9,#06b6d4);"></span></div>
+      </div>
     </div>
 
     <p class="alert info" style="margin-top:1rem;">
@@ -528,6 +542,8 @@
 
   <footer>© ひゅうがのTR-Labo</footer>
 
+  <script src="https://cdn.jsdelivr.net/npm/@breezystack/lamejs@1.2.7/lame.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script>
     // ---- helpers ----
     function pad(n, w=2) { return String(n).padStart(w, '0'); }
@@ -1266,21 +1282,227 @@
       box.innerHTML = `<div class="alert ${cls}">${extra ? '✅ ' + extra + ' / ' : ''}${res.text}</div>`;
     }
 
-    document.getElementById('saveAudioBtn').addEventListener('click', async () => {
+    // ---- Audio transcoding (WebM/Opus -> MP3 / WAV) ----
+    const convertProgress = document.getElementById('convertProgress');
+    const cpText = document.getElementById('cpText');
+    const cpPct = document.getElementById('cpPct');
+    const cpBar = document.getElementById('cpBar');
+    function showConvertProgress(text, pct) {
+      convertProgress.classList.remove('hidden');
+      cpText.textContent = text;
+      cpPct.textContent = Math.round(pct) + '%';
+      cpBar.style.width = Math.round(pct) + '%';
+    }
+    function hideConvertProgress() {
+      convertProgress.classList.add('hidden');
+      cpBar.style.width = '0%';
+    }
+
+    async function decodeToMono(blob) {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      try {
+        const buf = await blob.arrayBuffer();
+        const audioBuffer = await new Promise((resolve, reject) => {
+          ctx.decodeAudioData(buf.slice(0), resolve, reject);
+        });
+        const nCh = audioBuffer.numberOfChannels;
+        const nS = audioBuffer.length;
+        const mono = new Float32Array(nS);
+        for (let c = 0; c < nCh; c++) {
+          const chan = audioBuffer.getChannelData(c);
+          for (let i = 0; i < nS; i++) mono[i] += chan[i];
+        }
+        for (let i = 0; i < nS; i++) mono[i] /= nCh;
+        const sr = audioBuffer.sampleRate;
+        return { samples: mono, sampleRate: sr };
+      } finally {
+        try { ctx.close(); } catch (e) {}
+      }
+    }
+
+    function floatToInt16(f) {
+      const out = new Int16Array(f.length);
+      for (let i = 0; i < f.length; i++) {
+        const v = Math.max(-1, Math.min(1, f[i]));
+        out[i] = v < 0 ? v * 32768 : v * 32767;
+      }
+      return out;
+    }
+
+    async function encodeMP3(samples, sampleRate, kbps) {
+      if (typeof lamejs === 'undefined' || !lamejs.Mp3Encoder) {
+        throw new Error('MP3エンコーダを読み込めませんでした');
+      }
+      const encoder = new lamejs.Mp3Encoder(1, sampleRate, kbps);
+      const int16 = floatToInt16(samples);
+      const chunks = [];
+      const blockSize = 1152;
+      const totalBlocks = Math.ceil(int16.length / blockSize);
+      let blocksDone = 0;
+      for (let i = 0; i < int16.length; i += blockSize) {
+        const chunk = int16.subarray(i, i + blockSize);
+        const mp3data = encoder.encodeBuffer(chunk);
+        if (mp3data.length > 0) chunks.push(mp3data);
+        blocksDone++;
+        if (blocksDone % 40 === 0) {
+          showConvertProgress('MP3に変換中...', (blocksDone / totalBlocks) * 95);
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+      const end = encoder.flush();
+      if (end.length > 0) chunks.push(end);
+      return new Blob(chunks, { type: 'audio/mpeg' });
+    }
+
+    function encodeWAV(samples, sampleRate) {
+      const n = samples.length;
+      const buffer = new ArrayBuffer(44 + n * 2);
+      const view = new DataView(buffer);
+      const ws = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+      ws(0, 'RIFF'); view.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE');
+      ws(12, 'fmt '); view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+      ws(36, 'data'); view.setUint32(40, n * 2, true);
+      let o = 44;
+      for (let i = 0; i < n; i++) {
+        const v = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(o, v < 0 ? v * 32768 : v * 32767, true);
+        o += 2;
+      }
+      return new Blob([buffer], { type: 'audio/wav' });
+    }
+
+    // ---- Text → PDF via canvas (uses system Japanese fonts) ----
+    async function buildTranscriptPdf(text) {
+      if (typeof PDFLib === 'undefined') throw new Error('pdf-libを読み込めませんでした');
+      const doc = await PDFLib.PDFDocument.create();
+      const PW = 595.28, PH = 841.89;
+      const MX = 48, MY = 56;
+      const scale = 2;
+      const cW = Math.round(PW * scale), cH = Math.round(PH * scale);
+      const textW = cW - MX * 2 * scale;
+      const fontSize = 13 * scale;
+      const lineHeight = fontSize * 1.7;
+      const fontFamily = '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", "Meiryo", "MS PGothic", sans-serif';
+      if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
+      const mCan = document.createElement('canvas');
+      const mCtx = mCan.getContext('2d');
+      mCtx.font = `${fontSize}px ${fontFamily}`;
+
+      const raw = text.split('\n');
+      const wrapped = [];
+      for (const line of raw) {
+        if (!line) { wrapped.push(''); continue; }
+        if (mCtx.measureText(line).width <= textW) { wrapped.push(line); continue; }
+        let cur = '';
+        for (const ch of line) {
+          const test = cur + ch;
+          if (mCtx.measureText(test).width <= textW) cur = test;
+          else { if (cur) wrapped.push(cur); cur = ch; }
+        }
+        if (cur) wrapped.push(cur);
+      }
+
+      const linesPerPage = Math.floor((cH - MY * 2 * scale) / lineHeight);
+      const totalPages = Math.max(1, Math.ceil(wrapped.length / linesPerPage));
+      for (let page = 0; page < totalPages; page++) {
+        showConvertProgress(`PDF ${page + 1}/${totalPages}ページを生成中...`, ((page) / totalPages) * 95);
+        await new Promise(r => setTimeout(r, 0));
+        const can = document.createElement('canvas');
+        can.width = cW; can.height = cH;
+        const ctx = can.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cW, cH);
+        ctx.fillStyle = '#0f172a';
+        ctx.font = `${fontSize}px ${fontFamily}`;
+        ctx.textBaseline = 'top';
+        const start = page * linesPerPage;
+        const end = Math.min(start + linesPerPage, wrapped.length);
+        for (let i = start; i < end; i++) {
+          const y = MY * scale + (i - start) * lineHeight;
+          ctx.fillText(wrapped[i], MX * scale, y);
+        }
+        // page number
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = `${Math.round(9 * scale)}px ${fontFamily}`;
+        ctx.fillText(`${page + 1} / ${totalPages}`, cW - MX * scale - 50, cH - MY * scale + 8);
+
+        const blob = await new Promise(r => can.toBlob(r, 'image/jpeg', 0.9));
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const img = await doc.embedJpg(bytes);
+        const p = doc.addPage([PW, PH]);
+        p.drawImage(img, { x: 0, y: 0, width: PW, height: PH });
+      }
+      const pdfBytes = await doc.save();
+      return new Blob([pdfBytes], { type: 'application/pdf' });
+    }
+
+    // ---- Save handlers ----
+    async function saveAudioAs(format) {
       if (!recordedBlob) return;
       const base = safeFilename(titleEl.value, 'recording');
-      const res = await smartSave(recordedBlob, base + '.' + audioExt());
-      showSaveStatus(res, `音声 (${fmtSize(recordedBlob.size)})`);
-    });
+      const btn = format === 'mp3' ? document.getElementById('saveMp3Btn') : document.getElementById('saveWavBtn');
+      const orig = btn.textContent;
+      btn.disabled = true;
+      try {
+        showConvertProgress('音声をデコード中...', 5);
+        const { samples, sampleRate } = await decodeToMono(recordedBlob);
+        let outBlob, ext;
+        if (format === 'mp3') {
+          const kbps = Math.max(16, Math.min(128, Math.round(parseInt(bitrateEl.value, 10) / 1000)));
+          outBlob = await encodeMP3(samples, sampleRate, kbps);
+          ext = 'mp3';
+        } else {
+          showConvertProgress('WAVを書き出し中...', 90);
+          outBlob = encodeWAV(samples, sampleRate);
+          ext = 'wav';
+        }
+        showConvertProgress('保存先を選択中...', 100);
+        hideConvertProgress();
+        const res = await smartSave(outBlob, base + '.' + ext);
+        showSaveStatus(res, `${ext.toUpperCase()} (${fmtSize(outBlob.size)})`);
+      } catch (e) {
+        hideConvertProgress();
+        document.getElementById('saveStatus').innerHTML = `<div class="alert error">失敗: ${String(e.message || e)}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
+    }
+    document.getElementById('saveMp3Btn').addEventListener('click', () => saveAudioAs('mp3'));
+    document.getElementById('saveWavBtn').addEventListener('click', () => saveAudioAs('wav'));
 
-    document.getElementById('saveTextBtn').addEventListener('click', async () => {
+    document.getElementById('saveTxtBtn').addEventListener('click', async () => {
       if (!segments.length) { alert('文字起こしがありません'); return; }
       const fmt = document.getElementById('txtFormat').value;
       const text = buildTranscriptText(fmt);
       const base = safeFilename(titleEl.value, 'transcript');
       const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
       const res = await smartSave(blob, base + '.txt');
-      showSaveStatus(res, `文字起こし (${fmtSize(blob.size)})`);
+      showSaveStatus(res, `TXT (${fmtSize(blob.size)})`);
+    });
+
+    document.getElementById('savePdfBtn').addEventListener('click', async () => {
+      if (!segments.length) { alert('文字起こしがありません'); return; }
+      const btn = document.getElementById('savePdfBtn');
+      const orig = btn.textContent;
+      btn.disabled = true;
+      try {
+        const fmt = document.getElementById('txtFormat').value;
+        const text = buildTranscriptText(fmt);
+        const base = safeFilename(titleEl.value, 'transcript');
+        const blob = await buildTranscriptPdf(text);
+        hideConvertProgress();
+        const res = await smartSave(blob, base + '.pdf');
+        showSaveStatus(res, `PDF (${fmtSize(blob.size)})`);
+      } catch (e) {
+        hideConvertProgress();
+        document.getElementById('saveStatus').innerHTML = `<div class="alert error">失敗: ${String(e.message || e)}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
     });
 
     document.getElementById('previewTextBtn').addEventListener('click', async () => {
