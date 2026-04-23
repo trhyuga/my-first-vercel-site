@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>圧縮・解凍 | ひゅうがのTR-Labo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .brand {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 0.7rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+    .back-btn {
+      width: 36px; height: 36px;
+      border-radius: 9px;
+      border: 1px solid #e2e8f0;
+      background: #fff;
+      color: #475569;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .back-btn:active { background: #f1f5f9; }
+    .logo {
+      width: 34px; height: 34px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800;
+      font-size: 0.78rem;
+      box-shadow: 0 4px 10px rgba(14,165,233,0.25);
+    }
+    .brand-name {
+      font-size: 1rem;
+      font-weight: 700;
+      letter-spacing: -0.005em;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 1.5rem 1rem 2rem;
+    }
+    .hero {
+      text-align: center;
+      padding: 0.5rem 0 1.25rem;
+    }
+    .hero h1 {
+      font-size: clamp(1.5rem, 5vw, 1.95rem);
+      font-weight: 800;
+      letter-spacing: -0.015em;
+      color: #0f172a;
+      margin-bottom: 0.6rem;
+    }
+    .hero h1 .accent {
+      background: linear-gradient(135deg, #0284c7, #06b6d4);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      color: #64748b;
+      font-size: 0.9rem;
+      line-height: 1.65;
+      max-width: 520px;
+      margin: 0 auto;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 0.35rem;
+      background: #eef2f7;
+      padding: 0.3rem;
+      border-radius: 12px;
+      margin: 1.25rem 0 1rem;
+    }
+    .tab {
+      flex: 1;
+      padding: 0.65rem 0.8rem;
+      text-align: center;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #64748b;
+      border-radius: 9px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s, color 0.15s;
+    }
+    .tab.active {
+      background: #fff;
+      color: #0f172a;
+      box-shadow: 0 1px 3px rgba(15,23,42,0.08);
+    }
+
+    .dropzone {
+      border: 2px dashed #cbd5e1;
+      border-radius: 16px;
+      padding: 2.5rem 1rem;
+      text-align: center;
+      background: #fff;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .dropzone:active,
+    .dropzone.drag {
+      background: #e0f2fe;
+      border-color: #38bdf8;
+    }
+    .dropzone .icon {
+      font-size: 2.6rem;
+      margin-bottom: 0.6rem;
+      display: inline-block;
+      color: #0ea5e9;
+    }
+    .dropzone .t {
+      font-size: 1.02rem;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 0.3rem;
+    }
+    .dropzone .d {
+      font-size: 0.82rem;
+      color: #64748b;
+      line-height: 1.55;
+    }
+    .dropzone .formats {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.3rem;
+      margin-top: 0.9rem;
+    }
+    .fmt-chip {
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: #0369a1;
+      background: #e0f2fe;
+      padding: 0.15rem 0.55rem;
+      border-radius: 999px;
+    }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+    .panel h2 {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #0f172a;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 0.6rem;
+    }
+
+    .info-row {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      padding: 0.25rem 0;
+    }
+    .info-row .k { font-size: 0.78rem; color: #64748b; min-width: 92px; }
+    .info-row .v { font-size: 0.88rem; font-weight: 600; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .file-list {
+      margin-top: 0.5rem;
+      max-height: 360px;
+      overflow-y: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .file-row {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid #f1f5f9;
+      font-size: 0.85rem;
+    }
+    .file-row:last-child { border-bottom: none; }
+    .file-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #0f172a; min-width: 0; }
+    .file-row .size { font-size: 0.72rem; color: #64748b; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+    .file-row input[type="checkbox"] { flex: 0 0 auto; width: 18px; height: 18px; accent-color: #0ea5e9; }
+    .file-row .act-btn {
+      flex: 0 0 auto;
+      width: 30px; height: 30px;
+      border: 1px solid #e2e8f0;
+      background: #fff;
+      color: #475569;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      -webkit-tap-highlight-color: transparent;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .file-row .act-btn:active { background: #f1f5f9; }
+
+    .field { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.75rem; }
+    .field label {
+      font-size: 0.78rem;
+      color: #475569;
+      font-weight: 600;
+      padding-left: 0.15rem;
+    }
+    .field input[type="text"], .field input[type="password"], .field select {
+      background: #fff;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+      padding: 0.7rem 0.8rem;
+      border-radius: 10px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      width: 100%;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .field input:focus, .field select:focus {
+      outline: none;
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+    }
+    .field-row { display: flex; gap: 0.5rem; }
+    .field-row > * { flex: 1; }
+
+    button.btn {
+      border: none;
+      border-radius: 11px;
+      padding: 0.85rem 1rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      font-family: inherit;
+      transition: transform 0.08s, opacity 0.15s, background 0.15s;
+      min-height: 48px;
+      width: 100%;
+    }
+    button.btn:active { transform: scale(0.98); opacity: 0.92; }
+    button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary {
+      background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(14,165,233,0.28);
+    }
+    .btn-secondary {
+      background: #fff;
+      color: #0f172a;
+      border: 1px solid #cbd5e1;
+    }
+    .btn-row { display: flex; gap: 0.5rem; margin-top: 0.85rem; flex-wrap: wrap; }
+    .btn-row .btn { flex: 1; min-width: 140px; }
+
+    .progress-wrap { margin-top: 0.75rem; }
+    .progress-label { font-size: 0.8rem; color: #475569; margin-bottom: 0.35rem; display: flex; justify-content: space-between; }
+    .progress-bar {
+      height: 8px;
+      background: #e2e8f0;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-bar > span {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #0ea5e9, #06b6d4);
+      transition: width 0.15s;
+    }
+
+    .alert {
+      padding: 0.75rem 0.85rem;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      line-height: 1.55;
+      margin-top: 0.75rem;
+    }
+    .alert.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .alert.success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .alert.info { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+
+    .hidden { display: none !important; }
+
+    footer {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 1rem;
+      color: #94a3b8;
+      font-size: 0.74rem;
+      text-align: center;
+      padding-bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
+    }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">📦 圧縮・解凍</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>ZIP・7z・RAR、<span class="accent">まるごとブラウザで。</span></h1>
+      <p>ファイルはサーバーに送らずこの端末内で処理。AES-256暗号化ZIP対応。iPhone・Android・デスクトップで同じ使い心地。</p>
+    </section>
+
+    <div class="tabs" role="tablist">
+      <div class="tab active" data-tab="extract" role="tab">📂 解凍</div>
+      <div class="tab" data-tab="compress" role="tab">🗜️ 圧縮</div>
+    </div>
+
+    <!-- EXTRACT mode -->
+    <section id="extractPane">
+      <div class="dropzone" id="dzExtract">
+        <input type="file" id="fiExtract" accept=".zip,.7z,.rar,.tar,.gz,.tgz,.lzh,.lha,.bz2,.xz,application/zip,application/x-7z-compressed,application/x-rar-compressed,application/x-tar,application/gzip" hidden />
+        <div class="icon">📥</div>
+        <div class="t">アーカイブをドロップ または タップして選択</div>
+        <div class="d">内容をプレビューしてから解凍できます</div>
+        <div class="formats">
+          <span class="fmt-chip">ZIP</span>
+          <span class="fmt-chip">7z</span>
+          <span class="fmt-chip">RAR v5</span>
+          <span class="fmt-chip">tar</span>
+          <span class="fmt-chip">gz</span>
+          <span class="fmt-chip">lzh</span>
+          <span class="fmt-chip">bz2/xz</span>
+        </div>
+      </div>
+      <div id="extractBody"></div>
+    </section>
+
+    <!-- COMPRESS mode -->
+    <section id="compressPane" class="hidden">
+      <div class="dropzone" id="dzCompress">
+        <input type="file" id="fiCompress" multiple hidden />
+        <div class="icon">📤</div>
+        <div class="t">ファイルをドロップ または タップして追加</div>
+        <div class="d">複数ファイルをまとめてZIPに圧縮(AES-256パスワード対応)</div>
+      </div>
+      <div id="compressBody"></div>
+    </section>
+
+    <p class="alert info" style="margin-top:1rem;">
+      🔒 すべてこの端末内で処理され、ファイルはどこにもアップロードされません。
+    </p>
+  </main>
+
+  <footer>© ひゅうがのTR-Labo</footer>
+
+  <script>
+    // Step 1: tab switching + drop zone wiring only
+    const tabs = document.querySelectorAll('.tab');
+    const panes = {
+      extract: document.getElementById('extractPane'),
+      compress: document.getElementById('compressPane'),
+    };
+    tabs.forEach(t => t.addEventListener('click', () => {
+      tabs.forEach(x => x.classList.toggle('active', x === t));
+      const key = t.dataset.tab;
+      Object.entries(panes).forEach(([k, el]) => el.classList.toggle('hidden', k !== key));
+    }));
+
+    function bindDropzone(zone, input, onFiles) {
+      zone.addEventListener('click', () => input.click());
+      ['dragenter', 'dragover'].forEach(evt =>
+        zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.add('drag'); })
+      );
+      ['dragleave', 'drop'].forEach(evt =>
+        zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.remove('drag'); })
+      );
+      zone.addEventListener('drop', (e) => {
+        const files = Array.from(e.dataTransfer.files || []);
+        if (files.length) onFiles(files);
+      });
+      input.addEventListener('change', () => {
+        const files = Array.from(input.files || []);
+        if (files.length) onFiles(files);
+        input.value = '';
+      });
+    }
+
+    bindDropzone(
+      document.getElementById('dzExtract'),
+      document.getElementById('fiExtract'),
+      (files) => { console.log('extract selected:', files); /* step 2 で実装 */ }
+    );
+    bindDropzone(
+      document.getElementById('dzCompress'),
+      document.getElementById('fiCompress'),
+      (files) => { console.log('compress selected:', files); /* step 3 で実装 */ }
+    );
+  </script>
+</body>
+</html>
