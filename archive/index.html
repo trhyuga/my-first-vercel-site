@@ -444,6 +444,56 @@
       setTimeout(() => URL.revokeObjectURL(url), 1500);
     }
 
+    // ---- Capability detection ----
+    const hasFSAccess = typeof window.showDirectoryPicker === 'function';
+    const hasShare = typeof navigator.share === 'function';
+    function canShareFiles(files) {
+      try { return hasShare && navigator.canShare && navigator.canShare({ files }); }
+      catch (e) { return false; }
+    }
+
+    // ---- Smart save: write an array of {path, blob} to disk ----
+    async function saveToDirectory(items, dirHandle) {
+      // Create nested folders as needed.
+      async function getDir(root, parts) {
+        let cur = root;
+        for (const p of parts) cur = await cur.getDirectoryHandle(p, { create: true });
+        return cur;
+      }
+      let done = 0;
+      for (const it of items) {
+        const segs = it.path.split('/').filter(Boolean);
+        const fileName = segs.pop();
+        const dir = segs.length ? await getDir(dirHandle, segs) : dirHandle;
+        const fh = await dir.getFileHandle(fileName, { create: true });
+        const w = await fh.createWritable();
+        await w.write(it.blob);
+        await w.close();
+        done++;
+        if (typeof items.onprogress === 'function') items.onprogress(done, items.length);
+      }
+    }
+
+    async function bundleAsZip(items, zipName) {
+      zip.configure({ useWebWorkers: true });
+      const writer = new zip.ZipWriter(new zip.BlobWriter('application/zip'), { level: 5, bufferedWrite: true });
+      for (const it of items) {
+        await writer.add(it.path, new zip.BlobReader(it.blob), { level: 5 });
+      }
+      const blob = await writer.close();
+      return new File([blob], zipName, { type: 'application/zip' });
+    }
+
+    async function shareFiles(files) {
+      try {
+        await navigator.share({ files });
+        return true;
+      } catch (e) {
+        if (e && e.name === 'AbortError') return true;
+        return false;
+      }
+    }
+
     // ---- libarchive init ----
     let libarchiveReady = null;
     function initLibarchive() {
@@ -635,23 +685,106 @@
           pgPct.textContent = pct + '%';
         }
         pgText.textContent = '解凍完了';
-        window._extracted = extracted;
+        const folderName = safeFilename((currentArchiveFile.name || 'extracted').replace(/\.[^.]+(\.(gz|bz2|xz|tgz))?$/i, ''), 'extracted');
+        const totalOut = extracted.reduce((s, e) => s + e.blob.size, 0);
+
+        const saveOptions = [];
+        if (hasFSAccess) saveOptions.push(`<button class="btn btn-primary" id="saveFolder">📁 フォルダに展開</button>`);
+        const shareFilesArr = extracted.map(e => new File([e.blob], e.path.split('/').pop(), { type: e.blob.type || 'application/octet-stream' }));
+        if (canShareFiles(shareFilesArr) || hasShare) saveOptions.push(`<button class="btn ${hasFSAccess ? 'btn-secondary' : 'btn-primary'}" id="saveShare">📤 ファイルアプリに保存</button>`);
+        saveOptions.push(`<button class="btn ${saveOptions.length ? 'btn-secondary' : 'btn-primary'}" id="saveZip">📦 ZIPにまとめてダウンロード</button>`);
+
         resultBox.insertAdjacentHTML('beforeend', `
-          <div class="alert success">${extracted.length}件のファイルを展開しました。保存方法は次のステップで追加されます。</div>
-          <div class="btn-row">
-            <button class="btn btn-secondary" id="listBtn">一覧を表示</button>
-          </div>
+          <div class="alert success">✅ ${extracted.length}件 / ${fmtSize(totalOut)} を展開しました。</div>
+          <div class="btn-row">${saveOptions.join('')}</div>
+          <div class="btn-row"><button class="btn btn-secondary" id="listBtn">📄 1ファイルずつ保存</button></div>
           <div id="extList"></div>
         `);
+
+        const fsBtn = document.getElementById('saveFolder');
+        if (fsBtn) fsBtn.addEventListener('click', async () => {
+          try {
+            const root = await window.showDirectoryPicker({ mode: 'readwrite' });
+            const target = await root.getDirectoryHandle(folderName, { create: true });
+            fsBtn.disabled = true;
+            fsBtn.textContent = '書き出し中...';
+            extracted.onprogress = (done, total) => { fsBtn.textContent = `書き出し中 ${done}/${total}`; };
+            await saveToDirectory(extracted, target);
+            fsBtn.textContent = `✅ ${folderName}/ に保存しました`;
+            setTimeout(() => { fsBtn.disabled = false; fsBtn.textContent = '📁 フォルダに展開'; }, 2500);
+          } catch (e) {
+            if (e && e.name === 'AbortError') { /* user cancelled */ fsBtn.disabled = false; return; }
+            alert('書き出しに失敗: ' + (e.message || e));
+            fsBtn.disabled = false;
+          }
+        });
+
+        const shBtn = document.getElementById('saveShare');
+        if (shBtn) shBtn.addEventListener('click', async () => {
+          shBtn.disabled = true;
+          const orig = shBtn.textContent;
+          shBtn.textContent = '準備中...';
+          try {
+            if (canShareFiles(shareFilesArr)) {
+              const ok = await shareFiles(shareFilesArr);
+              if (!ok) throw new Error('共有できませんでした');
+            } else {
+              // Fallback: share as zip
+              shBtn.textContent = 'ZIPを作成中...';
+              const zipFile = await bundleAsZip(extracted, folderName + '.zip');
+              if (canShareFiles([zipFile])) {
+                const ok = await shareFiles([zipFile]);
+                if (!ok) throw new Error('共有できませんでした');
+              } else {
+                downloadBlob(zipFile, zipFile.name);
+              }
+            }
+            shBtn.textContent = '✅ 送信しました';
+            setTimeout(() => { shBtn.disabled = false; shBtn.textContent = orig; }, 2000);
+          } catch (e) {
+            alert('共有に失敗: ' + (e.message || e));
+            shBtn.disabled = false;
+            shBtn.textContent = orig;
+          }
+        });
+
+        document.getElementById('saveZip').addEventListener('click', async () => {
+          const zBtn = document.getElementById('saveZip');
+          zBtn.disabled = true;
+          const orig = zBtn.textContent;
+          zBtn.textContent = 'ZIP作成中...';
+          try {
+            const zipFile = await bundleAsZip(extracted, folderName + '.zip');
+            downloadBlob(zipFile, zipFile.name);
+            zBtn.textContent = '✅ ダウンロードしました';
+            setTimeout(() => { zBtn.disabled = false; zBtn.textContent = orig; }, 2000);
+          } catch (e) {
+            alert('ZIP作成に失敗: ' + (e.message || e));
+            zBtn.disabled = false;
+            zBtn.textContent = orig;
+          }
+        });
+
         document.getElementById('listBtn').addEventListener('click', () => {
           const box = document.getElementById('extList');
-          box.innerHTML = '<div class="file-list">' + extracted.map(e =>
-            `<div class="file-row"><span class="name">${escapeHtml(e.path)}</span><span class="size">${fmtSize(e.blob.size)}</span><button class="act-btn" data-dl="${escapeHtml(e.path)}">⬇</button></div>`
+          box.innerHTML = '<div class="file-list">' + extracted.map((e, i) =>
+            `<div class="file-row">
+              <span class="name" title="${escapeHtml(e.path)}">${escapeHtml(e.path)}</span>
+              <span class="size">${fmtSize(e.blob.size)}</span>
+              <button class="act-btn" data-dl="${i}" title="ダウンロード">⬇</button>
+              ${hasShare ? `<button class="act-btn" data-sh="${i}" title="共有">📤</button>` : ''}
+            </div>`
           ).join('') + '</div>';
-          box.querySelectorAll('.act-btn').forEach(b => b.addEventListener('click', () => {
-            const p = b.dataset.dl;
-            const hit = extracted.find(x => x.path === p);
+          box.querySelectorAll('[data-dl]').forEach(b => b.addEventListener('click', () => {
+            const hit = extracted[parseInt(b.dataset.dl, 10)];
             if (hit) downloadBlob(hit.blob, hit.path.split('/').pop());
+          }));
+          box.querySelectorAll('[data-sh]').forEach(b => b.addEventListener('click', async () => {
+            const hit = extracted[parseInt(b.dataset.sh, 10)];
+            if (!hit) return;
+            const f = new File([hit.blob], hit.path.split('/').pop(), { type: hit.blob.type || 'application/octet-stream' });
+            if (canShareFiles([f])) await shareFiles([f]);
+            else downloadBlob(hit.blob, f.name);
           }));
         });
       } catch (e) {
@@ -804,19 +937,28 @@
         window._zipOutputName = name + '.zip';
 
         const ratio = Math.round((1 - blob.size / Math.max(total, 1)) * 100);
+        const zipFile = new File([blob], name + '.zip', { type: 'application/zip' });
+        const canShareZip = canShareFiles([zipFile]);
+
         resultBox.insertAdjacentHTML('beforeend', `
           <div class="alert success">
             ${fmtSize(total)} → <b>${fmtSize(blob.size)}</b> (${ratio >= 0 ? ratio + '% 削減' : '+' + Math.abs(ratio) + '%'})${pw ? ' · 🔒 AES-256暗号化' : ''}
           </div>
           <div class="btn-row">
             <button class="btn btn-primary" id="zipDl">⬇️ ダウンロード</button>
+            ${canShareZip ? '<button class="btn btn-secondary" id="zipShare">📤 ファイルアプリに保存</button>' : ''}
           </div>
         `);
-        document.getElementById('zipDl').addEventListener('click', () => {
-          downloadBlob(blob, name + '.zip');
+        document.getElementById('zipDl').addEventListener('click', () => downloadBlob(blob, zipFile.name));
+        const zipShareBtn = document.getElementById('zipShare');
+        if (zipShareBtn) zipShareBtn.addEventListener('click', async () => {
+          zipShareBtn.disabled = true;
+          const orig = zipShareBtn.textContent;
+          zipShareBtn.textContent = '送信中...';
+          const ok = await shareFiles([zipFile]);
+          zipShareBtn.textContent = ok ? '✅ 送信しました' : '共有失敗';
+          setTimeout(() => { zipShareBtn.disabled = false; zipShareBtn.textContent = orig; }, 1800);
         });
-        // 即ダウンロードもトリガー(モバイルでワンタップの体験)
-        downloadBlob(blob, name + '.zip');
       } catch (e) {
         resultBox.innerHTML = `<div class="alert error">圧縮に失敗: ${escapeHtml(String(e.message || e))}</div>`;
       } finally {
