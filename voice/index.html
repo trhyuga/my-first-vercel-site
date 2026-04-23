@@ -311,6 +311,18 @@
       padding: 0.1rem 0.4rem;
       flex: 0 0 auto;
     }
+    .spk-auto-badge {
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: #854d0e;
+      background: #fef3c7;
+      border: 1px solid #fde68a;
+      border-radius: 5px;
+      padding: 0.12rem 0.4rem;
+      margin-top: 0.1rem;
+      display: inline-block;
+      align-self: flex-start;
+    }
     .spk-edit input {
       flex: 1;
       border: 1px solid #cbd5e1;
@@ -572,7 +584,7 @@
         <label>👥 話者に名前を付ける <span id="spkCountLabel" style="color:#64748b;font-weight:500;"></span></label>
         <div class="speakers-edit" id="speakersEdit"></div>
         <div style="font-size:0.72rem;color:#64748b;padding:0.35rem 0.25rem 0;line-height:1.55;">
-          声の特徴で自動分類済み。各話者の最初の発言をサンプル表示しています。<b>▶</b> で約4秒再生できるので、誰の声か確かめてから名前を書き換えてください。
+          声の特徴で自動分類し、<b>自己紹介が聞き取れた話者は名前を仮入力</b>しています (🤖 バッジ付き)。<b>▶</b> で約4秒再生できるので、違っていれば書き換えてください。
         </div>
       </div>
       <div class="btn-row">
@@ -1110,6 +1122,7 @@
         const name = speakers[i];
         const idTag = '話者' + String.fromCharCode('A'.charCodeAt(0) + i);
         const sample = sampleUtteranceFor(i);
+        const isAuto = autoNamedSpeakers.has(i);
         const card = document.createElement('div');
         card.className = 'spk-edit';
         const sampleHtml = sample
@@ -1118,17 +1131,24 @@
                <button class="play" type="button" aria-label="再生">▶</button>
              </div>`
           : `<div class="spk-sample empty">サンプル発言なし</div>`;
+        const autoBadge = isAuto
+          ? `<span class="spk-auto-badge" title="自己紹介から自動検出。違っていたら書き換えてください">🤖 聞き取った名前・要確認</span>`
+          : '';
         card.innerHTML = `
           <div class="spk-head">
             <span class="id">${escapeHtml(idTag)}</span>
             <input type="text" value="${escapeHtml(name)}" data-idx="${i}" placeholder="実名やあだ名を入力" />
             <span class="cnt">${counts[i]}件</span>
           </div>
+          ${autoBadge}
           ${sampleHtml}
         `;
         const input = card.querySelector('input');
         input.addEventListener('input', () => {
           speakers[i] = input.value || idTag;
+          autoNamedSpeakers.delete(i);
+          const badge = card.querySelector('.spk-auto-badge');
+          if (badge) badge.remove();
           renderSegList();
         });
         const playBtn = card.querySelector('.play');
@@ -1252,6 +1272,8 @@
         // Too little data — treat as single speaker
         featsIdx.forEach(i => { segments[i].speaker = 0; });
         while (speakers.length < 1) speakers.push('話者A');
+        autoNamedSpeakers.clear();
+        detectSpeakerNames();
         renderSpeakersEdit();
         renderSegList();
         return;
@@ -1278,6 +1300,8 @@
       if (!bestAssign || bestScore < SILHOUETTE_THRESHOLD) {
         featsIdx.forEach(i => { segments[i].speaker = 0; });
         while (speakers.length < 1) speakers.push('話者A');
+        autoNamedSpeakers.clear();
+        detectSpeakerNames();
         renderSpeakersEdit();
         renderSegList();
         return;
@@ -1300,13 +1324,85 @@
       for (let j = 0; j < featsIdx.length; j++) {
         segments[featsIdx[j]].speaker = remap[bestAssign[j]];
       }
+      // Pre-fill names from self-introductions where possible
+      autoNamedSpeakers.clear();
+      detectSpeakerNames();
       renderSpeakersEdit();
       renderSegList();
     }
 
     document.getElementById('autoDiaBtn').addEventListener('click', autoClusterSpeakers);
 
-    // ---- Smart save (Web Share / FS Access / anchor) ----
+    // ---- Self-introduction name detection ----
+    // Scan the first few segments of each speaker for common 自己紹介 phrases
+    // and pre-fill the speaker name with what was heard.
+    const autoNamedSpeakers = new Set();
+
+    const NAME_NON_WORDS = new Set([
+      '私','僕','俺','わたし','ぼく','おれ','自分','みんな','皆',
+      '元気','最高','最低','大丈夫','普通','大変','最近','今日','昨日','明日',
+      'そう','こう','ああ','これ','それ','あれ','そこ','ここ','あそこ',
+      'はい','いいえ','いい','だめ','ダメ','うち','家','家族',
+      '会社','学校','仕事','担当','スタッフ','社員','先生','生徒','学生',
+      '代表','部長','課長','社長','プロ','新人','以上','以下',
+    ]);
+
+    function looksLikeName(s) {
+      if (!s) return false;
+      const t = s.trim();
+      if (t.length < 1 || t.length > 12) return false;
+      if (NAME_NON_WORDS.has(t)) return false;
+      // Only allow kanji / kana / basic alphanumerics
+      if (!/^[一-龥々ぁ-んァ-ヶー・A-Za-z0-9]+$/.test(t)) return false;
+      // Reject pure hiragana words that look like common verbs/particles
+      if (/^(です|ます|ました|でした|あります|います)$/.test(t)) return false;
+      return true;
+    }
+
+    function extractNameFromText(text) {
+      if (!text) return null;
+      const candidates = [
+        // 「私は○○です」「僕は○○と申します」など
+        /(?:私|僕|俺|わたし|ぼく|おれ|自分)(?:は|、)\s*([一-龥々ぁ-んァ-ヶー・A-Za-z0-9]{1,12}?)(?:です|と申します|と言います|って言います|といいます)/,
+        // 「はじめまして、○○です」
+        /はじめまして[、。\s]*\s*([一-龥々ぁ-んァ-ヶー・A-Za-z0-9]{1,12}?)(?:です|と申します|と言います|といいます)/,
+        // 「○○と申します」「○○と言います」 (文頭系)
+        /(?:^|[、。\s])([一-龥々ぁ-んァ-ヶー・A-Za-z]{2,12})(?:と申します|と言います|って言います|といいます)/,
+        // 「名前は○○」「名は○○」
+        /名前?は\s*([一-龥々ぁ-んァ-ヶー・A-Za-z0-9]{1,12}?)(?:です|と|$)/,
+        // 「○○と呼んでください」
+        /([一-龥々ぁ-んァ-ヶー・A-Za-z0-9]{2,12})(?:と呼んでください|って呼んでください)/,
+      ];
+      for (const pat of candidates) {
+        const m = text.match(pat);
+        if (m && m[1] && looksLikeName(m[1])) return m[1].trim();
+      }
+      return null;
+    }
+
+    function detectSpeakerNames() {
+      const bySpeaker = {};
+      segments.forEach(s => {
+        if (s.speaker == null) return;
+        (bySpeaker[s.speaker] ||= []).push(s);
+      });
+      Object.keys(bySpeaker).forEach(k => {
+        const idx = parseInt(k, 10);
+        // Scan only the first 4 utterances from this speaker (where 自己紹介 tends to happen)
+        const first = bySpeaker[k].slice(0, 4);
+        for (const seg of first) {
+          const name = extractNameFromText(seg.text);
+          if (name) {
+            // Avoid assigning the same name to multiple speakers
+            const already = speakers.some((nm, i) => i !== idx && nm === name);
+            if (already) continue;
+            speakers[idx] = name;
+            autoNamedSpeakers.add(idx);
+            break;
+          }
+        }
+      });
+    }
     const hasShare = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
     const hasFSSave = typeof window.showSaveFilePicker === 'function';
     function canShareFile(file) {
