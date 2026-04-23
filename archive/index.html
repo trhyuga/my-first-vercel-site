@@ -386,7 +386,7 @@
 
   <footer>© ひゅうがのTR-Labo</footer>
 
-  <script src="https://cdn.jsdelivr.net/npm/libarchive.js@2.0.2/dist/libarchive.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/libarchive.js@1.3.0/dist/libarchive.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@zip.js/zip.js@2.7.45/dist/zip.min.js"></script>
   <script>
     const tabs = document.querySelectorAll('.tab');
@@ -495,14 +495,25 @@
     }
 
     // ---- libarchive init ----
+    const LIBARCHIVE_WORKER_URL = 'https://cdn.jsdelivr.net/npm/libarchive.js@1.3.0/dist/worker-bundle.js';
     let libarchiveReady = null;
     function initLibarchive() {
       if (libarchiveReady) return libarchiveReady;
       libarchiveReady = (async () => {
-        if (typeof Archive === 'undefined') throw new Error('libarchive.js の読み込みに失敗しました');
-        Archive.init({
-          workerUrl: 'https://cdn.jsdelivr.net/npm/libarchive.js@2.0.2/dist/worker-bundle.js'
-        });
+        if (typeof Archive === 'undefined') {
+          throw new Error('libarchive.js の読み込みに失敗しました (ネットワーク or CDNブロック)');
+        }
+        // Cross-origin Worker は iOS Safari で拒否されることがあるので、
+        // ワーカースクリプトをfetchしてBlob URL化してから渡す。
+        let workerUrl = LIBARCHIVE_WORKER_URL;
+        try {
+          const res = await fetch(LIBARCHIVE_WORKER_URL);
+          if (res.ok) {
+            const code = await res.text();
+            workerUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+          }
+        } catch (e) { /* fallback to direct URL */ }
+        Archive.init({ workerUrl });
       })();
       return libarchiveReady;
     }
