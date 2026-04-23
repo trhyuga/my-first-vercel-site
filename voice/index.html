@@ -283,33 +283,107 @@
     }
 
     .speakers-edit {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.4rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 0.55rem;
       margin-bottom: 0.6rem;
     }
     .spk-edit {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 0.6rem 0.7rem;
       display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+    }
+    .spk-edit .spk-head {
+      display: flex;
+      gap: 0.4rem;
       align-items: center;
-      background: #f1f5f9;
-      border-radius: 999px;
-      padding: 0.25rem 0.3rem 0.25rem 0.75rem;
+    }
+    .spk-edit .spk-head .id {
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: #0369a1;
+      background: #e0f2fe;
+      border-radius: 5px;
+      padding: 0.1rem 0.4rem;
+      flex: 0 0 auto;
     }
     .spk-edit input {
-      border: none;
-      background: transparent;
-      font-size: 0.82rem;
+      flex: 1;
+      border: 1px solid #cbd5e1;
+      border-radius: 7px;
+      padding: 0.5rem 0.6rem;
+      font-size: 0.9rem;
       font-weight: 600;
       color: #0f172a;
-      width: 92px;
+      background: #fff;
       font-family: inherit;
-      padding: 0;
+      min-width: 0;
+      -webkit-appearance: none; appearance: none;
     }
-    .spk-edit input:focus { outline: none; }
+    .spk-edit input:focus {
+      outline: none;
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+    }
     .spk-edit .cnt {
+      font-size: 0.7rem;
+      color: #94a3b8;
+      flex: 0 0 auto;
+      font-variant-numeric: tabular-nums;
+    }
+    .spk-sample {
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-start;
+      background: #fff;
+      border-left: 3px solid #38bdf8;
+      border-radius: 4px;
+      padding: 0.45rem 0.55rem;
+      font-size: 0.78rem;
+      line-height: 1.5;
+      color: #334155;
+    }
+    .spk-sample .txt {
+      flex: 1;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      min-width: 0;
+    }
+    .spk-sample .txt .ts {
       font-size: 0.68rem;
-      color: #64748b;
-      margin-right: 0.35rem;
+      color: #94a3b8;
+      font-variant-numeric: tabular-nums;
+      margin-right: 0.3rem;
+    }
+    .spk-sample .play {
+      flex: 0 0 auto;
+      background: #0ea5e9;
+      color: white;
+      border: none;
+      width: 30px;
+      height: 30px;
+      min-height: auto;
+      border-radius: 50%;
+      font-size: 0.8rem;
+      padding: 0;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .spk-sample .play:active { transform: scale(0.92); }
+    .spk-sample .play.playing { background: #ef4444; }
+    .spk-sample.empty {
+      color: #94a3b8;
+      font-style: italic;
+      border-left-color: #cbd5e1;
     }
 
     audio { width: 100%; margin-top: 0.5rem; }
@@ -497,8 +571,8 @@
       <div class="field">
         <label>👥 話者に名前を付ける <span id="spkCountLabel" style="color:#64748b;font-weight:500;"></span></label>
         <div class="speakers-edit" id="speakersEdit"></div>
-        <div style="font-size:0.72rem;color:#64748b;padding:0.35rem 0.25rem 0;">
-          声の特徴で自動分類済みです。A/B/…を実名やあだ名に書き換えると文字起こしにも反映されます。
+        <div style="font-size:0.72rem;color:#64748b;padding:0.35rem 0.25rem 0;line-height:1.55;">
+          声の特徴で自動分類済み。各話者の最初の発言をサンプル表示しています。<b>▶</b> で約4秒再生できるので、誰の声か確かめてから名前を書き換えてください。
         </div>
       </div>
       <div class="btn-row">
@@ -989,23 +1063,79 @@
       renderSegList();
     }
 
+    // Find the most characteristic utterance from a speaker.
+    // Prefer their first segment >= 12 chars; fall back to the first segment.
+    function sampleUtteranceFor(speakerIdx) {
+      const theirs = segments.filter(s => s.speaker === speakerIdx);
+      if (!theirs.length) return null;
+      const long = theirs.find(s => (s.text || '').length >= 12);
+      return long || theirs[0];
+    }
+
+    function playSnippet(segment, btnEl) {
+      const audio = document.getElementById('playback');
+      if (!audio) return;
+      audio.pause();
+      audio.currentTime = Math.max(0, segment.t - 0.15);
+      // Clear any other playing indicator
+      document.querySelectorAll('.spk-sample .play.playing').forEach(b => b.classList.remove('playing'));
+      btnEl.classList.add('playing');
+      btnEl.textContent = '■';
+      const stopAt = setTimeout(() => {
+        if (!audio.paused) audio.pause();
+        btnEl.classList.remove('playing');
+        btnEl.textContent = '▶';
+      }, 4000);
+      const onPause = () => {
+        clearTimeout(stopAt);
+        btnEl.classList.remove('playing');
+        btnEl.textContent = '▶';
+        audio.removeEventListener('pause', onPause);
+      };
+      audio.addEventListener('pause', onPause);
+      const p = audio.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {
+        clearTimeout(stopAt);
+        btnEl.classList.remove('playing');
+        btnEl.textContent = '▶';
+      });
+    }
+
     function renderSpeakersEdit() {
       const counts = speakers.map(() => 0);
       segments.forEach(s => { if (s.speaker != null) counts[s.speaker] = (counts[s.speaker] || 0) + 1; });
-      // Only show speakers that actually have segments assigned
       const usedIdxs = speakers.map((_, i) => i).filter(i => counts[i] > 0);
       speakersEditEl.innerHTML = '';
       usedIdxs.forEach(i => {
         const name = speakers[i];
-        const chip = document.createElement('div');
-        chip.className = 'spk-edit';
-        chip.innerHTML = `<input type="text" value="${escapeHtml(name)}" data-idx="${i}" placeholder="例: 山田" /><span class="cnt">${counts[i]}件</span>`;
-        const input = chip.querySelector('input');
+        const idTag = '話者' + String.fromCharCode('A'.charCodeAt(0) + i);
+        const sample = sampleUtteranceFor(i);
+        const card = document.createElement('div');
+        card.className = 'spk-edit';
+        const sampleHtml = sample
+          ? `<div class="spk-sample">
+               <div class="txt"><span class="ts">${fmtHMS(sample.t)}</span>「${escapeHtml(sample.text)}」</div>
+               <button class="play" type="button" aria-label="再生">▶</button>
+             </div>`
+          : `<div class="spk-sample empty">サンプル発言なし</div>`;
+        card.innerHTML = `
+          <div class="spk-head">
+            <span class="id">${escapeHtml(idTag)}</span>
+            <input type="text" value="${escapeHtml(name)}" data-idx="${i}" placeholder="実名やあだ名を入力" />
+            <span class="cnt">${counts[i]}件</span>
+          </div>
+          ${sampleHtml}
+        `;
+        const input = card.querySelector('input');
         input.addEventListener('input', () => {
-          speakers[i] = input.value || ('話者' + String.fromCharCode('A'.charCodeAt(0) + i));
+          speakers[i] = input.value || idTag;
           renderSegList();
         });
-        speakersEditEl.appendChild(chip);
+        const playBtn = card.querySelector('.play');
+        if (playBtn && sample) {
+          playBtn.addEventListener('click', () => playSnippet(sample, playBtn));
+        }
+        speakersEditEl.appendChild(card);
       });
       const lbl = document.getElementById('spkCountLabel');
       if (lbl) lbl.textContent = usedIdxs.length ? `(${usedIdxs.length}人検出)` : '';
