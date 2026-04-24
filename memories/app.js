@@ -1179,11 +1179,12 @@ function buildTimeline(orderedItems, allClusters, opts) {
     if (cluster && cluster.label) lastClusterId = cid;
   }
 
-  // --- Closer ---
+  // --- Closer --- title overwritten in buildPlan to mirror the resolved
+  // opening title; subtitle stays "Memories" by default unless overridden.
   timeline.push({
     kind: 'closer',
     durationSec: CLOSER_CARD_SEC,
-    title: locLabel || dateLabel,
+    title: locLabel || dateRangeLabel || '',
     subtitle: 'Memories',
   });
 
