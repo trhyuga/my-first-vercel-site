@@ -214,6 +214,25 @@ header.site {
   font-weight: 700;
   letter-spacing: 0.02em;
 }
+.thumb .group-badge {
+  position: absolute;
+  bottom: 2px; left: 2px;
+  background: rgba(245,158,11,0.95);
+  color: #fff;
+  font-size: 0.62rem;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-weight: 700;
+}
+.thumb .happy-badge {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 1rem;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6));
+  pointer-events: none;
+  opacity: 0.85;
+}
 
 .field {
   display: flex;

@@ -12,30 +12,16 @@
 //   Step 6: audio + MediaRecorder export
 // =============================================================================
 
-const BLUR_REJECT_THRESHOLD = 60; // Laplacian variance below this → blurry
+const BLUR_REJECT_THRESHOLD = 60;        // Laplacian variance below this → blurry
+const DHASH_HAMMING_THRESHOLD = 10;      // 0-64; lower = stricter similarity
+const DEDUP_TIME_WINDOW_MS = 90 * 1000;  // similar shots must be < 90s apart
 
 // -----------------------------------------------------------------------------
 // State
 // -----------------------------------------------------------------------------
 const state = {
-  /**
-   * photos: Array<{
-   *   id, file, sourceName, mime,
-   *   decodedBlob,              // post-HEIC JPEG blob (or original)
-   *   objectUrl,                // for <img src>
-   *   thumbUrl,                 // smaller data URL for grid
-   *   width, height,            // original pixel dims
-   *   orientation,              // 'landscape'|'portrait'|'square'
-   *   ts,                       // ms epoch, EXIF DateTimeOriginal (fallback: file.lastModified)
-   *   tsSource,                 // 'exif'|'mtime'
-   *   gps,                      // { lat, lng } | null
-   *   blurScore,                // Laplacian variance — higher = sharper
-   *   bad,                      // true if excluded
-   *   badReason,                // string
-   *   manualOverride,           // user forced include/exclude
-   * }>
-   */
-  photos: [],
+  photos: [],   // all decoded inputs (photos + videos), chronological
+  groups: [],   // similarity groups [[photo,...], ...] (same chronology)
   loading: false,
 };
 
@@ -169,6 +155,115 @@ function laplacianVariance(canvas) {
   if (!n) return 0;
   const mean = sum / n;
   return sum2 / n - mean * mean;
+}
+
+// -----------------------------------------------------------------------------
+// Perceptual hash (dHash) — used to detect bursts / near-duplicate shots.
+// 9x8 → 64 bits packed into two uint32 lanes for fast XOR + popcount.
+// -----------------------------------------------------------------------------
+function computeDHash(srcCanvas) {
+  const TW = 9, TH = 8;
+  const c = document.createElement('canvas');
+  c.width = TW; c.height = TH;
+  c.getContext('2d').drawImage(srcCanvas, 0, 0, TW, TH);
+  const data = c.getContext('2d').getImageData(0, 0, TW, TH).data;
+  const gray = new Float32Array(TW * TH);
+  for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+    gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+  let lo = 0, hi = 0, bit = 0;
+  for (let y = 0; y < TH; y++) {
+    for (let x = 0; x < TW - 1; x++) {
+      if (gray[y * TW + x] > gray[y * TW + x + 1]) {
+        if (bit < 32) lo |= (1 << bit);
+        else hi |= (1 << (bit - 32));
+      }
+      bit++;
+    }
+  }
+  return { lo: lo >>> 0, hi: hi >>> 0 };
+}
+
+function popcount32(x) {
+  x = x - ((x >>> 1) & 0x55555555);
+  x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+  x = (x + (x >>> 4)) & 0x0f0f0f0f;
+  return (x * 0x01010101) >>> 24;
+}
+
+function hammingDistance(a, b) {
+  if (!a || !b) return 64;
+  return popcount32(a.lo ^ b.lo) + popcount32(a.hi ^ b.hi);
+}
+
+// -----------------------------------------------------------------------------
+// face-api.js — laze-loads weights from jsDelivr GitHub mirror.
+// Score per photo is the *best* face's combined smile + eyes-open quality.
+// -----------------------------------------------------------------------------
+let faceApiPromise = null;
+async function ensureFaceApi() {
+  if (faceApiPromise) return faceApiPromise;
+  if (typeof faceapi === 'undefined') {
+    return Promise.reject(new Error('face-api.js library not loaded'));
+  }
+  const base = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+  faceApiPromise = (async () => {
+    await faceapi.nets.tinyFaceDetector.loadFromUri(base);
+    await faceapi.nets.faceLandmark68Net.loadFromUri(base);
+    await faceapi.nets.faceExpressionNet.loadFromUri(base);
+  })();
+  return faceApiPromise;
+}
+
+function eyeAspectRatio(eye) {
+  // Standard EAR: ratio of eye height to width. >0.22 ≈ open, <0.15 ≈ closed.
+  const dy1 = Math.hypot(eye[1].x - eye[5].x, eye[1].y - eye[5].y);
+  const dy2 = Math.hypot(eye[2].x - eye[4].x, eye[2].y - eye[4].y);
+  const dx = Math.hypot(eye[0].x - eye[3].x, eye[0].y - eye[3].y);
+  return (dy1 + dy2) / (2 * dx + 1e-6);
+}
+
+async function scoreFacesIn(canvas) {
+  let detections;
+  try {
+    const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.45 });
+    detections = await faceapi
+      .detectAllFaces(canvas, opts)
+      .withFaceLandmarks()
+      .withFaceExpressions();
+  } catch (_) {
+    return { hasFaces: false, faceCount: 0, faceScore: 0 };
+  }
+  if (!detections || !detections.length) {
+    return { hasFaces: false, faceCount: 0, faceScore: 0 };
+  }
+  let best = -Infinity;
+  for (const d of detections) {
+    const exp = d.expressions || {};
+    const happy = exp.happy || 0;
+    const surprised = exp.surprised || 0;
+    const neutral = exp.neutral || 0;
+    const sad = exp.sad || 0;
+    const fearful = exp.fearful || 0;
+    const disgusted = exp.disgusted || 0;
+    const angry = exp.angry || 0;
+    const lm = d.landmarks;
+    const ear = (eyeAspectRatio(lm.getLeftEye()) + eyeAspectRatio(lm.getRightEye())) / 2;
+    const eyesOpen = Math.min(1, Math.max(0, (ear - 0.10) / 0.15));
+    // Face is great if happy + eyes-open. Closed eyes / negative emotions hurt.
+    const score =
+        happy * 1.2
+      + surprised * 0.25
+      + neutral * 0.10
+      - sad * 0.5
+      - fearful * 0.4
+      - disgusted * 0.5
+      - angry * 0.5
+      + eyesOpen * 0.5
+      - (1 - eyesOpen) * 0.7;
+    if (score > best) best = score;
+  }
+  return { hasFaces: true, faceCount: detections.length, faceScore: best };
 }
 
 // -----------------------------------------------------------------------------
@@ -332,6 +427,12 @@ async function processImage(file) {
   const thumb = thumbDataUrl(img, 220);
   const analysisCanvas = downscaleToCanvas(img, 256);
   const blurScore = laplacianVariance(analysisCanvas);
+  const dHash = computeDHash(analysisCanvas);
+
+  // Face quality on a slightly larger canvas — TinyFaceDetector struggles
+  // below ~480px when faces are small in the frame.
+  const faceCanvas = downscaleToCanvas(img, 512);
+  const face = await scoreFacesIn(faceCanvas);
 
   const w = img.naturalWidth, h = img.naturalHeight;
   const orientation = w === h ? 'square' : (w > h ? 'landscape' : 'portrait');
@@ -354,6 +455,10 @@ async function processImage(file) {
     tsSource,
     gps,
     blurScore,
+    dHash,
+    hasFaces: face.hasFaces,
+    faceCount: face.faceCount,
+    faceScore: face.faceScore,
     bad,
     badReason: bad ? `ブレ (鮮明度 ${blurScore.toFixed(0)})` : null,
     manualOverride: null,
@@ -384,6 +489,9 @@ async function processVideo(file) {
   const analysisCanvas = downscaleToCanvas(img, 256);
   const blurScore = laplacianVariance(analysisCanvas);
 
+  const faceCanvas = downscaleToCanvas(img, 512);
+  const face = await scoreFacesIn(faceCanvas);
+
   const w = meta.width || img.naturalWidth;
   const h = meta.height || img.naturalHeight;
   const orientation = w === h ? 'square' : (w > h ? 'landscape' : 'portrait');
@@ -410,6 +518,10 @@ async function processVideo(file) {
     tsSource: 'mtime',
     gps: null,
     blurScore,
+    dHash: null, // videos don't dedup against photos by visual hash
+    hasFaces: face.hasFaces,
+    faceCount: face.faceCount,
+    faceScore: face.faceScore,
     bad,
     badReason: bad ? `ブレ (鮮明度 ${blurScore.toFixed(0)})` : null,
     manualOverride: null,
@@ -418,6 +530,62 @@ async function processVideo(file) {
     highlightStartSec,
     highlightSource,
   };
+}
+
+// -----------------------------------------------------------------------------
+// Similarity grouping + best-of-group selection
+// -----------------------------------------------------------------------------
+function groupSimilarPhotos(photos) {
+  // Photos within DEDUP_TIME_WINDOW_MS AND with hamming(dHash) <=
+  // DHASH_HAMMING_THRESHOLD form a group. Videos are always solo (one group
+  // each) — they never merge with photos or with each other.
+  const groups = [];
+  for (const p of photos) {
+    if (p.kind === 'video' || !p.dHash) {
+      groups.push([p]);
+      continue;
+    }
+    let placed = false;
+    for (const g of groups) {
+      const head = g[0];
+      if (head.kind === 'video' || !head.dHash) continue;
+      const dt = Math.abs(p.ts - head.ts);
+      if (dt > DEDUP_TIME_WINDOW_MS) continue;
+      if (hammingDistance(head.dHash, p.dHash) <= DHASH_HAMMING_THRESHOLD) {
+        g.push(p);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) groups.push([p]);
+  }
+  // Sort each group oldest-first (stable for picker)
+  for (const g of groups) g.sort((a, b) => a.ts - b.ts);
+  // Sort groups by their head's timestamp
+  groups.sort((a, b) => a[0].ts - b[0].ts);
+  return groups;
+}
+
+function pickBestOfGroup(group, prefOrientation) {
+  if (group.length === 1) return group[0];
+  let best = group[0], bestScore = -Infinity;
+  for (const p of group) {
+    let score = 0;
+    if (p.bad) score -= 5;             // blurry photos demoted hard
+    if (p.faceScore !== undefined) score += p.faceScore * 1.4;
+    score += Math.log10(Math.max(1, p.blurScore)) * 0.5;
+    if (p.orientation === prefOrientation) score += 0.6;
+    else if (p.orientation === 'square') score += 0.1;
+    if (score > bestScore) { best = p; bestScore = score; }
+  }
+  return best;
+}
+
+function getOutputOrientation() {
+  const sel = document.getElementById('orientation');
+  if (!sel) return 'portrait';
+  const v = sel.value;
+  return v === 'landscape' || v === 'square' ? v : 'portrait';
 }
 
 // -----------------------------------------------------------------------------
@@ -434,6 +602,12 @@ async function ingestFiles(files) {
       alert('画像・動画ファイルが見つかりませんでした。');
       return;
     }
+    setLoadProgress(0, '🤖 顔解析モデルを準備中…');
+    try {
+      await ensureFaceApi();
+    } catch (e) {
+      console.warn('face-api unavailable — proceeding without face scoring', e);
+    }
     setLoadProgress(1, `0 / ${accepted.length} 枚解析中…`);
     for (let i = 0; i < accepted.length; i++) {
       const f = accepted[i];
@@ -445,8 +619,8 @@ async function ingestFiles(files) {
       }
       setLoadProgress(((i + 1) / accepted.length) * 100, `${i + 1} / ${accepted.length} 枚解析中…`);
     }
-    // Stable sort by timestamp
     state.photos.sort((a, b) => a.ts - b.ts);
+    state.groups = groupSimilarPhotos(state.photos);
     hideLoadProgress();
     renderReview();
     dom.settingsPanel.style.display = 'flex';
@@ -456,10 +630,12 @@ async function ingestFiles(files) {
 }
 
 // -----------------------------------------------------------------------------
-// Review grid
+// Review grid — only the *best* of each similarity group is shown. The other
+// members are silently kept as "alternates" inside the group; user can tap
+// the rep to expand and pick a different one (later step), and the +N badge
+// signals duplicates were collapsed.
 // -----------------------------------------------------------------------------
 function classifyPhoto(p) {
-  // manual override wins
   if (p.manualOverride === 'on') return 'on';
   if (p.manualOverride === 'off') return 'bad';
   if (p.bad) return 'bad';
@@ -468,35 +644,53 @@ function classifyPhoto(p) {
 
 function renderReview() {
   dom.reviewPanel.style.display = 'flex';
-  const counts = { on: 0, bad: 0 };
+  const prefOri = getOutputOrientation();
+  const groups = state.groups || [];
+  const counts = { on: 0, bad: 0, dups: 0, faces: 0 };
   const frag = document.createDocumentFragment();
 
-  for (const p of state.photos) {
-    const cls = classifyPhoto(p);
+  for (const g of groups) {
+    const rep = pickBestOfGroup(g, prefOri);
+    rep.groupId = rep.id;
+    rep.groupSize = g.length;
+    for (const m of g) m.isRep = (m === rep);
+
+    const cls = classifyPhoto(rep);
     counts[cls]++;
+    counts.dups += (g.length - 1);
+    if (rep.hasFaces) counts.faces++;
 
     const el = document.createElement('div');
     el.className = 'thumb ' + cls;
-    const videoInfo = p.kind === 'video'
-      ? `動画 ${p.durationSec.toFixed(1)}s — ハイライト ${p.highlightStartSec.toFixed(1)}s〜 (${p.highlightSource === 'audio-peak' ? '音声ピーク' : '推定'})`
+    const videoInfo = rep.kind === 'video'
+      ? `動画 ${rep.durationSec.toFixed(1)}s — ハイライト ${rep.highlightStartSec.toFixed(1)}s〜 (${rep.highlightSource === 'audio-peak' ? '音声ピーク' : '推定'})`
+      : null;
+    const faceInfo = rep.hasFaces
+      ? `${rep.faceCount}人 顔スコア ${rep.faceScore.toFixed(2)}`
+      : '顔検出なし';
+    const groupInfo = g.length > 1
+      ? `${g.length}枚の類似グループから厳選`
       : null;
     el.title = [
-      p.sourceName,
-      fmtDate(p.ts) + (p.tsSource === 'mtime' ? ' (EXIFなし)' : ''),
+      rep.sourceName,
+      fmtDate(rep.ts) + (rep.tsSource === 'mtime' ? ' (EXIFなし)' : ''),
       videoInfo,
-      p.gps ? `GPS: ${p.gps.lat.toFixed(4)}, ${p.gps.lng.toFixed(4)}` : 'GPSなし',
-      p.badReason ? `除外: ${p.badReason}` : '',
+      faceInfo,
+      `鮮明度 ${rep.blurScore.toFixed(0)} / 向き ${rep.orientation}`,
+      rep.gps ? `GPS: ${rep.gps.lat.toFixed(4)}, ${rep.gps.lng.toFixed(4)}` : 'GPSなし',
+      groupInfo,
+      rep.badReason ? `除外: ${rep.badReason}` : '',
     ].filter(Boolean).join('\n');
-    el.dataset.id = p.id;
+    el.dataset.id = rep.id;
 
     const img = document.createElement('img');
     img.loading = 'lazy';
-    img.src = p.thumbUrl;
+    img.src = rep.thumbUrl;
     el.appendChild(img);
 
     const badge = document.createElement('span');
     badge.className = 'badge';
-    badge.textContent = fmtDate(p.ts).slice(5); // MM-DD HH:MM
+    badge.textContent = fmtDate(rep.ts).slice(5);
     el.appendChild(badge);
 
     const stateEl = document.createElement('span');
@@ -504,23 +698,38 @@ function renderReview() {
     stateEl.textContent = cls === 'on' ? '✅' : '❌';
     el.appendChild(stateEl);
 
-    if (p.kind === 'video') {
+    if (rep.kind === 'video') {
       const vbadge = document.createElement('span');
       vbadge.className = 'video-badge';
-      vbadge.textContent = `▶ ${p.durationSec.toFixed(1)}s`;
+      vbadge.textContent = `▶ ${rep.durationSec.toFixed(1)}s`;
       el.appendChild(vbadge);
     }
 
-    el.addEventListener('click', () => toggleManual(p.id));
+    if (g.length > 1) {
+      const gbadge = document.createElement('span');
+      gbadge.className = 'group-badge';
+      gbadge.textContent = `+${g.length - 1}`;
+      el.appendChild(gbadge);
+    }
+
+    if (rep.hasFaces && rep.faceScore > 0.4) {
+      const happy = document.createElement('span');
+      happy.className = 'happy-badge';
+      happy.textContent = '😊';
+      el.appendChild(happy);
+    }
+
+    el.addEventListener('click', () => toggleManual(rep.id));
     frag.appendChild(el);
   }
 
   dom.thumbs.innerHTML = '';
   dom.thumbs.appendChild(frag);
 
-  const total = state.photos.length;
+  const totalGroups = groups.length;
+  const allPhotos = state.photos.length;
   dom.reviewStats.textContent =
-    `${total}枚 — ✅${counts.on} / ❌${counts.bad}`;
+    `${allPhotos}枚 → ${totalGroups}グループ — ✅${counts.on} / ❌${counts.bad} / 似たもの${counts.dups}枚を統合 / 笑顔${counts.faces}枚`;
 }
 
 function toggleManual(id) {
@@ -562,8 +771,31 @@ function bindDropzone() {
 }
 
 // -----------------------------------------------------------------------------
-// Settings UI (wired up in later steps — for now, show/hide conditional fields)
+// Settings UI
 // -----------------------------------------------------------------------------
+function getCurrentBgmKind() {
+  const r = document.querySelector('input[name="bgm"]:checked');
+  return r ? r.value : 'none';
+}
+
+// When BGM is selected the per-photo seconds become an auto-derived value
+// (BGM length / photo count). The actual computation happens at timeline-build
+// time — this just locks the input + shows the user a hint.
+function syncPerPhotoField() {
+  const bgmKind = getCurrentBgmKind();
+  const auto = bgmKind === 'catalog' || bgmKind === 'upload';
+  const input = document.getElementById('perPhotoInput');
+  const label = input ? input.previousElementSibling : null;
+  if (!input) return;
+  input.disabled = auto;
+  input.style.opacity = auto ? '0.55' : '';
+  if (label) {
+    label.textContent = auto
+      ? '1枚あたりの表示秒 (BGMから自動)'
+      : '1枚あたりの表示秒';
+  }
+}
+
 function bindSettings() {
   dom.modeGroup.addEventListener('change', () => {
     const mode = document.querySelector('input[name="mode"]:checked').value;
@@ -571,10 +803,15 @@ function bindSettings() {
     dom.secondsField.style.display = (mode === 'seconds') ? '' : 'none';
   });
   dom.bgmGroup.addEventListener('change', () => {
-    const bgm = document.querySelector('input[name="bgm"]:checked').value;
+    const bgm = getCurrentBgmKind();
     dom.catalogField.style.display = (bgm === 'catalog') ? '' : 'none';
     dom.uploadField.style.display = (bgm === 'upload') ? '' : 'none';
+    syncPerPhotoField();
   });
+  document.getElementById('orientation').addEventListener('change', () => {
+    if (state.groups && state.groups.length) renderReview();
+  });
+  syncPerPhotoField();
   // populate catalog
   const catalog = (window.MUSIC_CATALOG || []);
   dom.catalogSelect.innerHTML = '';
