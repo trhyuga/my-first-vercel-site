@@ -691,17 +691,9 @@
       try {
         if (mediaKind === 'video') srcVideo.pause();
         await ensureModels();
-        const opts = detectorOptions();
-        const results = await faceapi.detectAllFaces(mediaElement(), opts)
-          .withFaceLandmarks()
-          .withFaceDescriptors();
+        const results = await detectFaces(mediaElement(), { needDescriptors: true });
         detectedFaces = results.map(r => ({
-          box: {
-            x: r.detection.box.x,
-            y: r.detection.box.y,
-            width: r.detection.box.width,
-            height: r.detection.box.height,
-          },
+          box: { x: r.box.x, y: r.box.y, width: r.box.width, height: r.box.height },
           descriptor: r.descriptor,
           selected: false,
           el: null,
@@ -818,6 +810,35 @@
         if (d < m) m = d;
       }
       return m;
+    }
+
+    // Single source of truth for the "should this face be blurred?" decision.
+    // Called from both the image path (processImage) and the video detection
+    // loop. Descriptor is optional — 'all' mode doesn't need it.
+    function shouldBlurDescriptor(descriptor) {
+      if (blurMode === 'all') return true;
+      const dist = descriptor && selectedDescriptors.length
+        ? minDistanceToSelected(descriptor)
+        : Infinity;
+      const isSelected = dist < MATCH_THRESHOLD;
+      return blurMode === 'selected' ? isSelected : !isSelected;
+    }
+
+    // Unified face-api call. Always runs SSD; optionally includes landmarks +
+    // descriptors when identity matching is needed (blurMode !== 'all').
+    // Returns [{box, descriptor}], normalizing the .detection.box vs .box
+    // shape difference between the two face-api call flavors. `opts`
+    // defaults to the selection-time detector, but the video loop passes in
+    // its quality-tuned SsdMobilenetv1Options.
+    async function detectFaces(media, { needDescriptors, opts }) {
+      const o = opts || detectorOptions();
+      if (needDescriptors) {
+        const dets = await faceapi.detectAllFaces(media, o)
+          .withFaceLandmarks().withFaceDescriptors();
+        return dets.map(d => ({ box: d.detection.box, descriptor: d.descriptor }));
+      }
+      const dets = await faceapi.detectAllFaces(media, o);
+      return dets.map(d => ({ box: d.box, descriptor: null }));
     }
 
     // Canvas pool to avoid allocating a few canvases per face per frame (big
@@ -981,18 +1002,10 @@
       processProgress(30, '顔を検出中…');
       let toBlur = [];
       try {
-        if (blurMode === 'all') {
-          const dets = await faceapi.detectAllFaces(srcImage, detectorOptions());
-          toBlur = dets.map(d => ({ box: d.box }));
-        } else {
-          const dets = await faceapi.detectAllFaces(srcImage, detectorOptions())
-            .withFaceLandmarks().withFaceDescriptors();
-          for (const d of dets) {
-            const dist = selectedDescriptors.length ? minDistanceToSelected(d.descriptor) : Infinity;
-            const matched = dist < MATCH_THRESHOLD;
-            if (blurMode === 'selected' && matched) toBlur.push({ box: d.detection.box });
-            if (blurMode === 'others' && !matched) toBlur.push({ box: d.detection.box });
-          }
+        const needDescriptors = (blurMode !== 'all');
+        const dets = await detectFaces(srcImage, { needDescriptors });
+        for (const d of dets) {
+          if (shouldBlurDescriptor(d.descriptor)) toBlur.push({ box: d.box });
         }
       } catch (e) { /* ignore, may mean zero faces */ }
 
@@ -1235,18 +1248,8 @@
         async function runDetection() {
           const needsDescriptor = (blurMode !== 'all');
           try {
-            let raw;
-            if (needsDescriptor) {
-              raw = await faceapi.detectAllFaces(srcVideo, detOpts)
-                .withFaceLandmarks().withFaceDescriptors();
-            } else {
-              raw = await faceapi.detectAllFaces(srcVideo, detOpts);
-            }
+            const items = await detectFaces(srcVideo, { needDescriptors: needsDescriptor, opts: detOpts });
             const now = performance.now();
-            const items = raw.map(r => ({
-              box: needsDescriptor ? r.detection.box : r.box,
-              descriptor: needsDescriptor ? r.descriptor : null,
-            }));
 
             // Greedy match each detection to an existing track, using IoU first
             // and falling back to center distance when IoU is zero (e.g. the
@@ -1267,14 +1270,7 @@
               }
 
               // Identity: decided only on detection frames, not every frame.
-              let shouldBlur;
-              if (blurMode === 'all') shouldBlur = true;
-              else {
-                const dist = (it.descriptor && selectedDescriptors.length)
-                  ? minDistanceToSelected(it.descriptor) : Infinity;
-                const isSelected = dist < MATCH_THRESHOLD;
-                shouldBlur = (blurMode === 'selected') ? isSelected : !isSelected;
-              }
+              const shouldBlur = shouldBlurDescriptor(it.descriptor);
 
               if (bestI >= 0 && (bestIoU > 0.2 || bestDist < refDim * 1.2)) {
                 const t = tracks[bestI];
