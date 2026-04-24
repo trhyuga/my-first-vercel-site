@@ -331,11 +331,11 @@
           動画を <b>ぼかしたい人が写っているシーン</b> で一時停止してから「顔を検出」をタップ。検出された顔をタップで選択できます。
         </p>
         <div class="field">
-          <label>識別の厳しさ <span style="color:#94a3b8;font-weight:400;">(別人を間違えて掛けないか)</span></label>
-          <div class="mode-row">
-            <div class="mode-chip active" data-strict="strict">🎯 厳しめ<span class="sub">他人を取りにくい (推奨)</span></div>
-            <div class="mode-chip" data-strict="normal">⚖️ 標準</div>
-            <div class="mode-chip" data-strict="loose">🫥 ゆるめ<span class="sub">自分を取りこぼしにくい</span></div>
+          <label>識別の厳しさ <span class="val" id="strictVal">厳しめ (0.40)</span></label>
+          <input type="range" id="strictRange" min="30" max="65" value="40" step="1" />
+          <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:#94a3b8;padding:0 0.2rem;">
+            <span>🎯 厳しい (他人誤ヒット少)</span>
+            <span>🫥 ゆるい (取りこぼし少)</span>
           </div>
         </div>
         <div class="field">
@@ -613,11 +613,21 @@
       return new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3, maxResults: 100 });
     }
 
-    document.querySelectorAll('.mode-chip[data-strict]').forEach(chip => chip.addEventListener('click', () => {
-      const k = chip.dataset.strict;
-      MATCH_THRESHOLD = (k === 'strict') ? 0.40 : (k === 'loose') ? 0.58 : 0.48;
-      document.querySelectorAll('.mode-chip[data-strict]').forEach(c => c.classList.toggle('active', c === chip));
-    }));
+    const strictRange = document.getElementById('strictRange');
+    const strictVal = document.getElementById('strictVal');
+    function strictLabel(v) {
+      // 0.30-0.41 厳しめ / 0.42-0.52 標準 / 0.53-0.65 ゆるめ
+      if (v <= 0.41) return `厳しめ (${v.toFixed(2)})`;
+      if (v <= 0.52) return `標準 (${v.toFixed(2)})`;
+      return `ゆるめ (${v.toFixed(2)})`;
+    }
+    function applyStrict() {
+      const v = parseInt(strictRange.value, 10) / 100;
+      MATCH_THRESHOLD = v;
+      strictVal.textContent = strictLabel(v);
+    }
+    strictRange.addEventListener('input', applyStrict);
+    applyStrict();
 
     // Quality preset: flips compute/quality tradeoffs for video processing.
     let qualityMode = 'balanced'; // 'balanced' | 'high'
