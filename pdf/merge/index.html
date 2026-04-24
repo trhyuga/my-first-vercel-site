@@ -40,7 +40,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const list = document.getElementById('list');
@@ -98,6 +98,7 @@
         for (const f of files) {
           const bytes = new Uint8Array(await f.arrayBuffer());
           const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+          refuseIfEncrypted(src);
           const pages = await out.copyPages(src, src.getPageIndices());
           pages.forEach(p => out.addPage(p));
         }

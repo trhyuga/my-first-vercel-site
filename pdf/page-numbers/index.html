@@ -66,7 +66,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -109,6 +109,7 @@
         const fmtText = document.getElementById('format').value || '#';
 
         const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        refuseIfEncrypted(doc);
         const font = await doc.embedFont(PDFLib.StandardFonts.Helvetica);
         const pages = doc.getPages();
         const total = pages.length;
@@ -116,7 +117,7 @@
 
         pages.forEach((page, i) => {
           const n = start + i;
-          const text = fmtText.replace(/#/g, String(n)).replace(/@/g, String(total + start - 1));
+          const text = fmtText.replace(/#/g, String(n)).replace(/@/g, String(total));
           const { width, height } = page.getSize();
           const textW = font.widthOfTextAtSize(text, fontSize);
           let x, y;

@@ -101,13 +101,25 @@
       clearBox(msg);
       try {
         const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
-        const permissions = {};
-        if (document.getElementById('noPrint').checked) { permissions.printing = false; permissions.printingHighQuality = false; }
-        else { permissions.printing = 'highResolution'; }
+        if (doc.isEncrypted) {
+          throw new Error('元のPDFが既に暗号化されています。「🔓 パスワード解除」で解錠してから再度お試しください。');
+        }
+        // Only the keys actually defined by @cantoo/pdf-lib's UserPermissions
+        // are set. printingHighQuality is not a real key (was a typo); use
+        // 'lowResolution' for printing if the user wants printing disabled.
+        // contentAccessibility is intentionally never disabled — turning it
+        // off blocks screen readers, which was almost certainly not intended.
+        const permissions = { printing: 'highResolution' };
+        if (document.getElementById('noPrint').checked) permissions.printing = false;
         if (document.getElementById('noCopy').checked) permissions.copying = false;
-        if (document.getElementById('noEdit').checked) { permissions.modifying = false; permissions.annotating = false; permissions.fillingForms = false; permissions.documentAssembly = false; permissions.contentAccessibility = false; }
+        if (document.getElementById('noEdit').checked) {
+          permissions.modifying = false;
+          permissions.annotating = false;
+          permissions.fillingForms = false;
+          permissions.documentAssembly = false;
+        }
 
-        await doc.encrypt({
+        doc.encrypt({
           userPassword: pw,
           ownerPassword: pw,
           permissions,

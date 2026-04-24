@@ -111,7 +111,15 @@
       runBtn.textContent = '処理中...';
       clearBox(msg);
       try {
-        const src = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+        let src;
+        try {
+          src = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+        } catch (e) {
+          if (e && (e.name === 'PasswordException' || /password/i.test(String(e.message || e)))) {
+            throw new Error('このPDFはパスワードで保護されています。「🔓 パスワード解除」で解錠してから再度お試しください。');
+          }
+          throw e;
+        }
         const n = src.numPages;
         const out = await PDFLib.PDFDocument.create();
         const scale = level.dpi / 72;
@@ -119,6 +127,14 @@
         for (let i = 1; i <= n; i++) {
           setProgress(Math.round((i - 1) / n * 100), `ページ ${i}/${n} を処理中...`);
           const page = await src.getPage(i);
+          // Page size in PDF points (72 dpi). Render canvas at scale=DPI/72
+          // for the chosen DPI, but the embedded page itself stays the
+          // original physical size — otherwise a 150 DPI A4 would land in
+          // the output as a ~17×25 inch page (pdf-lib treats addPage
+          // dimensions as points, not pixels).
+          const vpPt = page.getViewport({ scale: 1 });
+          const pagePtW = vpPt.width;
+          const pagePtH = vpPt.height;
           const vp = page.getViewport({ scale });
           const canvas = document.createElement('canvas');
           canvas.width = Math.ceil(vp.width);
@@ -130,8 +146,8 @@
           const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', level.quality));
           const jpgBytes = new Uint8Array(await blob.arrayBuffer());
           const jpg = await out.embedJpg(jpgBytes);
-          const pageOut = out.addPage([canvas.width, canvas.height]);
-          pageOut.drawImage(jpg, { x: 0, y: 0, width: canvas.width, height: canvas.height });
+          const pageOut = out.addPage([pagePtW, pagePtH]);
+          pageOut.drawImage(jpg, { x: 0, y: 0, width: pagePtW, height: pagePtH });
         }
 
         setProgress(100, '保存中...');

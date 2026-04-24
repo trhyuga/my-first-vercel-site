@@ -49,7 +49,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas, refuseIfEncrypted } = PDFApp;
     setupPdfJs();
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
@@ -83,7 +83,10 @@
       pageOrder = [];
       for (let i = 1; i <= pdf.numPages; i++) {
         const canvas = await renderPageToCanvas(pdf, i, 0.4);
-        thumbs.push(canvas);
+        // Store a data-URL snapshot rather than the canvas element itself —
+        // canvas.cloneNode() copies the element but not its bitmap, so any
+        // re-render of the grid would have shown blank tiles.
+        thumbs.push(canvas.toDataURL('image/jpeg', 0.85));
         pageOrder.push(i - 1);
       }
       renderGrid();
@@ -94,7 +97,10 @@
       pageOrder.forEach((origIdx, pos) => {
         const wrap = document.createElement('div');
         wrap.className = 'thumb';
-        wrap.appendChild(thumbs[origIdx].cloneNode(true));
+        const img = document.createElement('img');
+        img.src = thumbs[origIdx];
+        img.alt = '';
+        wrap.appendChild(img);
         const num = document.createElement('div');
         num.className = 'num';
         num.textContent = (pos + 1) + ' (元 p.' + (origIdx + 1) + ')';
@@ -152,6 +158,7 @@
       runBtn.textContent = '処理中...';
       try {
         const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        refuseIfEncrypted(src);
         const out = await PDFLib.PDFDocument.create();
         const copied = await out.copyPages(src, pageOrder);
         copied.forEach(p => out.addPage(p));

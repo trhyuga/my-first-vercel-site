@@ -54,7 +54,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -119,6 +119,7 @@
       try {
         const bytes = new Uint8Array(await currentFile.arrayBuffer());
         const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        refuseIfEncrypted(src);
         const total = src.getPageCount();
         const mode = document.querySelector('input[name="mode"]:checked').value;
         const base = safeFilename(fname.value, 'split');

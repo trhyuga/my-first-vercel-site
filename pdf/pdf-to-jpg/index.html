@@ -121,7 +121,15 @@
         const scale = dpi / 72;
         const base = safeFilename(fname.value, 'page');
 
-        const pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+        let pdf;
+        try {
+          pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+        } catch (e) {
+          if (e && (e.name === 'PasswordException' || /password/i.test(String(e.message || e)))) {
+            throw new Error('このPDFはパスワードで保護されています。「🔓 パスワード解除」で解錠してから再度お試しください。');
+          }
+          throw e;
+        }
         const zip = new JSZip();
         for (let i = 1; i <= pdf.numPages; i++) {
           setProgress(Math.round((i - 1) / pdf.numPages * 100), `ページ ${i}/${pdf.numPages} をレンダリング中...`);

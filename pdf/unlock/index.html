@@ -88,11 +88,7 @@
         try {
           doc = await PDFLib.PDFDocument.load(bytes, { password: pw });
         } catch (e) {
-          try {
-            doc = await PDFLib.PDFDocument.load(bytes, { password: pw, ignoreEncryption: false });
-          } catch (e2) {
-            throw new Error('パスワードが違うか、暗号化形式に対応していません');
-          }
+          throw new Error('パスワードが違うか、暗号化形式 (AES-256/256R6 など) に対応していません');
         }
         const copy = await PDFLib.PDFDocument.create();
         const pages = await copy.copyPages(doc, doc.getPageIndices());

@@ -14,13 +14,32 @@ window.PDFApp = (function () {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // 30 s — Safari/iOS may take a while to actually claim the URL after click().
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
 
   function safeFilename(name, fallback) {
     let out = (name || fallback || 'output').trim();
-    out = out.replace(/[\\/:*?"<>|]/g, '_');
+    // Strip control chars and Windows-illegal chars; trim trailing dots/spaces.
+    out = out.replace(/[\x00-\x1f\\/:*?"<>|]/g, '_');
+    out = out.replace(/[. ]+$/, '');
+    if (!out) out = fallback || 'output';
+    if (out.length > 180) out = out.slice(0, 180);
     return out;
+  }
+
+  // Detect whether a loaded pdf-lib document is encrypted. Vanilla pdf-lib
+  // happily loads such PDFs with { ignoreEncryption: true } but produces
+  // garbled or unreadable output, so tools should refuse and steer the user
+  // to the unlock tool instead.
+  function isEncryptedSource(pdfDoc) {
+    try { return !!pdfDoc.isEncrypted; } catch (e) { return false; }
+  }
+  // Throw a friendly Japanese error if the doc is encrypted.
+  function refuseIfEncrypted(pdfDoc) {
+    if (isEncryptedSource(pdfDoc)) {
+      throw new Error('このPDFはパスワードで保護されています。「🔓 パスワード解除」で解錠してから再度お試しください。');
+    }
   }
 
   function bindDropzone(el, input, onFiles) {
@@ -83,5 +102,6 @@ window.PDFApp = (function () {
     fmtSize, download, safeFilename, bindDropzone,
     showError, clearBox, readFileAsBytes,
     setupPdfJs, renderPageToCanvas,
+    isEncryptedSource, refuseIfEncrypted,
   };
 })();

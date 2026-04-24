@@ -49,7 +49,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas, refuseIfEncrypted } = PDFApp;
     setupPdfJs();
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
@@ -130,9 +130,15 @@
       runBtn.textContent = '処理中...';
       try {
         const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        refuseIfEncrypted(doc);
         const pages = doc.getPages();
         pages.forEach((p, i) => {
-          const total = (originalRotations[i] + rotations[i]) % 360;
+          // Take the page's current rotation from pdf-lib itself rather than
+          // re-using the value pdf.js reported at thumbnail time — keeps the
+          // math correct even if the two libraries normalize rotation
+          // differently (e.g. negative degrees, multiples of 360).
+          const currentDeg = p.getRotation().angle || 0;
+          const total = ((currentDeg + (rotations[i] || 0)) % 360 + 360) % 360;
           p.setRotation(PDFLib.degrees(total));
         });
         const out = await doc.save();

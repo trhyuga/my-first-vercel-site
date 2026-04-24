@@ -71,7 +71,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -122,18 +122,24 @@
         const color = hex2rgb(document.getElementById('color').value);
 
         const doc = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        refuseIfEncrypted(doc);
         const font = await doc.embedFont(PDFLib.StandardFonts.HelveticaBold);
         const pages = doc.getPages();
+        // pdf-lib's drawText rotates around (x, y), which is the baseline-
+        // left of the unrotated text. To put the visible centre of the
+        // rotated text at the page centre we offset (x, y) back along the
+        // text's local centre vector after rotation.
+        const rad = angle * Math.PI / 180;
+        const cos = Math.cos(rad), sin = Math.sin(rad);
         pages.forEach(page => {
           const { width, height } = page.getSize();
           const textW = font.widthOfTextAtSize(text, size);
+          const cx = width / 2;
+          const cy = height / 2;
+          const x = cx - (textW / 2) * cos + (size / 2) * sin;
+          const y = cy - (textW / 2) * sin - (size / 2) * cos;
           page.drawText(text, {
-            x: (width - textW) / 2,
-            y: height / 2 - size / 2,
-            size,
-            font,
-            color,
-            opacity,
+            x, y, size, font, color, opacity,
             rotate: PDFLib.degrees(angle),
           });
         });
