@@ -580,10 +580,8 @@
     const detectStatus = document.getElementById('detectStatus');
 
     let modelsReady = false;
-    let ssdLoaded = false;
     let detectedFaces = []; // {box, descriptor, selected, el}
     const selectedDescriptors = []; // Float32Array[]
-    let sensitivity = 'balanced'; // 'fast' | 'balanced' | 'sensitive'
 
     async function ensureModels() {
       if (!modelsReady) {
@@ -601,7 +599,6 @@
         await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
         await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
         await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-        ssdLoaded = true;
         modelsReady = true;
         detectStatus.innerHTML = '';
       }
@@ -681,7 +678,7 @@
         if (f.selected && f.descriptor) selectedDescriptors.push(f.descriptor);
       });
       updateSelBtn();
-      updateStartBtn && updateStartBtn();
+      updateStartBtn();
     }
 
     function updateSelBtn() {
@@ -731,7 +728,7 @@
       detectedFaces.forEach(f => { f.selected = false; if (f.el) f.el.classList.remove('selected'); });
       selectedDescriptors.length = 0;
       updateSelBtn();
-      updateStartBtn && updateStartBtn();
+      updateStartBtn();
     });
 
     // Clear detected boxes when seeking (video only — they belong to a single frame)
@@ -759,16 +756,14 @@
     const outName = document.getElementById('outName');
     const processStatus = document.getElementById('processStatus');
 
-    window.updateStartBtn = function () {
+    function updateStartBtn() {
       const needsSelection = (blurMode === 'selected' || blurMode === 'others');
       const canStart = !needsSelection || selectedDescriptors.length > 0;
       startBtn.disabled = !canStart;
-      if (!canStart) {
-        startBtn.textContent = '🎬 処理を開始 (まず顔を選択)';
-      } else {
-        startBtn.textContent = '🎬 処理を開始';
-      }
-    };
+      startBtn.textContent = canStart
+        ? '🎬 処理を開始'
+        : '🎬 処理を開始 (まず顔を選択)';
+    }
 
     // Suggest a filename from the source
     srcVideo.addEventListener('loadedmetadata', () => {
@@ -865,7 +860,6 @@
       pctx.drawImage(tiny, 0, 0, tinyW, tinyH, 0, 0, sw, sh);
       pctx.filter = 'none';
       releaseCanvas(tiny);
-      patch._bw = sw; patch._bh = sh;
       return patch;
     }
 
@@ -1001,7 +995,7 @@
         </div>
         <div class="btn-row" id="postActions"></div>
       `);
-      renderSaveButtons && renderSaveButtons();
+      renderSaveButtons();
     }
 
     startBtn.addEventListener('click', async () => {
@@ -1465,7 +1459,7 @@
         window._blurredExt = ext;
         window._blurredBlob = processedBlob;
         // Save buttons are wired in Step 5
-        renderSaveButtons && renderSaveButtons();
+        renderSaveButtons();
       } catch (e) {
         processStatus.innerHTML = `<div class="alert error">失敗: ${String(e.message || e)}</div>`;
       } finally {
@@ -1555,7 +1549,7 @@
       return { ok: true, text: 'ダウンロードフォルダに保存しました' };
     }
 
-    window.renderSaveButtons = function () {
+    function renderSaveButtons() {
       const actions = document.getElementById('postActions');
       if (!actions) return;
       const ext = window._blurredExt || 'webm';
