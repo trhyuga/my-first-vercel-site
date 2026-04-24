@@ -212,9 +212,117 @@ function thumbDataUrl(img, maxSide = 220) {
 }
 
 // -----------------------------------------------------------------------------
-// Per-photo processing: produces all non-face-non-dup metadata.
+// Video helpers
+// -----------------------------------------------------------------------------
+function isVideo(file) {
+  return (file.type && file.type.startsWith('video/')) ||
+         /\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(file.name);
+}
+
+function loadVideoMetadata(url) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement('video');
+    v.muted = true;
+    v.preload = 'metadata';
+    v.playsInline = true;
+    v.src = url;
+    v.addEventListener('loadedmetadata', () => {
+      resolve({
+        durationSec: isFinite(v.duration) ? v.duration : 0,
+        width: v.videoWidth,
+        height: v.videoHeight,
+      });
+    }, { once: true });
+    v.addEventListener('error', () => reject(new Error('動画メタデータの読み込みに失敗しました')), { once: true });
+  });
+}
+
+function extractVideoFrameAt(url, atSec, durationSec) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement('video');
+    v.muted = true;
+    v.preload = 'auto';
+    v.playsInline = true;
+    v.crossOrigin = 'anonymous';
+    v.src = url;
+    let done = false;
+    const finish = (val) => { if (!done) { done = true; resolve(val); } };
+    const fail = (err) => { if (!done) { done = true; reject(err); } };
+    v.addEventListener('loadedmetadata', () => {
+      const max = (durationSec || v.duration || 0.1) - 0.05;
+      v.currentTime = Math.max(0, Math.min(max, atSec));
+    }, { once: true });
+    v.addEventListener('seeked', () => {
+      const c = document.createElement('canvas');
+      c.width = v.videoWidth;
+      c.height = v.videoHeight;
+      try {
+        c.getContext('2d').drawImage(v, 0, 0);
+      } catch (e) {
+        return fail(e);
+      }
+      c.toBlob((blob) => {
+        if (!blob) return fail(new Error('フレーム書き出し失敗'));
+        const imgUrl = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => finish(img);
+        img.onerror = () => fail(new Error('frame conversion failed'));
+        img.src = imgUrl;
+      }, 'image/jpeg', 0.9);
+    }, { once: true });
+    v.addEventListener('error', () => fail(new Error('動画フレームの抽出に失敗しました')), { once: true });
+  });
+}
+
+// Audio-RMS-based highlight detection — finds the second-long window with the
+// highest energy (laughter, cheering, big swells in the soundtrack). Falls
+// back gracefully when the video has no audio or fails to decode.
+async function detectVideoHighlight(file, durationSec) {
+  if (!durationSec || durationSec < 1.5) return null;
+  if (durationSec > 600) return null; // skip overly long inputs to save RAM
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  const ctx = new AC();
+  let buf;
+  try {
+    buf = await ctx.decodeAudioData(await file.slice().arrayBuffer());
+  } catch (_) {
+    if (ctx.close) ctx.close();
+    return null;
+  }
+  if (ctx.close) ctx.close();
+  if (!buf.numberOfChannels) return null;
+  const ch = buf.getChannelData(0);
+  const sr = buf.sampleRate;
+  const winSamples = Math.floor(sr * 1.0);
+  const hopSamples = Math.floor(sr * 0.25);
+  if (ch.length < winSamples) return null;
+  let best = 0, bestPos = 0;
+  for (let i = 0; i + winSamples <= ch.length; i += hopSamples) {
+    let s = 0;
+    for (let j = 0; j < winSamples; j++) {
+      const v = ch[i + j];
+      s += v * v;
+    }
+    const rms = Math.sqrt(s / winSamples);
+    if (rms > best) { best = rms; bestPos = i; }
+  }
+  // Centre the highlight slightly before the peak so the climax lands inside
+  // the clip rather than at the very beginning.
+  const peakSec = bestPos / sr;
+  const startSec = Math.max(0, peakSec - 0.3);
+  return { highlightStartSec: startSec, peakRms: best };
+}
+
+// -----------------------------------------------------------------------------
+// Per-file processing — routes to image or video pipeline.
 // -----------------------------------------------------------------------------
 async function processFile(file) {
+  if (isVideo(file)) return processVideo(file);
+  return processImage(file);
+}
+
+async function processImage(file) {
   const decoded = await decodableBlob(file);
   const { img, url } = await decodeToImage(decoded);
   const exif = await parseExifSafe(decoded);
@@ -235,6 +343,7 @@ async function processFile(file) {
     file,
     sourceName: file.name,
     mime: decoded.type || file.type,
+    kind: 'photo',
     decodedBlob: decoded,
     objectUrl: url,
     thumbUrl: thumb,
@@ -251,6 +360,66 @@ async function processFile(file) {
   };
 }
 
+async function processVideo(file) {
+  const url = URL.createObjectURL(file);
+  const meta = await loadVideoMetadata(url);
+  const dur = meta.durationSec || 0.001;
+
+  // Audio-based highlight detection (best effort)
+  let highlightStartSec = dur * 0.30; // fallback: 30% in
+  let highlightSource = 'fallback';
+  try {
+    const hl = await detectVideoHighlight(file, dur);
+    if (hl && hl.peakRms > 0.005) {
+      highlightStartSec = hl.highlightStartSec;
+      highlightSource = 'audio-peak';
+    }
+  } catch (_) { /* keep fallback */ }
+
+  // Sample a frame near (but inside) the highlight for review/blur scoring.
+  const frameAt = Math.max(0, Math.min(dur - 0.1, highlightStartSec + 0.4));
+  const img = await extractVideoFrameAt(url, frameAt, dur);
+
+  const thumb = thumbDataUrl(img, 220);
+  const analysisCanvas = downscaleToCanvas(img, 256);
+  const blurScore = laplacianVariance(analysisCanvas);
+
+  const w = meta.width || img.naturalWidth;
+  const h = meta.height || img.naturalHeight;
+  const orientation = w === h ? 'square' : (w > h ? 'landscape' : 'portrait');
+
+  // No EXIF on video files — fall back to mtime. (MP4 moov.creation_time
+  // would be more accurate, parsable later via mp4box if precision matters.)
+  const ts = file.lastModified || Date.now();
+
+  const bad = blurScore < BLUR_REJECT_THRESHOLD;
+
+  return {
+    id: nextId(),
+    file,
+    sourceName: file.name,
+    mime: file.type || 'video/mp4',
+    kind: 'video',
+    decodedBlob: file,
+    objectUrl: url,
+    thumbUrl: thumb,
+    width: w,
+    height: h,
+    orientation,
+    ts,
+    tsSource: 'mtime',
+    gps: null,
+    blurScore,
+    bad,
+    badReason: bad ? `ブレ (鮮明度 ${blurScore.toFixed(0)})` : null,
+    manualOverride: null,
+    // video-specific
+    durationSec: dur,
+    highlightStartSec,
+    highlightSource,
+  };
+}
+
 // -----------------------------------------------------------------------------
 // Batch ingest
 // -----------------------------------------------------------------------------
@@ -258,9 +427,11 @@ async function ingestFiles(files) {
   if (state.loading) return;
   state.loading = true;
   try {
-    const accepted = files.filter(f => f.type.startsWith('image/') || isHeic(f));
+    const accepted = files.filter(f =>
+      (f.type && f.type.startsWith('image/')) || isHeic(f) || isVideo(f)
+    );
     if (!accepted.length) {
-      alert('画像ファイルが見つかりませんでした。');
+      alert('画像・動画ファイルが見つかりませんでした。');
       return;
     }
     setLoadProgress(1, `0 / ${accepted.length} 枚解析中…`);
@@ -306,9 +477,13 @@ function renderReview() {
 
     const el = document.createElement('div');
     el.className = 'thumb ' + cls;
+    const videoInfo = p.kind === 'video'
+      ? `動画 ${p.durationSec.toFixed(1)}s — ハイライト ${p.highlightStartSec.toFixed(1)}s〜 (${p.highlightSource === 'audio-peak' ? '音声ピーク' : '推定'})`
+      : null;
     el.title = [
       p.sourceName,
       fmtDate(p.ts) + (p.tsSource === 'mtime' ? ' (EXIFなし)' : ''),
+      videoInfo,
       p.gps ? `GPS: ${p.gps.lat.toFixed(4)}, ${p.gps.lng.toFixed(4)}` : 'GPSなし',
       p.badReason ? `除外: ${p.badReason}` : '',
     ].filter(Boolean).join('\n');
@@ -328,6 +503,13 @@ function renderReview() {
     stateEl.className = 'state';
     stateEl.textContent = cls === 'on' ? '✅' : '❌';
     el.appendChild(stateEl);
+
+    if (p.kind === 'video') {
+      const vbadge = document.createElement('span');
+      vbadge.className = 'video-badge';
+      vbadge.textContent = `▶ ${p.durationSec.toFixed(1)}s`;
+      el.appendChild(vbadge);
+    }
 
     el.addEventListener('click', () => toggleManual(p.id));
     frag.appendChild(el);
