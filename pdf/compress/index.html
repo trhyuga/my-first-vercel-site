@@ -55,7 +55,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, appendPrintButton } = PDFApp;
     setupPdfJs();
 
     const LEVELS = {
@@ -162,6 +162,7 @@
           : `結果 ${fmtSize(outBlob.size)}。このPDFは圧縮効果が限定的です。`;
         msg.appendChild(notice);
         download(outBlob, safeFilename(fname.value, 'compressed') + '.pdf');
+        appendPrintButton(msg, outBlob);
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {

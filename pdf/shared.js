@@ -42,6 +42,58 @@ window.PDFApp = (function () {
     }
   }
 
+  // Open the given PDF blob in a hidden iframe and trigger the browser's
+  // print dialog. iOS Safari can't always drive print() through an iframe
+  // for cross-origin-ish blob URLs, so fall back to opening the blob in a
+  // new tab — the user prints from Safari's native PDF viewer UI.
+  function printPdfBlob(blob) {
+    const url = URL.createObjectURL(blob);
+    const existing = document.getElementById('__tr_print_iframe');
+    if (existing) { try { existing.parentNode.removeChild(existing); } catch (e) {} }
+    const iframe = document.createElement('iframe');
+    iframe.id = '__tr_print_iframe';
+    iframe.style.cssText = 'position:fixed;right:-10000px;bottom:-10000px;width:1px;height:1px;border:0;opacity:0;';
+    document.body.appendChild(iframe);
+    let triggered = false;
+    const go = () => {
+      if (triggered) return;
+      triggered = true;
+      try {
+        iframe.contentWindow.focus();
+        iframe.contentWindow.print();
+      } catch (e) {
+        window.open(url, '_blank');
+      }
+    };
+    iframe.addEventListener('load', go);
+    // Safety: some PDF viewers never fire `load`; try after 1.2 s anyway.
+    setTimeout(go, 1200);
+    iframe.src = url;
+    // Clean up well after the print dialog should be closed. URL is kept
+    // alive until then so the viewer can still render.
+    setTimeout(() => {
+      try { iframe.parentNode.removeChild(iframe); } catch (e) {}
+      URL.revokeObjectURL(url);
+    }, 120000);
+  }
+
+  // Helper each tool calls after a successful generation: inserts a
+  // 「🖨️ 印刷」 button into a message container so the user can print the
+  // just-downloaded output without leaving the tool.
+  function appendPrintButton(hostEl, blob, label) {
+    if (!hostEl) return;
+    // Drop any previous print button from earlier runs so it doesn't stack.
+    hostEl.querySelectorAll('[data-print-btn="1"]').forEach(n => n.remove());
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-secondary';
+    btn.dataset.printBtn = '1';
+    btn.style.marginTop = '0.55rem';
+    btn.textContent = label || '🖨️ このPDFを印刷';
+    btn.addEventListener('click', () => printPdfBlob(blob));
+    hostEl.appendChild(btn);
+  }
+
   function bindDropzone(el, input, onFiles) {
     el.addEventListener('click', () => input.click());
     ['dragenter', 'dragover'].forEach(evt =>
@@ -103,5 +155,6 @@ window.PDFApp = (function () {
     showError, clearBox, readFileAsBytes,
     setupPdfJs, renderPageToCanvas,
     isEncryptedSource, refuseIfEncrypted,
+    printPdfBlob, appendPrintButton,
   };
 })();

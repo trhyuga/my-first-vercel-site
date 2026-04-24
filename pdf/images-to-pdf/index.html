@@ -197,7 +197,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, appendPrintButton } = PDFApp;
 
     const SIZES = {
       A4P: [595.28, 841.89],
@@ -593,7 +593,9 @@
             page.drawImage(embed, { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h });
           }
         }
-        download(new Blob([await doc.save()], { type: 'application/pdf' }), safeFilename(fname.value, 'images') + '.pdf');
+        const outBlob = new Blob([await doc.save()], { type: 'application/pdf' });
+        download(outBlob, safeFilename(fname.value, 'images') + '.pdf');
+        appendPrintButton(msg, outBlob);
         if (autoRectify) {
           const note = document.createElement('div');
           note.className = 'success';

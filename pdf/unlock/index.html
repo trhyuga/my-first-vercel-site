@@ -46,7 +46,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@cantoo/pdf-lib@2.3.0/dist/pdf-lib.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, appendPrintButton } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -94,7 +94,9 @@
         const pages = await copy.copyPages(doc, doc.getPageIndices());
         pages.forEach(p => copy.addPage(p));
         const out = await copy.save();
-        download(new Blob([out], { type: 'application/pdf' }), safeFilename(fname.value, 'unlocked') + '.pdf');
+        const outBlob = new Blob([out], { type: 'application/pdf' });
+        download(outBlob, safeFilename(fname.value, 'unlocked') + '.pdf');
+        appendPrintButton(msg, outBlob);
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {

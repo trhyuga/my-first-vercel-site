@@ -58,7 +58,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@cantoo/pdf-lib@2.3.0/dist/pdf-lib.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, appendPrintButton } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -125,7 +125,9 @@
           permissions,
         });
         const out = await doc.save();
-        download(new Blob([out], { type: 'application/pdf' }), safeFilename(fname.value, 'protected') + '.pdf');
+        const outBlob = new Blob([out], { type: 'application/pdf' });
+        download(outBlob, safeFilename(fname.value, 'protected') + '.pdf');
+        appendPrintButton(msg, outBlob, '🖨️ 印刷 (パスワード入力が求められます)');
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {

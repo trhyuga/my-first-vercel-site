@@ -49,7 +49,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas, refuseIfEncrypted } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas, refuseIfEncrypted, appendPrintButton } = PDFApp;
     setupPdfJs();
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
@@ -166,7 +166,9 @@
         const out = await PDFLib.PDFDocument.create();
         const copied = await out.copyPages(src, pageOrder);
         copied.forEach(p => out.addPage(p));
-        download(new Blob([await out.save()], { type: 'application/pdf' }), safeFilename(fname.value, 'organized') + '.pdf');
+        const outBlob = new Blob([await out.save()], { type: 'application/pdf' });
+        download(outBlob, safeFilename(fname.value, 'organized') + '.pdf');
+        appendPrintButton(msg, outBlob);
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {

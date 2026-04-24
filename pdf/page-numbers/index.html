@@ -66,7 +66,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted, appendPrintButton } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -130,7 +130,9 @@
         });
 
         const out = await doc.save();
-        download(new Blob([out], { type: 'application/pdf' }), safeFilename(fname.value, 'numbered') + '.pdf');
+        const outBlob = new Blob([out], { type: 'application/pdf' });
+        download(outBlob, safeFilename(fname.value, 'numbered') + '.pdf');
+        appendPrintButton(msg, outBlob);
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {

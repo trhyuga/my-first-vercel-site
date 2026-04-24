@@ -54,7 +54,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted, appendPrintButton } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -132,6 +132,7 @@
           copied.forEach(p => out.addPage(p));
           const blob = new Blob([await out.save()], { type: 'application/pdf' });
           download(blob, base + '.pdf');
+          appendPrintButton(msg, blob);
         } else {
           // Pack the per-page PDFs inside a folder so they unpack tidily
           // instead of scattering N files into Downloads.

@@ -49,7 +49,7 @@
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas, refuseIfEncrypted } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs, renderPageToCanvas, refuseIfEncrypted, appendPrintButton } = PDFApp;
     setupPdfJs();
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
@@ -148,7 +148,9 @@
           p.setRotation(PDFLib.degrees(total));
         });
         const out = await doc.save();
-        download(new Blob([out], { type: 'application/pdf' }), safeFilename(fname.value, 'rotated') + '.pdf');
+        const outBlob = new Blob([out], { type: 'application/pdf' });
+        download(outBlob, safeFilename(fname.value, 'rotated') + '.pdf');
+        appendPrintButton(msg, outBlob);
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {
