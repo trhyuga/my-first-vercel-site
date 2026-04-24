@@ -634,6 +634,28 @@
       document.querySelectorAll('.mode-chip[data-quality]').forEach(c => c.classList.toggle('active', c === chip));
     }));
 
+    // All compute/quality knobs for the video pipeline, keyed by qualityMode.
+    // Grouping them here keeps the startBtn handler readable — one lookup,
+    // not a chain of HIGH_Q ternaries.
+    const QUALITY = {
+      balanced: {
+        normalIntervalMs: 600, fastIntervalMs: 220,
+        detMinConfidence: 0.30,
+        stalePadCap: 0.50, stalePadRate: 0.07, totalPadCap: 0.60,
+        bitPerPixel: 0.12, srcHeadroom: 1.1, floorBps: 8_000_000,
+        memBudgetMB: { opfs: 1024, ram: 150 },
+        hardCapBps:  { opfs: 40_000_000, ram: 18_000_000 },
+      },
+      high: {
+        normalIntervalMs: 250, fastIntervalMs: 120,
+        detMinConfidence: 0.45,
+        stalePadCap: 0.25, stalePadRate: 0.04, totalPadCap: 0.40,
+        bitPerPixel: 0.20, srcHeadroom: 1.3, floorBps: 14_000_000,
+        memBudgetMB: { opfs: 2048, ram: 300 },
+        hardCapBps:  { opfs: 80_000_000, ram: 30_000_000 },
+      },
+    };
+
     function clearFaces() {
       faceLayer.innerHTML = '';
       detectedFaces = [];
@@ -988,6 +1010,79 @@
       return '';
     }
 
+    // Open an OPFS file as a streaming MediaRecorder sink. Returns
+    // { writable, fileHandle, name } or null when OPFS is unavailable /
+    // cannot be opened (Safari private mode, etc.).
+    async function openOpfsWriter() {
+      try {
+        if (!navigator.storage || !navigator.storage.getDirectory) return null;
+        const root = await navigator.storage.getDirectory();
+        const name = 'fb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        const fileHandle = await root.getFileHandle(name, { create: true });
+        const writable = await fileHandle.createWritable();
+        return { writable, fileHandle, name };
+      } catch (e) { return null; }
+    }
+
+    // Build the MediaRecorder input: canvas video track + source audio track.
+    // Prefers the AudioContext route (real audio, silent speakers). Falls back
+    // to srcVideo.captureStream() if AudioContext setup failed.
+    async function buildOutputStream(outCanvas, captureFps) {
+      const canvasStream = outCanvas.captureStream(captureFps);
+      const routing = await ensureAudioRouting();
+      let audioAdded = false;
+      if (routing && routing.dest.stream.getAudioTracks().length) {
+        for (const t of routing.dest.stream.getAudioTracks()) {
+          canvasStream.addTrack(t); audioAdded = true;
+        }
+      }
+      if (!audioAdded) {
+        try {
+          if (typeof srcVideo.captureStream === 'function') {
+            for (const t of srcVideo.captureStream().getAudioTracks()) {
+              canvasStream.addTrack(t); audioAdded = true;
+            }
+          }
+        } catch (e) { /* audio optional */ }
+      }
+      return canvasStream;
+    }
+
+    // MediaRecorder constructor with graceful fallback: requested bitrate →
+    // conservative bitrate → no bitrate → no options. Throws a friendly error
+    // if every attempt fails so the outer catch can surface it.
+    function createRecorder(stream, mime, cappedBps) {
+      const attempts = [
+        mime ? { mimeType: mime, videoBitsPerSecond: cappedBps } : { videoBitsPerSecond: cappedBps },
+        mime ? { mimeType: mime, videoBitsPerSecond: 10_000_000 } : { videoBitsPerSecond: 10_000_000 },
+        mime ? { mimeType: mime } : null,
+        null,
+      ];
+      let lastErr = null;
+      for (const opts of attempts) {
+        try {
+          return opts ? new MediaRecorder(stream, opts) : new MediaRecorder(stream);
+        } catch (e) { lastErr = e; }
+      }
+      throw new Error('MediaRecorder を初期化できませんでした: ' + (lastErr && lastErr.message || lastErr));
+    }
+
+    // Pick the target encode bitrate for this clip. Combines:
+    //  - a per-pixel-per-frame floor (resolutionFloor)
+    //  - source's average bitrate + quality-driven headroom
+    //  - a preset absolute floor (guard against tiny source files)
+    //  - a memory-based cap (to keep the OPFS file / RAM buffer under budget)
+    //  - a preset hard cap (absolute ceiling)
+    function computeBitrate({ vw, vh, captureFps, srcDurSec, useOpfs, q }) {
+      const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
+      const memBudgetMB = useOpfs ? q.memBudgetMB.opfs : q.memBudgetMB.ram;
+      const memBpsCap = Math.round((memBudgetMB * 1024 * 1024 * 8) / Math.max(srcDurSec, 5));
+      const resolutionFloor = Math.round(vw * vh * captureFps * q.bitPerPixel);
+      const desiredBps = Math.max(q.floorBps, resolutionFloor, Math.round(srcBps * q.srcHeadroom));
+      const hardCap = useOpfs ? q.hardCapBps.opfs : q.hardCapBps.ram;
+      return Math.max(4_000_000, Math.min(desiredBps, memBpsCap, hardCap));
+    }
+
     function processProgress(pct, text) {
       processStatus.innerHTML = `
         <div class="progress-wrap">
@@ -1055,92 +1150,19 @@
         out.width = vw; out.height = vh;
         const outCtx = out.getContext('2d', { willReadFrequently: true });
 
-        // Try to open an OPFS (Origin Private File System) writer so that
-        // MediaRecorder chunks go to disk instead of piling up in RAM. If it
-        // works we can keep 60 fps + higher bitrate on iOS Safari without
-        // tripping the tab memory ceiling. If not, we fall back to an
-        // in-RAM chunks array with a conservative bitrate.
-        let opfsWritable = null;
-        let opfsFileHandle = null;
-        let opfsName = null;
-        try {
-          if (navigator.storage && navigator.storage.getDirectory) {
-            const root = await navigator.storage.getDirectory();
-            opfsName = 'fb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-            opfsFileHandle = await root.getFileHandle(opfsName, { create: true });
-            opfsWritable = await opfsFileHandle.createWritable();
-          }
-        } catch (e) { opfsWritable = null; }
-        const useOpfs = !!opfsWritable;
-
-        // Build output stream: processed canvas video + original audio track.
-        // With OPFS backing we can safely run 60 fps; otherwise stick to 30 fps
-        // to keep the in-memory chunk buffer small.
+        // OPFS streaming keeps encoded chunks on disk so long / 60 fps videos
+        // don't blow the iOS tab memory. Null means no OPFS — fallback to an
+        // in-RAM chunks array with a tighter bitrate budget.
+        const opfs = await openOpfsWriter();
+        const useOpfs = !!opfs;
         const captureFps = useOpfs ? 60 : 30;
-        const canvasStream = out.captureStream(captureFps);
 
-        // Route the source video's audio through AudioContext →
-        // MediaStreamDestination so we can feed real audio into MediaRecorder
-        // without routing it to the user's speakers. createMediaElementSource
-        // reroutes the element's audio away from the built-in path; because
-        // we don't connect to audioCtx.destination, speakers stay silent.
-        let audioTrackAdded = false;
-        const routing = await ensureAudioRouting();
-        if (routing && routing.dest.stream.getAudioTracks().length) {
-          routing.dest.stream.getAudioTracks().forEach(t => {
-            canvasStream.addTrack(t); audioTrackAdded = true;
-          });
-        }
-        // Last-resort fallback: if AudioContext setup failed (rare),
-        // try srcVideo.captureStream(). On most browsers this will be
-        // silent when muted=false but is better than nothing.
-        if (!audioTrackAdded) {
-          try {
-            if (typeof srcVideo.captureStream === 'function') {
-              const s = srcVideo.captureStream();
-              s.getAudioTracks().forEach(t => { canvasStream.addTrack(t); audioTrackAdded = true; });
-            }
-          } catch (e) { /* audio optional */ }
-        }
-
+        const q = QUALITY[qualityMode] || QUALITY.balanced;
         const mime = pickSupportedMime();
         const srcDurSec = srcVideo.duration || 10;
-        const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
-        // With OPFS streaming the encoded data goes to disk, so we can budget
-        // more generously without touching RAM for more than one chunk at a
-        // time. High-quality preset raises both the per-second target and
-        // the total budget because PCs tolerate the heavier output.
-        const memBudgetMB = useOpfs ? (qualityMode === 'high' ? 2048 : 1024) : (qualityMode === 'high' ? 300 : 150);
-        const memBudgetBytes = memBudgetMB * 1024 * 1024;
-        const memBpsCap = Math.round((memBudgetBytes * 8) / Math.max(srcDurSec, 5));
-        const bitPerPixel = qualityMode === 'high' ? 0.20 : 0.12;
-        const resolutionFloor = Math.round(vw * vh * captureFps * bitPerPixel);
-        const srcHeadroom = qualityMode === 'high' ? 1.3 : 1.1;
-        const floorBps = qualityMode === 'high' ? 14_000_000 : 8_000_000;
-        const desiredBps = Math.max(floorBps, resolutionFloor, Math.round(srcBps * srcHeadroom));
-        const hardCap = qualityMode === 'high'
-          ? (useOpfs ? 80_000_000 : 30_000_000)
-          : (useOpfs ? 40_000_000 : 18_000_000);
-        const cappedBps = Math.max(4_000_000, Math.min(desiredBps, memBpsCap, hardCap));
-
-        // MediaRecorder can throw on some browsers when the bitrate/mime
-        // combination isn't supported; retry with a lower bitrate, then with
-        // no bitrate, then with no options at all before giving up.
-        let recorder;
-        const recorderAttempts = [
-          mime ? { mimeType: mime, videoBitsPerSecond: cappedBps } : { videoBitsPerSecond: cappedBps },
-          mime ? { mimeType: mime, videoBitsPerSecond: 10_000_000 } : { videoBitsPerSecond: 10_000_000 },
-          mime ? { mimeType: mime } : null,
-          null,
-        ];
-        let lastRecErr = null;
-        for (const opts of recorderAttempts) {
-          try {
-            recorder = opts ? new MediaRecorder(canvasStream, opts) : new MediaRecorder(canvasStream);
-            break;
-          } catch (e) { lastRecErr = e; recorder = null; }
-        }
-        if (!recorder) throw new Error('MediaRecorder を初期化できませんでした: ' + (lastRecErr && lastRecErr.message || lastRecErr));
+        const canvasStream = await buildOutputStream(out, captureFps);
+        const cappedBps = computeBitrate({ vw, vh, captureFps, srcDurSec, useOpfs, q });
+        const recorder = createRecorder(canvasStream, mime, cappedBps);
 
         const chunks = [];
         // Serialize async OPFS writes so no chunk is lost even if events fire
@@ -1149,34 +1171,17 @@
         recorder.ondataavailable = (e) => {
           if (!e.data || !e.data.size) return;
           if (useOpfs) {
-            writeChain = writeChain.then(() => opfsWritable.write(e.data)).catch(() => {});
+            writeChain = writeChain.then(() => opfs.writable.write(e.data)).catch(() => {});
           } else {
             chunks.push(e.data);
           }
         };
         const stopped = new Promise(res => { recorder.onstop = res; });
 
-        // Quality preset picks the compute/quality tradeoff. Declared BEFORE
-        // detOpts so every downstream constant is initialized when the
-        // detector is instantiated.
-        //  balanced (default): light detection cadence + generous uncertainty
-        //    padding. Best for mobile — smooth playback, decent accuracy.
-        //  high (PC): aggressive detection frequency, tight padding, stricter
-        //    detector confidence, higher bitrate ceiling. Heavier on CPU/GPU
-        //    but minimal smoothness loss vs the source and very precise blur
-        //    placement (fewer bystanders caught, target stays exactly on).
-        const HIGH_Q = (qualityMode === 'high');
-        const NORMAL_INTERVAL_MS = HIGH_Q ? 250 : 600;
-        const FAST_INTERVAL_MS   = HIGH_Q ? 120 : 220;
-        const DET_MIN_CONFIDENCE = HIGH_Q ? 0.45 : 0.30;
-        const STALE_PAD_CAP      = HIGH_Q ? 0.25 : 0.50;
-        const STALE_PAD_RATE     = HIGH_Q ? 0.04 : 0.07;
-        const TOTAL_PAD_CAP      = HIGH_Q ? 0.40 : 0.60;
-
-        // Always SSD during video — good recall for profiles / small faces.
-        // High-quality preset bumps minConfidence so weak detections don't
-        // turn into a bystander identity check (and then a false blur).
-        const detOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: DET_MIN_CONFIDENCE, maxResults: 100 });
+        // Always SSD during video. High-quality preset bumps minConfidence so
+        // weak detections don't turn into a bystander identity check (and
+        // then a false blur).
+        const detOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: q.detMinConfidence, maxResults: 100 });
 
         // Track-based pipeline:
         //  - Run a full detection every DETECT_INTERVAL_MS (~4 fps).
@@ -1345,7 +1350,7 @@
           // stretches), we still don't need to hunt — the sticky track is
           // covering the head. Ramp up only when the target is truly gone.
           const hasActive = tracks.some(t => t.shouldBlur);
-          return hasActive ? NORMAL_INTERVAL_MS : FAST_INTERVAL_MS;
+          return hasActive ? q.normalIntervalMs : q.fastIntervalMs;
         }
 
         function scheduleDetectionIfDue() {
@@ -1391,8 +1396,8 @@
             // patch = slower frame). High-quality mode uses tighter caps so
             // the blur hugs the head closely; balanced mode keeps a wider
             // safety margin for the longer detection gaps.
-            const stalePadFrac = Math.min(STALE_PAD_CAP, ageSec * STALE_PAD_RATE);
-            const padExtra = Math.min(TOTAL_PAD_CAP, speedPadFrac + stalePadFrac);
+            const stalePadFrac = Math.min(q.stalePadCap, ageSec * q.stalePadRate);
+            const padExtra = Math.min(q.totalPadCap, speedPadFrac + stalePadFrac);
             applyBlurToBox(outCtx, headBox, out, padExtra);
           }
 
@@ -1443,16 +1448,16 @@
         faceLayer.style.display = '';
         const type = mime || 'video/webm';
         if (useOpfs) {
-          try { await opfsWritable.close(); } catch (e) {}
+          try { await opfs.writable.close(); } catch (e) {}
           try {
-            const f = await opfsFileHandle.getFile();
+            const f = await opfs.fileHandle.getFile();
             // Cast to typed Blob so the app's mime metadata is preserved for
             // Web Share / downloads.
             processedBlob = new Blob([f], { type });
           } catch (e) {
             processedBlob = new Blob(chunks, { type });
           }
-          blurResult.opfsName = opfsName;
+          blurResult.opfsName = opfs.name;
         } else {
           processedBlob = new Blob(chunks, { type });
         }
