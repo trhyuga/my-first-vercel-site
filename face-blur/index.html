@@ -1425,16 +1425,17 @@
 
         // Watchdog: if the video doesn't advance for 15 seconds (stuck decoder,
         // blocked by autoplay policy, etc.), abort cleanly instead of hanging.
+        let wdLastT = -1, wdStuck = 0;
         const watchdog = setInterval(() => {
           const t = srcVideo.currentTime;
-          if (t === watchdog._lastT) {
-            watchdog._stuck = (watchdog._stuck || 0) + 1;
-            if (watchdog._stuck > 15) {
+          if (t === wdLastT) {
+            wdStuck++;
+            if (wdStuck > 15) {
               clearInterval(watchdog);
               try { recorder.stop(); } catch (e) {}
               try { srcVideo.pause(); } catch (e) {}
             }
-          } else { watchdog._stuck = 0; watchdog._lastT = t; }
+          } else { wdStuck = 0; wdLastT = t; }
         }, 1000);
 
         await new Promise(res => { srcVideo.onended = res; });
