@@ -881,8 +881,8 @@
       }
     }
 
-    // Fast two-step blur: single downscale + upscale with native gaussian.
-    // Uses canvas pool to skip allocation on most frames.
+    // Gaussian blur patch: single downscale + upscale with native filter.
+    // Pool-backed so we don't allocate per frame.
     function makeBlurredPatch(srcCanvas, sx, sy, sw, sh, strength) {
       const factor = Math.max(2, Math.round(strength / 3));
       const tinyW = Math.max(2, Math.round(sw / factor));
@@ -905,42 +905,28 @@
       return patch;
     }
 
-    function applyBlurToBox(ctx, box, srcCanvas, extraPadFraction) {
-      const x = Math.max(0, Math.floor(box.x));
-      const y = Math.max(0, Math.floor(box.y));
-      const w = Math.min(srcCanvas.width - x, Math.ceil(box.width));
-      const h = Math.min(srcCanvas.height - y, Math.ceil(box.height));
-      if (w <= 1 || h <= 1) return;
-      const basePad = 0.14 + (extraPadFraction || 0);
-      const pad = Math.round(Math.min(w, h) * basePad);
-      const px = Math.max(0, x - pad);
-      const py = Math.max(0, y - pad);
-      const pw = Math.min(srcCanvas.width - px, w + pad * 2);
-      const ph = Math.min(srcCanvas.height - py, h + pad * 2);
-      const strength = parseFloat(blurRange.value) || 40;
+    // Mosaic patch: nearest-neighbor downscale + upscale back.
+    function makePixelPatch(srcCanvas, sx, sy, sw, sh, strength) {
+      const cellSize = Math.max(6, Math.round(strength * 0.8));
+      const tinyW = Math.max(2, Math.round(sw / cellSize));
+      const tinyH = Math.max(2, Math.round(sh / cellSize));
+      const tiny = rentCanvas(tinyW, tinyH);
+      const tctx = tiny.getContext('2d');
+      tctx.clearRect(0, 0, tiny.width, tiny.height);
+      tctx.imageSmoothingEnabled = false;
+      tctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, tinyW, tinyH);
+      const patch = rentCanvas(sw, sh);
+      const pctx = patch.getContext('2d');
+      pctx.clearRect(0, 0, patch.width, patch.height);
+      pctx.imageSmoothingEnabled = false;
+      pctx.drawImage(tiny, 0, 0, tinyW, tinyH, 0, 0, sw, sh);
+      releaseCanvas(tiny);
+      return patch;
+    }
 
-      // Build the patch (blur / mosaic) using pooled canvases.
-      let patch;
-      if (blurShape === 'pixel') {
-        const cellSize = Math.max(6, Math.round(strength * 0.8));
-        const tinyW = Math.max(2, Math.round(pw / cellSize));
-        const tinyH = Math.max(2, Math.round(ph / cellSize));
-        const tiny = rentCanvas(tinyW, tinyH);
-        const tctx = tiny.getContext('2d');
-        tctx.clearRect(0, 0, tiny.width, tiny.height);
-        tctx.imageSmoothingEnabled = false;
-        tctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, tinyW, tinyH);
-        patch = rentCanvas(pw, ph);
-        const pctx = patch.getContext('2d');
-        pctx.clearRect(0, 0, patch.width, patch.height);
-        pctx.imageSmoothingEnabled = false;
-        pctx.drawImage(tiny, 0, 0, tinyW, tinyH, 0, 0, pw, ph);
-        releaseCanvas(tiny);
-      } else {
-        patch = makeBlurredPatch(srcCanvas, px, py, pw, ph, strength);
-      }
-
-      // Soft-edged elliptical mask.
+    // Feather a patch into a soft-edged ellipse using a radial alpha gradient.
+    // Returns a pooled canvas; caller is responsible for releaseCanvas().
+    function buildSoftMaskedPatch(patch, pw, ph) {
       const masked = rentCanvas(pw, ph);
       const mctx = masked.getContext('2d');
       mctx.clearRect(0, 0, masked.width, masked.height);
@@ -960,7 +946,26 @@
       mctx.fill();
       mctx.restore();
       mctx.globalCompositeOperation = 'source-over';
+      return masked;
+    }
 
+    function applyBlurToBox(ctx, box, srcCanvas, extraPadFraction) {
+      const x = Math.max(0, Math.floor(box.x));
+      const y = Math.max(0, Math.floor(box.y));
+      const w = Math.min(srcCanvas.width - x, Math.ceil(box.width));
+      const h = Math.min(srcCanvas.height - y, Math.ceil(box.height));
+      if (w <= 1 || h <= 1) return;
+      const pad = Math.round(Math.min(w, h) * (0.14 + (extraPadFraction || 0)));
+      const px = Math.max(0, x - pad);
+      const py = Math.max(0, y - pad);
+      const pw = Math.min(srcCanvas.width - px, w + pad * 2);
+      const ph = Math.min(srcCanvas.height - py, h + pad * 2);
+      const strength = parseFloat(blurRange.value) || 40;
+
+      const patch = (blurShape === 'pixel')
+        ? makePixelPatch(srcCanvas, px, py, pw, ph, strength)
+        : makeBlurredPatch(srcCanvas, px, py, pw, ph, strength);
+      const masked = buildSoftMaskedPatch(patch, pw, ph);
       ctx.drawImage(masked, 0, 0, pw, ph, px, py, pw, ph);
       releaseCanvas(patch);
       releaseCanvas(masked);
