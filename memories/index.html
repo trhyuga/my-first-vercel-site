@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <title>思い出動画メーカー | TR-Labo</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">🎞️ 思い出動画メーカー</div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <h1>撮った写真を<span class="accent">思い出動画に。</span></h1>
+      <p>撮影日時とGPSを読み取って時系列・場所順に並べ、似た写真はベストの1枚を自動選抜。笑顔・目が開いているもの優先、ブレ写真は除外します。縦/横どちらも対応。</p>
+    </section>
+
+    <section class="panel">
+      <div class="dropzone" id="dz">
+        <input type="file" id="fi" accept="image/*,.heic,.heif" multiple hidden />
+        <div class="icon">📷</div>
+        <p><b>タップして写真をまとめて選択</b></p>
+        <p class="sub">JPEG / PNG / HEIC 対応 — EXIF の日時とGPSを使います</p>
+      </div>
+
+      <div class="progress-block" id="loadProg" style="display:none;">
+        <span id="loadProgText">解析中…</span>
+        <div class="progress-bar"><span id="loadProgBar" style="width:0%"></span></div>
+      </div>
+    </section>
+
+    <section class="panel" id="reviewPanel" style="display:none;">
+      <div class="review-head">
+        <h2>読み込み結果</h2>
+        <div class="review-stats" id="reviewStats"></div>
+      </div>
+      <p class="hint">✅ 採用 / ⚠️ 似た写真の中でベスト以外 / ❌ ブレ除外・EXIF日時なし。タップで手動切り替え。</p>
+      <div class="thumb-grid" id="thumbs"></div>
+    </section>
+
+    <section class="panel" id="settingsPanel" style="display:none;">
+      <h2>設定</h2>
+
+      <div class="field">
+        <label>枚数モード</label>
+        <div class="radio-group" id="modeGroup">
+          <label><input type="radio" name="mode" value="all-unique" checked><span>✨ 全部 (似たのは除外)</span></label>
+          <label><input type="radio" name="mode" value="recommended"><span>🌟 おすすめ厳選 (15枚前後)</span></label>
+          <label><input type="radio" name="mode" value="count"><span>🎯 枚数指定</span></label>
+          <label><input type="radio" name="mode" value="seconds"><span>⏱️ 秒数ピッタリ</span></label>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field" id="countField" style="display:none;">
+          <label for="countInput">枚数</label>
+          <input type="number" id="countInput" value="20" min="3" max="500" />
+        </div>
+        <div class="field" id="secondsField" style="display:none;">
+          <label for="secondsInput">秒数</label>
+          <input type="number" id="secondsInput" value="45" min="10" max="600" />
+        </div>
+        <div class="field">
+          <label for="perPhotoInput">1枚あたりの表示秒</label>
+          <input type="number" id="perPhotoInput" value="3.0" min="1.2" max="8" step="0.1" />
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label>向き</label>
+          <select id="orientation">
+            <option value="portrait" selected>縦 9:16 (スマホ)</option>
+            <option value="landscape">横 16:9</option>
+            <option value="square">正方 1:1</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>解像度</label>
+          <select id="resolution">
+            <option value="1080">高 (1080p)</option>
+            <option value="720" selected>標準 (720p)</option>
+            <option value="480">軽量 (480p)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>字幕</label>
+          <select id="subtitles">
+            <option value="on" selected>日付・場所を表示</option>
+            <option value="off">なし</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>BGM</label>
+        <div class="radio-group" id="bgmGroup">
+          <label><input type="radio" name="bgm" value="catalog" id="bgmCatalogRadio"><span>🎵 推奨曲から自動選曲</span></label>
+          <label><input type="radio" name="bgm" value="upload"><span>📁 自分のBGMを使う</span></label>
+          <label><input type="radio" name="bgm" value="none" checked><span>🔇 BGMなし</span></label>
+        </div>
+      </div>
+
+      <div class="field" id="catalogField" style="display:none;">
+        <label for="catalogSelect">推奨曲</label>
+        <select id="catalogSelect"></select>
+        <p class="hint" id="catalogHint"></p>
+      </div>
+
+      <div class="field" id="uploadField" style="display:none;">
+        <label>BGMファイル</label>
+        <input type="file" id="bgmFile" accept="audio/*" />
+        <p class="hint">端末内で再生されるだけで、どこにも送信しません。</p>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn-secondary" id="previewBtn">▶️ プレビュー</button>
+        <button class="btn-primary" id="exportBtn">🎬 動画を書き出す</button>
+      </div>
+    </section>
+
+    <section class="panel" id="stagePanel" style="display:none;">
+      <div class="stage-wrap">
+        <canvas id="stage"></canvas>
+        <div class="stage-overlay" id="stageOverlay">
+          <p id="stageStatus">待機中</p>
+        </div>
+      </div>
+      <div class="progress-block" id="renderProg" style="display:none;">
+        <span id="renderProgText">書き出し中…</span>
+        <div class="progress-bar"><span id="renderProgBar" style="width:0%"></span></div>
+      </div>
+      <div id="output"></div>
+    </section>
+
+    <section class="footer-note">
+      <p>すべて端末内で完結。写真・位置情報・BGMはどこにも送信されません。<br>
+      face-api.js のモデル (約3MB) と libheif (HEIC利用時のみ・約1.5MB) は初回のみCDNから読み込みます。</p>
+    </section>
+  </main>
+
+  <!-- Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <script src="./music.js"></script>
+  <script src="./landmarks.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
