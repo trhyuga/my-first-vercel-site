@@ -479,6 +479,8 @@
       try { await audioRouting.ctx.close(); } catch (e) {}
       audioRouting = null;
     }
+
+    async function loadMedia(file) {
       if (file.type.startsWith('video/')) return loadVideo(file);
       if (file.type.startsWith('image/')) return loadImage(file);
       alert('動画または画像ファイルを選択してください');
