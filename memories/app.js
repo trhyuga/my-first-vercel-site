@@ -438,27 +438,50 @@ function extractVideoFrameAt(url, atSec, durationSec) {
 // embedded date is the Apple zero-epoch (1904-01-01) which means "unset".
 // Significantly more accurate than file.lastModified for clips that have
 // been forwarded through messaging apps.
+// Stream the MP4 in 256KB chunks instead of loading the entire file into
+// RAM. mvhd/moov is usually within the first few MB even for "moov-at-end"
+// recordings (iPhone exports moov-at-front by default). Stops as soon as
+// onReady fires.
 async function tryParseMp4Creation(file) {
   if (typeof MP4Box === 'undefined') return null;
   if (!file || !/(mp4|mov|m4v)$/i.test(file.name)) return null;
-  try {
-    return await withTimeout(new Promise((resolve) => {
-      const mp4 = MP4Box.createFile();
-      mp4.onReady = (info) => {
-        if (info && info.created instanceof Date) {
-          const ms = info.created.getTime();
-          // Filter Apple zero-epoch (~1904) and other obviously bogus values.
-          if (ms > 631152000000) resolve(ms); else resolve(null);
-        } else resolve(null);
-      };
-      mp4.onError = () => resolve(null);
-      file.arrayBuffer().then((ab) => {
-        ab.fileStart = 0;
-        mp4.appendBuffer(ab);
-        mp4.flush();
-      }).catch(() => resolve(null));
-    }), 8000, 'mp4 metadata');
-  } catch (_) { return null; }
+  return await withTimeout(new Promise((resolve) => {
+    const mp4 = MP4Box.createFile();
+    let done = false;
+    const finish = (val) => { if (!done) { done = true; resolve(val); } };
+    mp4.onReady = (info) => {
+      if (info && info.created instanceof Date) {
+        const ms = info.created.getTime();
+        if (ms > 631152000000) finish(ms);
+        else finish(null);
+      } else finish(null);
+    };
+    mp4.onError = () => finish(null);
+    const CHUNK = 256 * 1024;
+    let offset = 0;
+    const total = file.size;
+    const pump = async () => {
+      try {
+        while (!done && offset < total) {
+          const slice = file.slice(offset, Math.min(total, offset + CHUNK));
+          const ab = await slice.arrayBuffer();
+          ab.fileStart = offset;
+          const next = mp4.appendBuffer(ab);
+          offset = next || (offset + ab.byteLength);
+          // Yield to the event loop so onReady can fire.
+          await new Promise(r => setTimeout(r, 0));
+          // Cap at first ~32MB to avoid pathological moov-at-end seeks.
+          if (offset > 32 * 1024 * 1024) break;
+        }
+        if (!done) {
+          mp4.flush();
+          // Last chance for onReady; fall through to null otherwise.
+          setTimeout(() => finish(null), 100);
+        }
+      } catch (_) { finish(null); }
+    };
+    pump();
+  }), 8000, 'mp4 metadata');
 }
 
 // -----------------------------------------------------------------------------
