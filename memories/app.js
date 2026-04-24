@@ -1548,11 +1548,12 @@ function drawOverlay(ctx, w, h, ovl, localT) {
 }
 
 class Renderer {
-  constructor(canvas, plan, opts) {
+  constructor(canvas, plan, opts, mixer = null) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.plan = plan;
     this.opts = opts;
+    this.mixer = mixer;
     this.assets = null;
     this.running = false;
     this.startWallTime = 0;
@@ -1568,6 +1569,17 @@ class Renderer {
 
   async preload(onProgress) {
     this.assets = await preloadAssets(this.plan, onProgress);
+    // Attach video audio routes once assets are decoded so MediaElementSource
+    // is created synchronously after the user-gesture context spawn.
+    if (this.mixer) {
+      for (const clip of this.plan.timeline) {
+        if (clip.kind !== 'video') continue;
+        const a = this.assets.get(clip.photoId);
+        if (a && a.kind === 'video' && a.element) {
+          this.mixer.attachVideo(clip.photoId, a.element);
+        }
+      }
+    }
   }
 
   renderFrame(elapsedSec) {
@@ -1578,26 +1590,26 @@ class Renderer {
     const active = this.findActive(elapsedSec);
     const activeIds = new Set(active.map(({ clip }) => clip.photoId));
 
-    // Lifecycle: pause videos that just left the active set, fast-rewind for
-    // possible re-entry on loop replay.
+    // Lifecycle: pause videos that just left the active set + tell the mixer
+    // to fade their audio back out (which also unducks the BGM).
     if (this.assets) {
       for (const [id, asset] of this.assets) {
         if (asset.kind === 'video' && asset.playing && !activeIds.has(id)) {
           try { asset.element.pause(); } catch (_) {}
           asset.playing = false;
+          if (this.mixer) this.mixer.deactivateVideo(id);
         }
       }
     }
 
     for (const { clip, alpha } of active) {
       if (alpha <= 0) continue;
-      // Activate any video clip that just entered.
       if (clip.kind === 'video') {
         const asset = this.assets.get(clip.photoId);
         if (asset && asset.kind === 'video' && !asset.playing) {
-          asset.element.muted = true; // Step 6 routes audio through Web Audio
           asset.element.play().catch(() => {});
           asset.playing = true;
+          if (this.mixer) this.mixer.activateVideo(clip.photoId);
         }
       }
       const localT = elapsedSec - clip.startSec;
@@ -1748,6 +1760,124 @@ class Renderer {
 }
 
 let activeRenderer = null;
+
+// =============================================================================
+// Step 6 — Audio mixer (BGM + per-video element). Wraps a single AudioContext
+// created from the Preview/Export user gesture (required by iOS Safari).
+// Each video element gets its own MediaElementSource → per-clip GainNode so
+// the BGM can duck during video clips and unduck after.
+// =============================================================================
+
+const VIDEO_DUCK_LEVEL = 0.35;
+const DUCK_RAMP_SEC = 0.30;
+const UNDUCK_RAMP_SEC = 0.40;
+
+class AudioMixer {
+  constructor() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    this.dest = this.ctx.createMediaStreamDestination(); // for MediaRecorder
+    this.bgmEl = null;
+    this.bgmGain = null;
+    this.bgmFadeOutAtSec = null;
+    this.videoGains = new Map();
+    this.activeVideoCount = 0;
+  }
+
+  // Loads + connects the BGM source. `blobOrUrl` is a Blob (uploaded BGM)
+  // or a URL string (catalog track). Schedules a fade-out so the track
+  // ends gracefully even if its endCue doesn't fall on the timeline end.
+  async setupBgm(blobOrUrl, totalSec, fadeOutSec = 1.5) {
+    const el = new Audio();
+    el.crossOrigin = 'anonymous';
+    el.preload = 'auto';
+    el.src = (blobOrUrl instanceof Blob) ? URL.createObjectURL(blobOrUrl) : blobOrUrl;
+    await withTimeout(new Promise((res, rej) => {
+      el.addEventListener('canplay', res, { once: true });
+      el.addEventListener('error', () => rej(new Error('BGMの読み込みに失敗しました')), { once: true });
+    }), 15000, 'BGM load');
+    const src = this.ctx.createMediaElementSource(el);
+    const gain = this.ctx.createGain();
+    gain.gain.value = 1.0;
+    src.connect(gain);
+    gain.connect(this.dest);
+    gain.connect(this.ctx.destination); // user hears it during preview
+    this.bgmEl = el;
+    this.bgmGain = gain;
+    this.bgmFadeOutAtSec = Math.max(0, totalSec - fadeOutSec);
+  }
+
+  // Connect a video element's audio through a per-clip gain. Video stays
+  // silent (gain 0) until activateVideo() is called.
+  attachVideo(clipId, videoEl) {
+    if (this.videoGains.has(clipId)) return;
+    let src;
+    try { src = this.ctx.createMediaElementSource(videoEl); }
+    catch (_) { return; } // already attached or not supported
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0;
+    src.connect(gain);
+    gain.connect(this.dest);
+    gain.connect(this.ctx.destination);
+    videoEl.muted = false; // routed through Web Audio now
+    this.videoGains.set(clipId, gain);
+  }
+
+  start() {
+    if (this.bgmEl) this.bgmEl.play().catch(() => {});
+    if (this.bgmGain && this.bgmFadeOutAtSec != null) {
+      const t0 = this.ctx.currentTime;
+      this.bgmGain.gain.setValueAtTime(this.bgmGain.gain.value, t0 + this.bgmFadeOutAtSec - 0.05);
+      this.bgmGain.gain.linearRampToValueAtTime(0, t0 + this.bgmFadeOutAtSec + 1.0);
+    }
+  }
+
+  activateVideo(clipId) {
+    const g = this.videoGains.get(clipId);
+    if (g) {
+      const t0 = this.ctx.currentTime;
+      g.gain.cancelScheduledValues(t0);
+      g.gain.linearRampToValueAtTime(1.0, t0 + 0.15);
+    }
+    if (++this.activeVideoCount === 1) this.duckBgm();
+  }
+  deactivateVideo(clipId) {
+    const g = this.videoGains.get(clipId);
+    if (g) {
+      const t0 = this.ctx.currentTime;
+      g.gain.cancelScheduledValues(t0);
+      g.gain.linearRampToValueAtTime(0, t0 + 0.20);
+    }
+    if (--this.activeVideoCount <= 0) {
+      this.activeVideoCount = 0;
+      this.unduckBgm();
+    }
+  }
+  duckBgm() {
+    if (!this.bgmGain) return;
+    const t0 = this.ctx.currentTime;
+    this.bgmGain.gain.cancelScheduledValues(t0);
+    this.bgmGain.gain.linearRampToValueAtTime(VIDEO_DUCK_LEVEL, t0 + DUCK_RAMP_SEC);
+  }
+  unduckBgm() {
+    if (!this.bgmGain) return;
+    const t0 = this.ctx.currentTime;
+    this.bgmGain.gain.cancelScheduledValues(t0);
+    this.bgmGain.gain.linearRampToValueAtTime(1.0, t0 + UNDUCK_RAMP_SEC);
+  }
+
+  destroy() {
+    if (this.bgmEl) {
+      try { this.bgmEl.pause(); } catch (_) {}
+      if (this.bgmEl.src && this.bgmEl.src.startsWith('blob:')) {
+        try { URL.revokeObjectURL(this.bgmEl.src); } catch (_) {}
+      }
+    }
+    if (this.ctx && this.ctx.state !== 'closed') {
+      try { this.ctx.close(); } catch (_) {}
+    }
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Batch ingest
@@ -2024,6 +2154,49 @@ function readPlanOpts() {
   };
 }
 
+// Resolve the BGM source to a Blob/URL to feed AudioMixer.setupBgm. Returns
+// null when no BGM is configured. Catalog tracks are fetched via the network
+// (must be CORS-enabled) — the catalog ships empty so this only runs once
+// real entries are populated.
+async function resolveBgmSource() {
+  const radio = document.querySelector('input[name="bgm"]:checked');
+  if (!radio || radio.value === 'none') return null;
+  if (radio.value === 'upload') {
+    const f = dom.bgmFile.files && dom.bgmFile.files[0];
+    if (!f) return null;
+    return f;
+  }
+  if (radio.value === 'catalog') {
+    const track = getSelectedCatalogTrack();
+    if (!track || !track.url) return null;
+    return track.url;
+  }
+  return null;
+}
+
+async function setupRendererForPlay(opts, plan) {
+  // Mixer must be created from the user gesture chain (Preview/Export click)
+  // for iOS Safari to allow audio playback.
+  let mixer = null;
+  try {
+    mixer = new AudioMixer();
+    const bgmSrc = await resolveBgmSource();
+    if (bgmSrc) {
+      try {
+        await mixer.setupBgm(bgmSrc, plan.totalSec, 1.5);
+      } catch (e) {
+        console.warn('BGM setup failed', e);
+      }
+    }
+  } catch (e) {
+    console.warn('AudioContext unavailable', e);
+    mixer = null;
+  }
+  const renderer = new Renderer(dom.stage, plan, opts, mixer);
+  renderer.setupCanvas();
+  return { renderer, mixer };
+}
+
 async function onPreview() {
   if (!state.groups || !state.groups.length) {
     alert('先に写真を読み込んでください');
@@ -2036,6 +2209,7 @@ async function onPreview() {
   dom.previewBtn.disabled = true;
   const orig = dom.previewBtn.textContent;
   dom.previewBtn.textContent = '構成中…';
+  let mixerToDispose = null;
   try {
     const opts = readPlanOpts();
     const plan = await buildPlan(opts);
@@ -2045,9 +2219,9 @@ async function onPreview() {
     dom.stageStatus.textContent = '🖼 アセット読み込み中…';
     dom.stageOverlay.classList.remove('hidden');
 
-    const renderer = new Renderer(dom.stage, plan, opts);
-    renderer.setupCanvas();
+    const { renderer, mixer } = await setupRendererForPlay(opts, plan);
     activeRenderer = renderer;
+    mixerToDispose = mixer;
 
     dom.previewBtn.textContent = '🖼 読込中…';
     await renderer.preload((p) => {
@@ -2056,6 +2230,7 @@ async function onPreview() {
 
     dom.stageOverlay.classList.add('hidden');
     dom.previewBtn.textContent = '▶ 再生中…';
+    if (mixer) mixer.start();
     await renderer.play();
     dom.stageOverlay.classList.remove('hidden');
     dom.stageStatus.textContent = '⏸ プレビュー終了';
@@ -2065,6 +2240,7 @@ async function onPreview() {
   } finally {
     dom.previewBtn.disabled = false;
     dom.previewBtn.textContent = orig;
+    if (mixerToDispose) mixerToDispose.destroy();
   }
 }
 
