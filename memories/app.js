@@ -16,6 +16,7 @@ const BLUR_REJECT_THRESHOLD = 60;        // Laplacian variance below this → bl
 const DARK_LUMA_THRESHOLD = 22;          // mean luminance (0-255) below = pocket/lens-cap
 const FLAT_VARIANCE_THRESHOLD = 30;      // luminance variance below = nearly uniform (no content)
 const VIDEO_MIN_DURATION_SEC = 1.5;      // shorter clips are likely accidental
+const VIDEO_LONG_THRESHOLD_SEC = 60;     // longer videos skip frame analysis (seeking is slow)
 const DHASH_HAMMING_THRESHOLD = 10;      // 0-64; lower = stricter similarity
 const DEDUP_TIME_WINDOW_MS = 90 * 1000;  // similar shots must be < 90s apart
 const GPS_CLUSTER_RADIUS_M = 200;        // photos closer than this merge into one cluster
@@ -475,17 +476,28 @@ async function processVideo(file) {
   // benefit; videos already always live in their own solo group.
   const highlightStartSec = Math.max(0, dur * 0.30);
 
-  // For zero-content videos, skip the seek/draw entirely.
-  let blurScore = 0, lumaMean = 0, lumaVar = 0, thumb = '';
-  if (hasVideoStream && dur > 0.2) {
-    const frameAt = Math.max(0, Math.min(dur - 0.1, highlightStartSec + 0.4));
-    const img = await extractVideoFrameAt(url, frameAt, dur);
-    thumb = thumbDataUrl(img, 220);
-    const analysisCanvas = downscaleToCanvas(img, 256);
-    blurScore = laplacianVariance(analysisCanvas);
-    const stats = frameLumaStats(analysisCanvas);
-    lumaMean = stats.mean;
-    lumaVar = stats.variance;
+  // For long videos, skip the seek+draw entirely — seeking deep into a long
+  // file can stall ingest by several seconds. Pre-fill values so the rejection
+  // checks pass naturally; long clips are usually intentional event recordings.
+  // For zero-content / corrupt videos, also skip.
+  let blurScore = 100, lumaMean = 128, lumaVar = 1000, thumb = '';
+  let analysisSkipped = false;
+  if (hasVideoStream && dur > 0.2 && dur < VIDEO_LONG_THRESHOLD_SEC) {
+    try {
+      const frameAt = Math.max(0, Math.min(dur - 0.1, highlightStartSec + 0.4));
+      const img = await extractVideoFrameAt(url, frameAt, dur);
+      thumb = thumbDataUrl(img, 220);
+      const analysisCanvas = downscaleToCanvas(img, 256);
+      blurScore = laplacianVariance(analysisCanvas);
+      const stats = frameLumaStats(analysisCanvas);
+      lumaMean = stats.mean;
+      lumaVar = stats.variance;
+    } catch (e) {
+      // Seek/draw failure shouldn't kill the whole video — let it through.
+      analysisSkipped = true;
+    }
+  } else if (dur >= VIDEO_LONG_THRESHOLD_SEC) {
+    analysisSkipped = true;
   }
 
   const orientation = w === h ? 'square' : (w > h ? 'landscape' : 'portrait');
@@ -523,6 +535,7 @@ async function processVideo(file) {
     durationSec: dur,
     highlightStartSec,
     highlightSource: 'heuristic',
+    analysisSkipped,
   };
 }
 
@@ -755,7 +768,10 @@ function selectByMode(reps, mode, opts) {
   // reps already filtered to non-bad + assigned a clusterId
   const usable = reps.filter(r => !r.bad);
   if (mode === 'all-unique') return usable.slice();
-  if (mode === 'recommended') return diversifyAcrossClusters(usable, Math.min(15, usable.length));
+  if (mode === 'recommended') {
+    const n = recommendedCount(usable.length, opts);
+    return diversifyAcrossClusters(usable, n);
+  }
   if (mode === 'count') {
     const n = Math.max(3, Math.min(usable.length, opts.count || 15));
     return diversifyAcrossClusters(usable, n);
@@ -768,6 +784,26 @@ function selectByMode(reps, mode, opts) {
     return diversifyAcrossClusters(usable, n);
   }
   return usable.slice();
+}
+
+// Adaptive picker for the おすすめ厳選 mode. Considers the upload count and,
+// when BGM is set, the song's mood (slow/medium/fast — derived from catalog
+// tags) and length so the count matches the music feel.
+function recommendedCount(usableCount, opts) {
+  if (!usableCount) return 0;
+  if (opts.bgmDurationSec) {
+    const tempo = opts.bgmTempo || 'medium';
+    const targetPer = tempo === 'fast' ? 2.2 : tempo === 'slow' ? 4.5 : 3.0;
+    const body = Math.max(10, opts.bgmDurationSec - TITLE_CARD_SEC - CLOSER_CARD_SEC);
+    return Math.max(4, Math.min(usableCount, Math.round(body / targetPer)));
+  }
+  // No BGM — scale loosely with the upload size, capped so the result stays
+  // watchable. The breakpoints are tuned for "memory video" length feel
+  // (~3s/slide → 30-90s output for 10-30 photos, etc.).
+  if (usableCount <= 12) return usableCount;
+  if (usableCount <= 30) return Math.round(8 + usableCount * 0.45);
+  if (usableCount <= 100) return Math.round(20 + (usableCount - 30) * 0.18);
+  return Math.min(40, Math.round(33 + (usableCount - 100) * 0.04));
 }
 
 // -----------------------------------------------------------------------------
@@ -958,41 +994,71 @@ async function buildPlan(opts) {
 // -----------------------------------------------------------------------------
 // Batch ingest
 // -----------------------------------------------------------------------------
+function setSettingsBusy(busy) {
+  for (const b of [dom.previewBtn, dom.exportBtn]) {
+    if (!b) continue;
+    if (busy) {
+      if (!b.dataset.origText) b.dataset.origText = b.textContent;
+      b.textContent = '⏳ 解析中…';
+      b.disabled = true;
+    } else {
+      if (b.dataset.origText) {
+        b.textContent = b.dataset.origText;
+        delete b.dataset.origText;
+      }
+      b.disabled = false;
+    }
+  }
+}
+
 async function ingestFiles(files) {
   if (state.loading) return;
+  const accepted = files.filter(f =>
+    (f.type && f.type.startsWith('image/')) || isHeic(f) || isVideo(f)
+  );
+  if (!accepted.length) {
+    alert('画像・動画ファイルが見つかりませんでした。');
+    return;
+  }
   state.loading = true;
+  // Pop the settings panel up immediately so the user can start tweaking
+  // mode/orientation/BGM while the photos analyse in the background.
+  dom.settingsPanel.style.display = 'flex';
+  setSettingsBusy(true);
+
+  // Kick off the face-api model load in parallel — it doesn't need to block
+  // the first photos getting decoded; we just await per file when needed.
+  const faceReady = ensureFaceApi().catch((e) => {
+    console.warn('face-api unavailable — proceeding without face scoring', e);
+  });
+
   try {
-    const accepted = files.filter(f =>
-      (f.type && f.type.startsWith('image/')) || isHeic(f) || isVideo(f)
-    );
-    if (!accepted.length) {
-      alert('画像・動画ファイルが見つかりませんでした。');
-      return;
-    }
-    setLoadProgress(0, '🤖 顔解析モデルを準備中…');
-    try {
-      await ensureFaceApi();
-    } catch (e) {
-      console.warn('face-api unavailable — proceeding without face scoring', e);
-    }
-    setLoadProgress(1, `0 / ${accepted.length} 枚解析中…`);
-    for (let i = 0; i < accepted.length; i++) {
-      const f = accepted[i];
+    // Process photos first (cheap), videos last (potentially slow).
+    const photosOnly = accepted.filter(f => !isVideo(f));
+    const videosOnly = accepted.filter(f => isVideo(f));
+    const queue = [...photosOnly, ...videosOnly];
+    const total = queue.length;
+    setLoadProgress(1, `0 / ${total} 件解析中…`);
+
+    for (let i = 0; i < queue.length; i++) {
+      const f = queue[i];
       try {
+        if (!isVideo(f)) await faceReady;
         const p = await processFile(f);
         state.photos.push(p);
       } catch (e) {
         console.warn('skipped file', f.name, e);
       }
-      setLoadProgress(((i + 1) / accepted.length) * 100, `${i + 1} / ${accepted.length} 枚解析中…`);
+      setLoadProgress(((i + 1) / total) * 100,
+        `${i + 1} / ${total} 件解析中… (${i < photosOnly.length ? '写真' : '動画'})`);
     }
     state.photos.sort((a, b) => a.ts - b.ts);
     state.groups = groupSimilarPhotos(state.photos);
     hideLoadProgress();
     renderReview();
-    dom.settingsPanel.style.display = 'flex';
   } finally {
     state.loading = false;
+    setSettingsBusy(false);
   }
 }
 
@@ -1128,14 +1194,32 @@ function bindSettings() {
 // Plan inspector — Step 4 deliverable. Shows what the renderer will play
 // without actually rendering yet. Replaced by the real preview in Step 5.
 // -----------------------------------------------------------------------------
+function getSelectedCatalogTrack() {
+  const radio = document.querySelector('input[name="bgm"]:checked');
+  if (!radio || radio.value !== 'catalog') return null;
+  const sel = document.getElementById('catalogSelect');
+  if (!sel || !sel.value) return null;
+  return (window.MUSIC_CATALOG || []).find(t => t.id === sel.value) || null;
+}
+
+function bgmTempoFromTags(tags) {
+  if (!tags || !tags.length) return 'medium';
+  const j = tags.join(' ').toLowerCase();
+  if (/(uplifting|happy|energetic|joyful|fast|upbeat|cheerful|dance|pop)/.test(j)) return 'fast';
+  if (/(calm|memorial|emotional|piano|warm|slow|nostalgic|melancholy|reflective|tender|ambient)/.test(j)) return 'slow';
+  return 'medium';
+}
+
 function readPlanOpts() {
+  const track = getSelectedCatalogTrack();
   return {
     orientation: getOutputOrientation(),
     mode: document.querySelector('input[name="mode"]:checked').value,
     count: parseInt(document.getElementById('countInput').value, 10) || 15,
     seconds: parseInt(document.getElementById('secondsInput').value, 10) || 30,
     perPhotoSec: parseFloat(document.getElementById('perPhotoInput').value) || 3,
-    bgmDurationSec: null, // wired in step 6 once BGM is loaded
+    bgmDurationSec: track ? track.durationSec : null,
+    bgmTempo: track ? bgmTempoFromTags(track.tags) : 'medium',
     subtitlesOn: document.getElementById('subtitles').value !== 'off',
     useNominatim: true,
   };
