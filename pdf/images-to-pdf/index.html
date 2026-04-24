@@ -128,22 +128,32 @@
         const marginMm = parseFloat(document.getElementById('margin').value);
         const marginPt = marginMm / 25.4 * 72;
 
+        // Re-encode via canvas for cases where pdf-lib can't embed the raw
+        // bytes (interlaced PNG, 16-bit PNG, WebP, HEIC, etc.).
+        async function reencodeAsJpg(im) {
+          const dataUrl = im.dataUrl;
+          const img = await new Promise((r) => { const x = new Image(); x.onload = () => r(x); x.src = dataUrl; });
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+          canvas.getContext('2d').drawImage(img, 0, 0);
+          const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95));
+          return await doc.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+        }
         for (const im of images) {
           const bytes = await fileToBytes(im.file);
           let embed;
-          if (im.file.type === 'image/png' || /\.png$/i.test(im.file.name)) {
-            embed = await doc.embedPng(bytes);
-          } else if (im.file.type === 'image/jpeg' || /\.jpe?g$/i.test(im.file.name)) {
-            embed = await doc.embedJpg(bytes);
-          } else {
-            // Convert via canvas to jpeg
-            const dataUrl = im.dataUrl;
-            const img = await new Promise((r) => { const x = new Image(); x.onload = () => r(x); x.src = dataUrl; });
-            const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-            canvas.getContext('2d').drawImage(img, 0, 0);
-            const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95));
-            embed = await doc.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+          try {
+            if (im.file.type === 'image/png' || /\.png$/i.test(im.file.name)) {
+              embed = await doc.embedPng(bytes);
+            } else if (im.file.type === 'image/jpeg' || /\.jpe?g$/i.test(im.file.name)) {
+              embed = await doc.embedJpg(bytes);
+            } else {
+              embed = await reencodeAsJpg(im);
+            }
+          } catch (e) {
+            // pdf-lib only supports a subset of PNG/JPEG. Fall back to a
+            // canvas-encoded JPEG so weird-but-valid images still embed.
+            embed = await reencodeAsJpg(im);
           }
 
           let pageW, pageH;

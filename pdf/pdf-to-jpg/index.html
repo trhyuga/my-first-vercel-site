@@ -147,7 +147,10 @@
         }
         setProgress(100, 'ZIPを生成中...');
         const zipBlob = await zip.generateAsync({ type: 'blob' });
-        download(zipBlob, safeFilename(originalName || 'pdf-to-images', 'pdf-to-images') + '.zip');
+        // Use the user's filename input as the zip name too (it was previously
+        // ignored — only the per-page prefix). Fall back to the source name.
+        const zipName = safeFilename(fname.value, originalName || 'pdf-to-images');
+        download(zipBlob, zipName + '.zip');
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {

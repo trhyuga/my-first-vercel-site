@@ -115,7 +115,11 @@
       runBtn.textContent = '処理中...';
       clearBox(msg);
       try {
-        const text = document.getElementById('text').value || 'WATERMARK';
+        // pdf-lib's drawText doesn't word-wrap or honor newlines on v1.17.1 —
+        // a "\n" would render as a literal box. Strip control whitespace so
+        // the watermark stays a single, predictable line.
+        const text = (document.getElementById('text').value || 'WATERMARK')
+          .replace(/[\r\n\t]+/g, ' ').trim() || 'WATERMARK';
         const size = parseFloat(document.getElementById('size').value) || 60;
         const opacity = (parseFloat(document.getElementById('opacity').value) || 25) / 100;
         const angle = parseFloat(document.getElementById('angle').value) || 0;

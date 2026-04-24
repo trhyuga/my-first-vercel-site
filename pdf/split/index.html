@@ -133,13 +133,16 @@
           const blob = new Blob([await out.save()], { type: 'application/pdf' });
           download(blob, base + '.pdf');
         } else {
+          // Pack the per-page PDFs inside a folder so they unpack tidily
+          // instead of scattering N files into Downloads.
           const zip = new JSZip();
+          const folder = zip.folder(base);
           for (let i = 0; i < total; i++) {
             const out = await PDFLib.PDFDocument.create();
             const [p] = await out.copyPages(src, [i]);
             out.addPage(p);
             const bytesOut = await out.save();
-            zip.file(`${base}_page_${String(i + 1).padStart(3, '0')}.pdf`, bytesOut);
+            folder.file(`${base}_page_${String(i + 1).padStart(3, '0')}.pdf`, bytesOut);
           }
           const blob = await zip.generateAsync({ type: 'blob' });
           download(blob, base + '.zip');

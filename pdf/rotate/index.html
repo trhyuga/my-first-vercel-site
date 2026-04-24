@@ -115,7 +115,13 @@
     document.getElementById('rotateAll180').addEventListener('click', () => setAll(180));
 
     document.getElementById('clear').addEventListener('click', () => {
-      currentFile = null; bytes = null;
+      // Shrink any rendered thumbnail canvases before dropping references so
+      // the GPU/canvas backing store releases sooner on big PDFs.
+      grid.querySelectorAll('canvas').forEach(c => { c.width = 0; c.height = 0; });
+      currentFile = null;
+      bytes = null;
+      rotations.length = 0;
+      originalRotations.length = 0;
       dz.style.display = 'block';
       controls.style.display = 'none';
       grid.innerHTML = '';

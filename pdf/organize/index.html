@@ -143,7 +143,11 @@
     }
 
     document.getElementById('clear').addEventListener('click', () => {
-      bytes = null; pageOrder = []; thumbs = [];
+      // Drop the data URLs / page order so the previous PDF's thumbnails
+      // (potentially tens of MB at 100+ pages) actually become collectable.
+      bytes = null;
+      pageOrder.length = 0;
+      thumbs.length = 0;
       dz.style.display = 'block';
       controls.style.display = 'none';
       grid.innerHTML = '';
