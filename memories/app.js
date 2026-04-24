@@ -2066,9 +2066,7 @@ function bindSettings() {
   }
 
   dom.previewBtn.addEventListener('click', onPreview);
-  dom.exportBtn.addEventListener('click', () => {
-    alert('書き出しは Step 6 で実装します。');
-  });
+  dom.exportBtn.addEventListener('click', onExport);
 }
 
 // -----------------------------------------------------------------------------
@@ -2195,6 +2193,149 @@ async function setupRendererForPlay(opts, plan) {
   const renderer = new Renderer(dom.stage, plan, opts, mixer);
   renderer.setupCanvas();
   return { renderer, mixer };
+}
+
+// MediaRecorder MIME picking — MP4 strongly preferred (saves to iOS Photos
+// app via the share sheet). Falls back to WebM (Chrome/Firefox desktop).
+function pickRecorderMime() {
+  const candidates = [
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4;codecs=avc1.4D401E,mp4a.40.2',
+    'video/mp4',
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+  ];
+  for (const c of candidates) {
+    try { if (MediaRecorder.isTypeSupported(c)) return c; }
+    catch (_) {}
+  }
+  return '';
+}
+
+function showRenderProgress(pct, text) {
+  dom.renderProg.style.display = 'flex';
+  dom.renderProgText.textContent = text;
+  dom.renderProgBar.style.width = Math.round(pct * 100) + '%';
+}
+function hideRenderProgress() {
+  dom.renderProg.style.display = 'none';
+}
+
+async function exportVideo(renderer, mixer, totalSec) {
+  const stream = renderer.canvas.captureStream(30);
+  if (mixer && mixer.dest && mixer.dest.stream) {
+    for (const track of mixer.dest.stream.getAudioTracks()) {
+      stream.addTrack(track);
+    }
+  }
+  const mime = pickRecorderMime();
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream, mime ? {
+      mimeType: mime,
+      videoBitsPerSecond: 5_000_000,
+    } : undefined);
+  } catch (e) {
+    throw new Error('この端末は動画書き出しに対応していません: ' + (e.message || e));
+  }
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  const stopped = new Promise((res) => recorder.addEventListener('stop', res, { once: true }));
+  recorder.start(1000);
+  if (mixer) mixer.start();
+  await renderer.play((p) => {
+    showRenderProgress(p, `🎬 書き出し中… ${Math.round(p * 100)}% (${(p * totalSec).toFixed(1)} / ${totalSec.toFixed(1)}s)`);
+  });
+  // Give the recorder a moment to flush the final frame's data.
+  await new Promise(r => setTimeout(r, 200));
+  recorder.stop();
+  await stopped;
+  return new Blob(chunks, { type: mime || (chunks[0] && chunks[0].type) || 'video/webm' });
+}
+
+function showOutput(blob) {
+  dom.output.innerHTML = '';
+  const url = URL.createObjectURL(blob);
+  const isMp4 = (blob.type || '').includes('mp4');
+
+  const wrap = document.createElement('div');
+  wrap.className = 'alert success';
+  wrap.innerHTML = `<div>🎉 書き出し完了 (${(blob.size / (1024 * 1024)).toFixed(1)} MB · ${isMp4 ? 'MP4' : 'WebM'})</div>`;
+  dom.output.appendChild(wrap);
+
+  const video = document.createElement('video');
+  video.src = url;
+  video.controls = true;
+  video.playsInline = true;
+  dom.output.appendChild(video);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `memories.${isMp4 ? 'mp4' : 'webm'}`;
+  a.className = 'download-link';
+  a.textContent = `📥 ダウンロード (.${isMp4 ? 'mp4' : 'webm'})`;
+  dom.output.appendChild(a);
+
+  const hint = document.createElement('p');
+  hint.className = 'hint';
+  if (isMp4) {
+    hint.innerHTML = '📱 <b>iPhone</b>: ダウンロードして Files / 「ファイル」アプリで開き、共有 → 「ビデオを保存」で写真アプリに追加できます。';
+  } else {
+    hint.innerHTML = '⚠️ MP4書き出しに対応していない端末でした。WebMはPC・Androidの動画プレイヤーで再生できます。iPhone「写真」に入れたい場合は別端末でMP4化してください。';
+  }
+  dom.output.appendChild(hint);
+}
+
+async function onExport() {
+  if (!state.groups || !state.groups.length) {
+    alert('先に写真を読み込んでください');
+    return;
+  }
+  if (activeRenderer) {
+    activeRenderer.dispose();
+    activeRenderer = null;
+  }
+  dom.exportBtn.disabled = true;
+  dom.previewBtn.disabled = true;
+  const orig = dom.exportBtn.textContent;
+  dom.exportBtn.textContent = '構成中…';
+  let mixerToDispose = null;
+  try {
+    const opts = readPlanOpts();
+    const plan = await buildPlan(opts);
+    renderPlanSummary(plan);
+
+    dom.stagePanel.style.display = 'flex';
+    dom.stageStatus.textContent = '🖼 アセット読み込み中…';
+    dom.stageOverlay.classList.remove('hidden');
+
+    const { renderer, mixer } = await setupRendererForPlay(opts, plan);
+    activeRenderer = renderer;
+    mixerToDispose = mixer;
+
+    dom.exportBtn.textContent = '🖼 読込中…';
+    await renderer.preload((p) => {
+      dom.stageStatus.textContent = `🖼 ${Math.round(p * 100)}% 読込中…`;
+    });
+
+    dom.stageOverlay.classList.add('hidden');
+    dom.exportBtn.textContent = '🎬 書き出し中…';
+    showRenderProgress(0, '🎬 0% (0.0 / ' + plan.totalSec.toFixed(1) + 's)');
+    const blob = await exportVideo(renderer, mixer, plan.totalSec);
+    hideRenderProgress();
+    showOutput(blob);
+    dom.stageStatus.textContent = '✅ 書き出し完了';
+  } catch (e) {
+    console.error(e);
+    hideRenderProgress();
+    showError('書き出しエラー: ' + (e.message || e));
+  } finally {
+    dom.exportBtn.disabled = false;
+    dom.previewBtn.disabled = false;
+    dom.exportBtn.textContent = orig;
+    if (mixerToDispose) mixerToDispose.destroy();
+  }
 }
 
 async function onPreview() {
