@@ -1123,6 +1123,23 @@
         };
         const stopped = new Promise(res => { recorder.onstop = res; });
 
+        // Quality preset picks the compute/quality tradeoff. Declared BEFORE
+        // detOpts so every downstream constant is initialized when the
+        // detector is instantiated.
+        //  balanced (default): light detection cadence + generous uncertainty
+        //    padding. Best for mobile — smooth playback, decent accuracy.
+        //  high (PC): aggressive detection frequency, tight padding, stricter
+        //    detector confidence, higher bitrate ceiling. Heavier on CPU/GPU
+        //    but minimal smoothness loss vs the source and very precise blur
+        //    placement (fewer bystanders caught, target stays exactly on).
+        const HIGH_Q = (qualityMode === 'high');
+        const NORMAL_INTERVAL_MS = HIGH_Q ? 250 : 600;
+        const FAST_INTERVAL_MS   = HIGH_Q ? 120 : 220;
+        const DET_MIN_CONFIDENCE = HIGH_Q ? 0.45 : 0.30;
+        const STALE_PAD_CAP      = HIGH_Q ? 0.25 : 0.50;
+        const STALE_PAD_RATE     = HIGH_Q ? 0.04 : 0.07;
+        const TOTAL_PAD_CAP      = HIGH_Q ? 0.40 : 0.60;
+
         // Always SSD during video — good recall for profiles / small faces.
         // High-quality preset bumps minConfidence so weak detections don't
         // turn into a bystander identity check (and then a false blur).
@@ -1138,20 +1155,6 @@
         //    velocity — no descriptor compares, no ML work on intermediate
         //    frames. That removes GPU contention, keeps the canvas at source
         //    framerate, and stops 別人ぼかし from flip-flopping.
-        // Quality preset picks the compute/quality tradeoff.
-        //  balanced (default): light detection cadence + generous uncertainty
-        //    padding. Best for mobile — smooth playback, decent accuracy.
-        //  high (PC): aggressive detection frequency, tight padding, stricter
-        //    detector confidence, higher bitrate ceiling. Heavier on CPU/GPU
-        //    but minimal smoothness loss vs the source and very precise blur
-        //    placement (fewer bystanders caught, target stays exactly on).
-        const HIGH_Q = (qualityMode === 'high');
-        const NORMAL_INTERVAL_MS = HIGH_Q ? 250 : 600;
-        const FAST_INTERVAL_MS   = HIGH_Q ? 120 : 220;
-        const DET_MIN_CONFIDENCE = HIGH_Q ? 0.45 : 0.30;
-        const STALE_PAD_CAP      = HIGH_Q ? 0.25 : 0.50;
-        const STALE_PAD_RATE     = HIGH_Q ? 0.04 : 0.07;
-        const TOTAL_PAD_CAP      = HIGH_Q ? 0.40 : 0.60;
         // Keep a shouldBlur track alive for this long once it's been
         // established — enough for extended back-turned / occluded periods
         // while the subject stays inside the frame.
