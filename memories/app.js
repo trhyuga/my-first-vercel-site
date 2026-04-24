@@ -1036,19 +1036,63 @@ function buildTimeline(orderedItems, allClusters, opts) {
 }
 
 // Pulls together everything: groups → reps → cluster → name → select → order
-// → timeline. Async because of Nominatim. Returns the final plan.
+// → timeline → post-process merges. Async because of Nominatim. Returns the
+// final plan ready for the renderer.
 async function buildPlan(opts) {
   const prefOri = opts.orientation;
-  // Pick rep from each similarity group and tag each photo with its rep.
   const reps = state.groups.map(g => pickBestOfGroup(g, prefOri));
-  // Cluster reps by GPS; tag each rep with clusterId.
   const clusters = clusterByGps(reps);
   for (const c of clusters) for (const p of c.items) p.clusterId = c.id;
-  await nameClusters(clusters, /*useNominatim*/ opts.useNominatim !== false);
-  // Selection mode → ordered list
+  await nameClusters(clusters, opts.useNominatim !== false);
   const selected = selectByMode(reps, opts.mode, opts);
   const ordered = orderForTimeline(selected, clusters);
-  return { ordered, ...buildTimeline(ordered, clusters, opts) };
+  const built = buildTimeline(ordered, clusters, opts);
+  // Post-process passes: merge consecutive landscape photos into stack-pair
+  // clips when output is portrait. Re-time cumulative startSec + totalSec
+  // afterwards because durations may change.
+  const mergedTimeline = mergeStackPairs(built.timeline, opts);
+  let t = 0;
+  for (const c of mergedTimeline) { c.startSec = t; t += c.durationSec; }
+  return { ordered, ...built, timeline: mergedTimeline, totalSec: t };
+}
+
+// Merge two consecutive landscape-photo clips (both with mismatched aspect
+// in portrait output) into a single stack-pair clip showing both photos
+// stacked top/bottom. Each pair gets 1.5× the per-photo duration so the
+// viewer has time to take in both, while keeping the overall video close
+// to the planned length.
+function mergeStackPairs(timeline, opts) {
+  if (opts.orientation !== 'portrait') return timeline;
+  const out = [];
+  let i = 0;
+  while (i < timeline.length) {
+    const a = timeline[i];
+    const b = i + 1 < timeline.length ? timeline[i + 1] : null;
+    const eligible = (clip) =>
+      clip && clip.kind === 'photo' && clip.layout !== 'cover-kenburns'
+      && clip.ref && clip.ref.orientation === 'landscape';
+    if (eligible(a) && eligible(b)) {
+      out.push({
+        kind: 'photo',
+        photoId: a.photoId, // reuse for asset map keying
+        ref: a.ref,
+        refs: [a.ref, b.ref],
+        durationSec: Math.min(PHOTO_MAX_SEC, a.durationSec * 1.5),
+        layout: 'stack-pair',
+        kenburns: a.kenburns,
+        kenburnsList: [a.kenburns, b.kenburns],
+        // Keep only the first clip's overlays so chapter labels don't appear
+        // twice; b's date/location were already the same chapter anyway
+        // since they're consecutive items in the same cluster/day.
+        overlays: a.overlays || [],
+      });
+      i += 2;
+      continue;
+    }
+    out.push(a);
+    i++;
+  }
+  return out;
 }
 
 // =============================================================================
@@ -1080,7 +1124,18 @@ async function preloadAssets(plan, onProgress) {
   let i = 0;
   for (const clip of plan.timeline) {
     i++;
-    if (clip.kind === 'photo') {
+    if (clip.kind === 'photo' && clip.layout === 'stack-pair') {
+      try {
+        const refs = clip.refs || [clip.ref];
+        const bms = await Promise.all(refs.map(r =>
+          withTimeout(createImageBitmap(r.decodedBlob || r.file), 8000, r.sourceName)
+        ));
+        assets.set(clip.photoId, { kind: 'stack-pair', bitmaps: bms });
+      } catch (e) {
+        console.warn('stack-pair preload failed', e);
+        assets.set(clip.photoId, { kind: 'photo-failed' });
+      }
+    } else if (clip.kind === 'photo') {
       try {
         const src = clip.ref.decodedBlob || clip.ref.file;
         const bm = await withTimeout(createImageBitmap(src), 8000, clip.ref.sourceName);
@@ -1211,6 +1266,43 @@ function drawSmartCrop(ctx, canvasW, canvasH, source, srcW, srcH, focalPoint, t,
   dx = Math.min(0, Math.max(canvasW - drawW, dx));
   dy = Math.min(0, Math.max(canvasH - drawH, dy));
   ctx.drawImage(source, dx, dy, drawW, drawH);
+}
+
+// Two photos stacked top/bottom (each in half the canvas height with a
+// hairline gap). Each half does its own subtle zoom-pan from its kenburns
+// params so the result still feels like a moving frame.
+function drawStackPair(ctx, canvasW, canvasH, bitmaps, t, kbList) {
+  const gap = Math.max(2, Math.round(canvasH * 0.012));
+  const halfH = Math.floor((canvasH - gap) / 2);
+  const tEased = easeInOut(t);
+  for (let i = 0; i < 2 && i < bitmaps.length; i++) {
+    const bm = bitmaps[i];
+    if (!bm) continue;
+    const kb = (kbList && kbList[i]) || makeKenburnsParams(i);
+    const slotY = i === 0 ? 0 : halfH + gap;
+    const zoom = kb.startZoom + (kb.endZoom - kb.startZoom) * tEased;
+    const baseScale = Math.max(canvasW / bm.width, halfH / bm.height);
+    const scale = baseScale * zoom;
+    const drawW = bm.width * scale;
+    const drawH = bm.height * scale;
+    let dx = (canvasW - drawW) / 2;
+    let dy = slotY + (halfH - drawH) / 2;
+    const slackX = drawW - canvasW;
+    const slackY = drawH - halfH;
+    const pan = kb.panSign * kb.panAmount * tEased;
+    if (kb.panAxis === 'x' && slackX > 0) dx += slackX * pan;
+    else if (kb.panAxis === 'y' && slackY > 0) dy += slackY * pan;
+    dx = Math.min(0, Math.max(canvasW - drawW, dx));
+    dy = Math.min(slotY, Math.max(slotY + halfH - drawH, dy));
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, slotY, canvasW, halfH);
+    ctx.clip();
+    ctx.drawImage(bm, dx, dy, drawW, drawH);
+    ctx.restore();
+  }
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, halfH, canvasW, gap);
 }
 
 function drawCoverKenburns(ctx, canvasW, canvasH, source, srcW, srcH, t, kb) {
@@ -1456,7 +1548,9 @@ class Renderer {
     if (!asset) return;
     const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
     const kb = clip.kenburns || makeKenburnsParams(0);
-    if (asset.kind === 'photo') {
+    if (asset.kind === 'stack-pair') {
+      drawStackPair(ctx, w, h, asset.bitmaps, t, clip.kenburnsList);
+    } else if (asset.kind === 'photo') {
       if (clip.layout === 'blur-fill') {
         drawBlurFill(ctx, w, h, asset, t, kb);
       } else if (clip.layout === 'smart-crop') {
@@ -1525,6 +1619,13 @@ class Renderer {
       for (const a of this.assets.values()) {
         if (a.kind === 'photo' && a.bitmap && typeof a.bitmap.close === 'function') {
           try { a.bitmap.close(); } catch (_) {}
+        }
+        if (a.kind === 'stack-pair' && a.bitmaps) {
+          for (const bm of a.bitmaps) {
+            if (bm && typeof bm.close === 'function') {
+              try { bm.close(); } catch (_) {}
+            }
+          }
         }
         if (a.kind === 'video' && a.element) {
           try { a.element.pause(); } catch (_) {}
