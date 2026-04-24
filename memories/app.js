@@ -897,6 +897,20 @@ function pickLayout(item, outputOrientation) {
   return 'blur-fill';
 }
 
+function makeKenburnsParams(idx) {
+  // Deterministic per-clip params so re-renders don't shimmer.
+  // Pseudo-random from index (avoids Math.random in render loop).
+  const r1 = ((idx * 9301 + 49297) % 233280) / 233280;
+  const r2 = ((idx * 5417 + 12345) % 233280) / 233280;
+  return {
+    panAxis: r1 < 0.5 ? 'x' : 'y',
+    panSign: r2 < 0.5 ? -1 : 1,
+    startZoom: 1.00,
+    endZoom: 1.08,
+    panAmount: 0.05,
+  };
+}
+
 function buildTimeline(orderedItems, allClusters, opts) {
   const { perPhotoSec, totalSec } = planPerPhotoSec(orderedItems.length, opts);
   const timeline = [];
@@ -950,6 +964,7 @@ function buildTimeline(orderedItems, allClusters, opts) {
       ref: item,
       durationSec: perPhotoSec,
       layout: pickLayout(item, opts.orientation),
+      kenburns: makeKenburnsParams(timeline.length),
       overlays,
     });
 
@@ -990,6 +1005,252 @@ async function buildPlan(opts) {
   const ordered = orderForTimeline(selected, clusters);
   return { ordered, ...buildTimeline(ordered, clusters, opts) };
 }
+
+// =============================================================================
+// Step 5a — Renderer (canvas frame loop, photos with cover-kenburns,
+// title/closer cards). Subtitles, blur-fill, video playback, transitions
+// land in the next sub-steps.
+// =============================================================================
+
+function canvasDimsFor(orientation, resolutionShortSide) {
+  const r = parseInt(resolutionShortSide, 10) || 720;
+  if (orientation === 'square') return [r, r];
+  const long = Math.round(r * 16 / 9);
+  if (orientation === 'landscape') return [long, r];
+  return [r, long]; // portrait default
+}
+
+function applyStageOrientation(orientation) {
+  const wrap = dom.stage.parentElement;
+  wrap.classList.remove('landscape', 'square');
+  if (orientation === 'landscape') wrap.classList.add('landscape');
+  else if (orientation === 'square') wrap.classList.add('square');
+}
+
+// smoothstep — eases in and out for natural Ken-Burns motion
+function easeInOut(t) { return t * t * (3 - 2 * t); }
+
+async function preloadPhotoAssets(plan, onProgress) {
+  // For Step 5a we only decode photos. Videos resolve to a placeholder so
+  // the loop doesn't crash; their actual playback is wired in step 5d.
+  const assets = new Map();
+  let i = 0;
+  for (const clip of plan.timeline) {
+    i++;
+    if (clip.kind !== 'photo' && clip.kind !== 'video') continue;
+    if (clip.kind === 'video') {
+      assets.set(clip.photoId, { kind: 'video-stub' });
+      continue;
+    }
+    try {
+      const src = clip.ref.decodedBlob || clip.ref.file;
+      const bm = await createImageBitmap(src);
+      assets.set(clip.photoId, { kind: 'photo', bitmap: bm });
+    } catch (e) {
+      console.warn('preload failed', clip.ref.sourceName, e);
+      assets.set(clip.photoId, { kind: 'photo-failed' });
+    }
+    if (onProgress) onProgress(i / plan.timeline.length);
+  }
+  return assets;
+}
+
+function clearCanvas(ctx, w, h, fill = '#000') {
+  ctx.fillStyle = fill;
+  ctx.fillRect(0, 0, w, h);
+}
+
+function drawCoverKenburns(ctx, canvasW, canvasH, source, srcW, srcH, t, kb) {
+  const tEased = easeInOut(t);
+  const zoom = kb.startZoom + (kb.endZoom - kb.startZoom) * tEased;
+  const baseScale = Math.max(canvasW / srcW, canvasH / srcH);
+  const scale = baseScale * zoom;
+  const drawW = srcW * scale;
+  const drawH = srcH * scale;
+  // Centre + small directional pan inside the cropped area.
+  const slackX = drawW - canvasW;
+  const slackY = drawH - canvasH;
+  let dx = -slackX / 2;
+  let dy = -slackY / 2;
+  const pan = kb.panSign * kb.panAmount * tEased;
+  if (kb.panAxis === 'x') dx += slackX * pan;
+  else                     dy += slackY * pan;
+  ctx.drawImage(source, dx, dy, drawW, drawH);
+}
+
+function drawCardBackground(ctx, w, h) {
+  const grad = ctx.createLinearGradient(0, 0, w, h);
+  grad.addColorStop(0, '#0f172a');
+  grad.addColorStop(1, '#1e293b');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+}
+
+function fontStack() {
+  return '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", Arial, sans-serif';
+}
+
+function drawTitleCard(ctx, w, h, clip, localT) {
+  drawCardBackground(ctx, w, h);
+  // Fade in 0→0.4s, hold, fade out last 1.0s
+  const fadeIn = 0.5, fadeOut = 1.0;
+  const dur = clip.durationSec;
+  let alpha;
+  if (localT < fadeIn) alpha = localT / fadeIn;
+  else if (localT > dur - fadeOut) alpha = Math.max(0, (dur - localT) / fadeOut);
+  else alpha = 1;
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  const titleSize = Math.max(40, Math.round(h * 0.06));
+  ctx.font = `700 ${titleSize}px ${fontStack()}`;
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(clip.title || '', w / 2, h * 0.5 - h * 0.005);
+  if (clip.subtitle) {
+    const subSize = Math.max(20, Math.round(h * 0.028));
+    ctx.font = `400 ${subSize}px ${fontStack()}`;
+    ctx.fillStyle = '#94a3b8';
+    ctx.textBaseline = 'top';
+    ctx.fillText(clip.subtitle, w / 2, h * 0.5 + h * 0.015);
+  }
+  ctx.restore();
+}
+
+function drawCloserCard(ctx, w, h, clip, localT) {
+  drawCardBackground(ctx, w, h);
+  const fadeIn = 0.5, fadeOut = 1.0;
+  const dur = clip.durationSec;
+  let alpha;
+  if (localT < fadeIn) alpha = localT / fadeIn;
+  else if (localT > dur - fadeOut) alpha = Math.max(0, (dur - localT) / fadeOut);
+  else alpha = 1;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e2e8f0';
+  const subSize = Math.max(20, Math.round(h * 0.028));
+  ctx.font = `400 ${subSize}px ${fontStack()}`;
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(clip.title || '', w / 2, h * 0.5 - h * 0.005);
+  ctx.fillStyle = '#fff';
+  const titleSize = Math.max(36, Math.round(h * 0.05));
+  ctx.font = `700 ${titleSize}px ${fontStack()}`;
+  ctx.textBaseline = 'top';
+  ctx.fillText(clip.subtitle || 'Memories', w / 2, h * 0.5 + h * 0.015);
+  ctx.restore();
+}
+
+class Renderer {
+  constructor(canvas, plan, opts) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.plan = plan;
+    this.opts = opts;
+    this.assets = null;
+    this.running = false;
+    this.startWallTime = 0;
+    this.afHandle = 0;
+  }
+
+  setupCanvas() {
+    const [w, h] = canvasDimsFor(this.opts.orientation, this.opts.resolution);
+    this.canvas.width = w;
+    this.canvas.height = h;
+    applyStageOrientation(this.opts.orientation);
+  }
+
+  async preload(onProgress) {
+    this.assets = await preloadPhotoAssets(this.plan, onProgress);
+  }
+
+  renderFrame(elapsedSec) {
+    const ctx = this.ctx;
+    const w = this.canvas.width, h = this.canvas.height;
+    clearCanvas(ctx, w, h, '#000');
+
+    // Find the active clip — Step 5a uses hard cuts (no overlap).
+    const clip = this.plan.timeline.find(c =>
+      elapsedSec >= c.startSec && elapsedSec < c.startSec + c.durationSec
+    );
+    if (!clip) return;
+    const localT = elapsedSec - clip.startSec;
+
+    if (clip.kind === 'title') {
+      drawTitleCard(ctx, w, h, clip, localT);
+      return;
+    }
+    if (clip.kind === 'closer') {
+      drawCloserCard(ctx, w, h, clip, localT);
+      return;
+    }
+
+    const asset = this.assets.get(clip.photoId);
+    if (!asset || asset.kind === 'photo-failed') return;
+    if (asset.kind === 'video-stub') {
+      // Placeholder — Step 5d hooks in actual video playback. For now show
+      // the captured thumbnail (already a still) using the photo path if
+      // available, or a tinted card.
+      drawCardBackground(ctx, w, h);
+      ctx.save();
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = `400 ${Math.round(h * 0.025)}px ${fontStack()}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('🎞 動画クリップ (Step 5d で再生)', w / 2, h / 2);
+      ctx.restore();
+      return;
+    }
+    if (asset.kind === 'photo') {
+      const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
+      drawCoverKenburns(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height,
+                        t, clip.kenburns || makeKenburnsParams(0));
+    }
+  }
+
+  async play(onProgress) {
+    if (!this.assets) throw new Error('renderer not preloaded');
+    this.running = true;
+    this.startWallTime = performance.now();
+    return new Promise((resolve) => {
+      const tick = () => {
+        if (!this.running) { resolve(); return; }
+        const elapsed = (performance.now() - this.startWallTime) / 1000;
+        if (elapsed >= this.plan.totalSec) {
+          this.running = false;
+          // Final black frame
+          clearCanvas(this.ctx, this.canvas.width, this.canvas.height, '#000');
+          if (onProgress) onProgress(1);
+          resolve();
+          return;
+        }
+        this.renderFrame(elapsed);
+        if (onProgress) onProgress(elapsed / this.plan.totalSec);
+        this.afHandle = requestAnimationFrame(tick);
+      };
+      this.afHandle = requestAnimationFrame(tick);
+    });
+  }
+
+  stop() {
+    this.running = false;
+    if (this.afHandle) cancelAnimationFrame(this.afHandle);
+  }
+
+  dispose() {
+    this.stop();
+    if (this.assets) {
+      for (const a of this.assets.values()) {
+        if (a.kind === 'photo' && a.bitmap && typeof a.bitmap.close === 'function') {
+          try { a.bitmap.close(); } catch (_) {}
+        }
+      }
+    }
+    this.assets = null;
+  }
+}
+
+let activeRenderer = null;
 
 // -----------------------------------------------------------------------------
 // Batch ingest
@@ -1230,15 +1491,39 @@ async function onPreview() {
     alert('先に写真を読み込んでください');
     return;
   }
+  if (activeRenderer) {
+    activeRenderer.dispose();
+    activeRenderer = null;
+  }
   dom.previewBtn.disabled = true;
   const orig = dom.previewBtn.textContent;
   dom.previewBtn.textContent = '構成中…';
   try {
-    const plan = await buildPlan(readPlanOpts());
+    const opts = readPlanOpts();
+    const plan = await buildPlan(opts);
     renderPlanSummary(plan);
+
+    dom.stagePanel.style.display = 'flex';
+    dom.stageStatus.textContent = '🖼 アセット読み込み中…';
+    dom.stageOverlay.classList.remove('hidden');
+
+    const renderer = new Renderer(dom.stage, plan, opts);
+    renderer.setupCanvas();
+    activeRenderer = renderer;
+
+    dom.previewBtn.textContent = '🖼 読込中…';
+    await renderer.preload((p) => {
+      dom.stageStatus.textContent = `🖼 ${Math.round(p * 100)}% 読込中…`;
+    });
+
+    dom.stageOverlay.classList.add('hidden');
+    dom.previewBtn.textContent = '▶ 再生中…';
+    await renderer.play();
+    dom.stageOverlay.classList.remove('hidden');
+    dom.stageStatus.textContent = '⏸ プレビュー終了';
   } catch (e) {
     console.error(e);
-    showError('構成エラー: ' + (e.message || e));
+    showError('プレビューエラー: ' + (e.message || e));
   } finally {
     dom.previewBtn.disabled = false;
     dom.previewBtn.textContent = orig;
