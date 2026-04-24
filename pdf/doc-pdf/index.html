@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <title>資料⇄PDF | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+  <style>
+    .tabs {
+      display: flex; gap: 0.35rem;
+      background: #eef2f7;
+      padding: 0.3rem;
+      border-radius: 12px;
+      margin: 0 0 1rem;
+    }
+    .tab {
+      flex: 1;
+      padding: 0.65rem 0.8rem;
+      text-align: center;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #64748b;
+      border-radius: 9px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    .tab.active {
+      background: #fff;
+      color: #0f172a;
+      box-shadow: 0 1px 3px rgba(15,23,42,0.08);
+    }
+    .preview-host {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      margin-top: 1rem;
+      max-height: 68vh;
+      overflow: auto;
+      padding: 0.6rem;
+      -webkit-overflow-scrolling: touch;
+    }
+    /* docx-preview produces inner .docx-wrapper elements; give them a
+       sensible on-screen size so layout doesn't implode on mobile. */
+    .preview-host .docx-wrapper { background: #fff; padding: 0; }
+    .preview-host .docx { background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.06); margin: 8px auto; }
+    .preview-host table { border-collapse: collapse; margin: 6px 0; }
+    .preview-host th, .preview-host td { border: 1px solid #cbd5e1; padding: 4px 8px; font-size: 13px; }
+    .preview-host h2 { margin: 0.75rem 0 0.3rem; font-size: 1rem; color: #0f172a; }
+    .preview-host pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      margin: 0;
+    }
+
+    /* When printing, only the preview host should appear. The @page rule
+       forces A4 portrait with tight margins so the browser's Print→PDF
+       output matches the on-screen preview. */
+    @media print {
+      @page { size: A4 portrait; margin: 12mm; }
+      body * { visibility: hidden !important; }
+      .preview-host, .preview-host * { visibility: visible !important; }
+      .preview-host {
+        position: absolute !important;
+        left: 0; top: 0; right: 0;
+        max-height: none !important;
+        overflow: visible !important;
+        border: none !important;
+        padding: 0 !important;
+        box-shadow: none !important;
+      }
+    }
+
+    .convert-hint {
+      font-size: 0.78rem;
+      color: #64748b;
+      line-height: 1.6;
+      padding: 0.25rem 0.15rem;
+    }
+    .convert-hint b { color: #0f172a; }
+
+    .fmt-list {
+      display: flex; flex-wrap: wrap; gap: 0.3rem;
+      margin-top: 0.6rem; justify-content: center;
+    }
+    .fmt-chip {
+      font-size: 0.72rem;
+      color: #0369a1;
+      background: #e0f2fe;
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">🔄 資料⇄PDF</div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="tabs" role="tablist">
+      <div class="tab active" data-tab="to-pdf" role="tab">📄 → 📕 資料 を PDFに</div>
+      <div class="tab"        data-tab="from-pdf" role="tab">📕 → 📄 PDF を 資料に</div>
+    </div>
+
+    <!-- 資料 → PDF -->
+    <section id="to-pdf">
+      <div class="dropzone" id="dzTo">
+        <input type="file" id="fiTo" accept=".docx,.xlsx,.txt,.md,.html,.htm,.csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
+        <div class="icon">📄</div>
+        <p><b>タップして資料を選択</b></p>
+        <p class="sub">Word (.docx) / Excel (.xlsx) / テキスト / HTML / CSV</p>
+        <div class="fmt-list">
+          <span class="fmt-chip">DOCX</span>
+          <span class="fmt-chip">XLSX</span>
+          <span class="fmt-chip">CSV</span>
+          <span class="fmt-chip">TXT / MD</span>
+          <span class="fmt-chip">HTML</span>
+        </div>
+      </div>
+
+      <div id="toControls" style="display:none;" class="controls">
+        <div class="file-item">
+          <span class="name" id="toSrcName"></span>
+          <span class="size" id="toSrcSize"></span>
+        </div>
+        <div class="btn-row" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+          <button class="btn-primary" id="toPrintBtn" style="flex:1;min-width:200px;">🖨️ PDFとして保存 (印刷ダイアログ)</button>
+          <button class="btn-secondary" id="toClear" style="flex:0 0 auto;">別のファイル</button>
+        </div>
+        <p class="convert-hint">
+          プレビューをブラウザの <b>印刷ダイアログ → 「PDFとして保存」</b> で書き出します。<br>
+          この経路がクライアント側で一番レイアウトを崩さない方法です。iPhoneは Safari の共有から「ファイルに保存 / プリント」→ 拡大(プリント画面でピンチアウト)→ 共有 → 「ファイルに保存」 で PDFにできます。
+        </p>
+        <div id="previewHost" class="preview-host"></div>
+      </div>
+
+      <div id="toMsg"></div>
+
+      <div class="convert-hint" style="margin-top:1rem;">
+        <b>PPTX (PowerPoint)</b> はクライアント側でレイアウトを正確に再現しきれないため、このツールでは対象外です。スライド資料は Google スライド / Keynote / PowerPoint の「PDFとして書き出し」を推奨。
+      </div>
+    </section>
+
+    <!-- PDF → 資料 -->
+    <section id="from-pdf" style="display:none;">
+      <div class="dropzone" id="dzFrom">
+        <input type="file" id="fiFrom" accept="application/pdf" hidden />
+        <div class="icon">📕</div>
+        <p><b>タップしてPDFを選択</b></p>
+        <p class="sub">テキストを抽出して Word (.docx) または テキスト (.txt) で保存</p>
+      </div>
+
+      <div id="fromControls" style="display:none;" class="controls">
+        <div class="file-item">
+          <span class="name" id="fromSrcName"></span>
+          <span class="size" id="fromSrcSize"></span>
+        </div>
+        <div class="field">
+          <label for="outFormat">出力形式</label>
+          <select id="outFormat">
+            <option value="docx" selected>Word (.docx)</option>
+            <option value="txt">テキスト (.txt)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="outName">ファイル名</label>
+          <input type="text" id="outName" value="converted" />
+        </div>
+        <div class="btn-row" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+          <button class="btn-primary" id="fromRunBtn" style="flex:1;min-width:200px;">🔽 抽出してダウンロード</button>
+          <button class="btn-secondary" id="fromClear" style="flex:0 0 auto;">別のPDF</button>
+        </div>
+        <div class="progress" id="fromProg" style="display:none;">
+          <span id="fromProgText">準備中...</span>
+          <div class="progress-bar"><span id="fromProgBar" style="width:0%"></span></div>
+        </div>
+      </div>
+
+      <div id="fromMsg"></div>
+
+      <div class="convert-hint" style="margin-top:1rem;">
+        PDFから <b>Word への完全なレイアウト保持</b> はサーバー側ツール (Adobe / Microsoft など) が必要です。<br>
+        このツールは <b>テキスト内容のみ</b> を抽出します。書式・表組・画像は失われます。
+      </div>
+    </section>
+  </main>
+
+  <!-- Libs: pdf.js is shared, rest are loaded on demand -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.5/dist/docx-preview.min.js"></script>
+  <!-- docx-preview's UMD bundle registers `window.docx`. The docx library
+       (used for building .docx output) also writes to `window.docx` and would
+       clobber it, so capture docx-preview first then let docx overwrite. -->
+  <script>window.docxPreview = window.docx;</script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs } = PDFApp;
+    setupPdfJs();
+
+    // ---- Tab switching ----
+    const tabs = document.querySelectorAll('.tab');
+    const panes = {
+      'to-pdf': document.getElementById('to-pdf'),
+      'from-pdf': document.getElementById('from-pdf'),
+    };
+    tabs.forEach(t => t.addEventListener('click', () => {
+      tabs.forEach(x => x.classList.toggle('active', x === t));
+      const key = t.dataset.tab;
+      Object.entries(panes).forEach(([k, el]) => el.style.display = (k === key ? '' : 'none'));
+    }));
+
+    // ---- 資料 → PDF ----
+    const dzTo = document.getElementById('dzTo');
+    const fiTo = document.getElementById('fiTo');
+    const toControls = document.getElementById('toControls');
+    const toSrcName = document.getElementById('toSrcName');
+    const toSrcSize = document.getElementById('toSrcSize');
+    const toMsg = document.getElementById('toMsg');
+    const previewHost = document.getElementById('previewHost');
+
+    function extOf(f) { return (f.name.match(/\.([^.]+)$/) || [,''])[1].toLowerCase(); }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+
+    async function renderDocx(file) {
+      const buf = await file.arrayBuffer();
+      previewHost.innerHTML = '';
+      // docxPreview was stashed before the docx library overwrote `window.docx`.
+      await window.docxPreview.renderAsync(buf, previewHost, null, {
+        className: 'docx-render',
+        inWrapper: true,
+        ignoreWidth: false,
+        ignoreHeight: false,
+        ignoreFonts: false,
+        breakPages: true,
+        experimental: true,
+        useBase64URL: true,
+      });
+    }
+
+    function renderXlsx(file) {
+      return file.arrayBuffer().then(buf => {
+        const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+        let html = '';
+        for (const name of wb.SheetNames) {
+          const ws = wb.Sheets[name];
+          html += `<h2>${escapeHtml(name)}</h2>` + XLSX.utils.sheet_to_html(ws, { editable: false });
+        }
+        previewHost.innerHTML = html || '<p class="convert-hint">中身が読めませんでした。</p>';
+      });
+    }
+
+    function renderCsv(file) {
+      return file.text().then(text => {
+        // Use SheetJS to parse the CSV so edge cases (quoted commas, BOM) work.
+        const wb = XLSX.read(text, { type: 'string' });
+        const name = wb.SheetNames[0];
+        previewHost.innerHTML = XLSX.utils.sheet_to_html(wb.Sheets[name]);
+      });
+    }
+
+    async function renderText(file) {
+      const text = await file.text();
+      previewHost.innerHTML = '<pre>' + escapeHtml(text) + '</pre>';
+    }
+
+    async function renderHtml(file) {
+      const raw = await file.text();
+      // Strip scripts defensively so a paste-in doesn't execute code.
+      const cleaned = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+      previewHost.innerHTML = cleaned;
+    }
+
+    async function handleToFile(file) {
+      clearBox(toMsg);
+      toSrcName.textContent = file.name;
+      toSrcSize.textContent = fmtSize(file.size);
+      previewHost.innerHTML = '<p class="convert-hint">読み込み中…</p>';
+      dzTo.style.display = 'none';
+      toControls.style.display = 'flex';
+      const ext = extOf(file);
+      try {
+        if (ext === 'docx') await renderDocx(file);
+        else if (ext === 'xlsx' || ext === 'xls') await renderXlsx(file);
+        else if (ext === 'csv') await renderCsv(file);
+        else if (ext === 'html' || ext === 'htm') await renderHtml(file);
+        else if (ext === 'txt' || ext === 'md') await renderText(file);
+        else {
+          throw new Error('対応していない形式です (.' + ext + ')');
+        }
+      } catch (e) {
+        showError(toMsg, 'プレビューに失敗: ' + (e.message || e));
+        previewHost.innerHTML = '';
+      }
+    }
+
+    bindDropzone(dzTo, fiTo, (fs) => { if (fs[0]) handleToFile(fs[0]); });
+
+    document.getElementById('toClear').addEventListener('click', () => {
+      dzTo.style.display = 'block';
+      toControls.style.display = 'none';
+      previewHost.innerHTML = '';
+      clearBox(toMsg);
+    });
+
+    document.getElementById('toPrintBtn').addEventListener('click', () => {
+      // Browser's print dialog has a "PDFとして保存" destination — this is
+      // the most faithful client-side PDF export we can produce.
+      window.print();
+    });
+
+    // ---- PDF → 資料 ----
+    const dzFrom = document.getElementById('dzFrom');
+    const fiFrom = document.getElementById('fiFrom');
+    const fromControls = document.getElementById('fromControls');
+    const fromSrcName = document.getElementById('fromSrcName');
+    const fromSrcSize = document.getElementById('fromSrcSize');
+    const fromMsg = document.getElementById('fromMsg');
+    const outFormat = document.getElementById('outFormat');
+    const outName = document.getElementById('outName');
+    const fromProg = document.getElementById('fromProg');
+    const fromProgText = document.getElementById('fromProgText');
+    const fromProgBar = document.getElementById('fromProgBar');
+
+    let fromBytes = null;
+    let fromBaseName = 'converted';
+
+    bindDropzone(dzFrom, fiFrom, async (fs) => {
+      const f = fs[0]; if (!f) return;
+      fromBytes = new Uint8Array(await f.arrayBuffer());
+      fromBaseName = f.name.replace(/\.[^.]+$/, '') || 'converted';
+      fromSrcName.textContent = f.name;
+      fromSrcSize.textContent = fmtSize(f.size);
+      outName.value = safeFilename(fromBaseName + '_text', 'converted');
+      clearBox(fromMsg);
+      dzFrom.style.display = 'none';
+      fromControls.style.display = 'flex';
+    });
+
+    document.getElementById('fromClear').addEventListener('click', () => {
+      fromBytes = null;
+      dzFrom.style.display = 'block';
+      fromControls.style.display = 'none';
+      clearBox(fromMsg);
+      fromProg.style.display = 'none';
+    });
+
+    function setFromProgress(pct, text) {
+      fromProg.style.display = 'block';
+      fromProgText.textContent = text;
+      fromProgBar.style.width = Math.round(pct) + '%';
+    }
+
+    async function extractPdfText(bytes) {
+      let pdf;
+      try {
+        pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+      } catch (e) {
+        if (e && (e.name === 'PasswordException' || /password/i.test(String(e.message || e)))) {
+          throw new Error('このPDFはパスワードで保護されています。「🔓 パスワード解除」で解錠してから再度お試しください。');
+        }
+        throw e;
+      }
+      const pages = [];
+      for (let i = 1; i <= pdf.numPages; i++) {
+        setFromProgress(5 + (i - 1) / pdf.numPages * 85, `ページ ${i}/${pdf.numPages} からテキスト抽出中…`);
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        const lines = [];
+        let currentLine = [];
+        let lastY = null;
+        for (const item of content.items) {
+          if (!item || !item.str) continue;
+          const y = Math.round((item.transform ? item.transform[5] : 0) * 10) / 10;
+          if (lastY !== null && Math.abs(y - lastY) > 1) {
+            lines.push(currentLine.join(''));
+            currentLine = [];
+          }
+          currentLine.push(item.str);
+          lastY = y;
+        }
+        if (currentLine.length) lines.push(currentLine.join(''));
+        pages.push(lines.join('\n').trim());
+      }
+      return pages;
+    }
+
+    function buildDocxBlob(pages) {
+      // `docx` here is the document-building library (overwrote docx-preview's
+      // global above; docx-preview was saved to window.docxPreview).
+      const { Document, Packer, Paragraph, TextRun, PageBreak, HeadingLevel } = docx;
+      const children = [];
+      pages.forEach((pageText, idx) => {
+        if (idx > 0) {
+          children.push(new Paragraph({ children: [new PageBreak()] }));
+        }
+        children.push(new Paragraph({
+          heading: HeadingLevel.HEADING_2,
+          children: [new TextRun({ text: `ページ ${idx + 1}`, bold: true })],
+        }));
+        const lines = pageText.split(/\r?\n/);
+        for (const line of lines) {
+          children.push(new Paragraph({
+            children: [new TextRun({ text: line })],
+          }));
+        }
+      });
+      const doc = new Document({
+        sections: [{ children }],
+      });
+      return Packer.toBlob(doc);
+    }
+
+    document.getElementById('fromRunBtn').addEventListener('click', async () => {
+      if (!fromBytes) return;
+      const btn = document.getElementById('fromRunBtn');
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = '処理中…';
+      clearBox(fromMsg);
+      try {
+        setFromProgress(2, 'PDFを解析中…');
+        const pages = await extractPdfText(fromBytes);
+        const fmt = outFormat.value;
+        const base = safeFilename(outName.value, fromBaseName || 'converted');
+        setFromProgress(92, '保存ファイルを生成中…');
+        if (fmt === 'txt') {
+          const body = pages.map((t, i) => `=== ページ ${i + 1} ===\n${t}`).join('\n\n');
+          const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
+          download(blob, base + '.txt');
+        } else {
+          const blob = await buildDocxBlob(pages);
+          download(blob, base + '.docx');
+        }
+        setFromProgress(100, '✅ 完了');
+        const notice = document.createElement('div');
+        notice.className = 'success';
+        notice.textContent = `${pages.length}ページ分を抽出しました。`;
+        fromMsg.appendChild(notice);
+      } catch (e) {
+        showError(fromMsg, '失敗: ' + (e.message || e));
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+        setTimeout(() => { fromProg.style.display = 'none'; }, 900);
+      }
+    });
+  </script>
+</body>
+</html>
