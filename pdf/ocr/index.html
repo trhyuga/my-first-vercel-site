@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <title>画像文字抽出 (OCR) | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+  <style>
+    .ocr-output {
+      width: 100%;
+      min-height: 240px;
+      max-height: 480px;
+      background: #fff;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+      padding: 0.7rem 0.85rem;
+      border-radius: 10px;
+      font-family: 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      resize: vertical;
+      -webkit-appearance: none;
+    }
+    .ocr-output:focus { outline: none; border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.15); }
+    .stats { font-size: 0.78rem; color: #64748b; margin-top: 0.4rem; }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">📝 画像文字抽出 (OCR)</div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept="image/*,application/pdf" hidden />
+      <div class="icon">📝</div>
+      <p><b>タップして画像またはPDFを選択</b></p>
+      <p class="sub">JPG / PNG / WebP / HEIC / PDF (スキャンしただけのテキストなしPDFもOK)</p>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+      <div class="file-item">
+        <span class="name" id="srcName"></span>
+        <span class="size" id="srcSize"></span>
+      </div>
+      <div class="field">
+        <label>言語</label>
+        <div class="radio-row">
+          <label><input type="radio" name="lang" value="jpn+eng" checked><span>🇯🇵🇺🇸 日本語+英語 (推奨)</span></label>
+          <label><input type="radio" name="lang" value="jpn"><span>🇯🇵 日本語のみ</span></label>
+          <label><input type="radio" name="lang" value="eng"><span>🇺🇸 英語のみ</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <label>抽出モード</label>
+        <div class="radio-row">
+          <label><input type="radio" name="psm" value="6" checked><span>📄 標準 (段落)</span></label>
+          <label><input type="radio" name="psm" value="3"><span>🔍 自動検出</span></label>
+          <label><input type="radio" name="psm" value="11"><span>🧩 散らばった文字</span></label>
+        </div>
+      </div>
+      <button class="btn-primary" id="run">🔎 文字を抽出</button>
+      <button class="btn-secondary" id="clear">別のファイルを選ぶ</button>
+      <div class="progress" id="prog" style="display:none;">
+        <span id="progText">準備中...</span>
+        <div class="progress-bar"><span id="progBar" style="width:0%"></span></div>
+      </div>
+    </div>
+
+    <div id="msg"></div>
+
+    <div id="resultArea" style="display:none;margin-top:1rem;">
+      <div class="field">
+        <label for="ocrText">📝 抽出結果 <span id="stats" class="stats"></span></label>
+        <textarea id="ocrText" class="ocr-output" spellcheck="false"></textarea>
+      </div>
+      <div class="field">
+        <label for="outName">保存ファイル名</label>
+        <input type="text" id="outName" value="extracted" />
+      </div>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+        <button class="btn-primary" id="copyBtn" style="flex:1;min-width:140px;">📋 クリップボードにコピー</button>
+        <button class="btn-secondary" id="saveBtn" style="flex:1;min-width:140px;">💾 TXTで保存</button>
+      </div>
+    </div>
+
+    <p class="info-hint" style="margin-top:1rem;">
+      初回のみ OCRエンジン (Tesseract) と言語データ (約8MB / 言語) のダウンロードが発生します。<br>
+      手書きや極端にぼやけた文字は抽出精度が落ちます。スキャン解像度は 200dpi 以上を推奨。
+    </p>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/tesseract.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs } = PDFApp;
+    setupPdfJs();
+
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const controls = document.getElementById('controls');
+    const srcName = document.getElementById('srcName');
+    const srcSize = document.getElementById('srcSize');
+    const msg = document.getElementById('msg');
+    const prog = document.getElementById('prog');
+    const progText = document.getElementById('progText');
+    const progBar = document.getElementById('progBar');
+    const resultArea = document.getElementById('resultArea');
+    const ocrText = document.getElementById('ocrText');
+    const outName = document.getElementById('outName');
+    const stats = document.getElementById('stats');
+
+    let currentFile = null;
+
+    bindDropzone(dz, fi, async (fs) => {
+      const f = fs[0]; if (!f) return;
+      currentFile = f;
+      srcName.textContent = f.name;
+      srcSize.textContent = fmtSize(f.size);
+      const baseName = f.name.replace(/\.[^.]+$/, '') || 'extracted';
+      outName.value = safeFilename(baseName + '_text', 'extracted');
+      clearBox(msg);
+      dz.style.display = 'none';
+      controls.style.display = 'flex';
+      resultArea.style.display = 'none';
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      currentFile = null;
+      dz.style.display = 'block';
+      controls.style.display = 'none';
+      resultArea.style.display = 'none';
+      ocrText.value = '';
+      clearBox(msg);
+      prog.style.display = 'none';
+    });
+
+    function setProgress(pct, text) {
+      prog.style.display = 'block';
+      progText.textContent = text;
+      progBar.style.width = Math.round(pct) + '%';
+    }
+
+    // Render a PDF page (1-indexed) to a canvas at the given DPI.
+    async function pdfPageToCanvas(pdf, pageNum, dpi) {
+      const page = await pdf.getPage(pageNum);
+      const scale = dpi / 72;
+      const vp = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.ceil(vp.width);
+      canvas.height = Math.ceil(vp.height);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      return canvas;
+    }
+
+    async function imageFileToCanvas(file) {
+      const url = URL.createObjectURL(file);
+      try {
+        const img = await new Promise((res, rej) => {
+          const x = new Image();
+          x.onload = () => res(x);
+          x.onerror = rej;
+          x.src = url;
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        return canvas;
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      }
+    }
+
+    async function recognizeOnce(canvas, lang, psm, onProgress) {
+      // Tesseract.js v5: Tesseract.recognize accepts a HTMLCanvasElement.
+      const result = await Tesseract.recognize(canvas, lang, {
+        logger: (m) => {
+          if (m.status && typeof m.progress === 'number') {
+            onProgress && onProgress(m.status, m.progress);
+          }
+        },
+        // PSM 6 = single uniform block, 3 = auto, 11 = sparse text
+        tessedit_pageseg_mode: psm,
+      });
+      return (result && result.data && result.data.text) || '';
+    }
+
+    document.getElementById('run').addEventListener('click', async () => {
+      if (!currentFile) return;
+      const runBtn = document.getElementById('run');
+      runBtn.disabled = true;
+      const origLabel = runBtn.textContent;
+      runBtn.textContent = '抽出中…';
+      clearBox(msg);
+      ocrText.value = '';
+      resultArea.style.display = 'none';
+
+      const lang = document.querySelector('input[name="lang"]:checked').value;
+      const psm = document.querySelector('input[name="psm"]:checked').value;
+
+      const isPdf = currentFile.type === 'application/pdf' || /\.pdf$/i.test(currentFile.name);
+
+      try {
+        let canvases;
+        if (isPdf) {
+          setProgress(2, 'PDFを読み込み中…');
+          const bytes = new Uint8Array(await currentFile.arrayBuffer());
+          let pdf;
+          try {
+            pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+          } catch (e) {
+            if (e && (e.name === 'PasswordException' || /password/i.test(String(e.message || e)))) {
+              throw new Error('このPDFはパスワードで保護されています。「🔓 パスワード解除」で解錠してから再度お試しください。');
+            }
+            throw e;
+          }
+          canvases = [];
+          // Render at 200 DPI so the OCR has enough pixels even for small fonts.
+          for (let i = 1; i <= pdf.numPages; i++) {
+            setProgress(2 + (i / pdf.numPages) * 18, `PDFをレンダリング中… ${i}/${pdf.numPages}`);
+            canvases.push(await pdfPageToCanvas(pdf, i, 200));
+          }
+        } else {
+          setProgress(15, '画像を読み込み中…');
+          canvases = [await imageFileToCanvas(currentFile)];
+        }
+
+        // OCR each canvas in turn.
+        const total = canvases.length;
+        const parts = [];
+        for (let i = 0; i < total; i++) {
+          const pageBase = 20 + (i / total) * 78;
+          const text = await recognizeOnce(canvases[i], lang, psm, (status, p) => {
+            const offset = (1 / total) * 78 * p;
+            const niceStatus = (status === 'recognizing text')
+              ? `文字を解析中`
+              : (status === 'loading tesseract core' || status === 'initializing tesseract')
+                ? 'OCRエンジン初期化中'
+                : (status === 'loading language traineddata' || status === 'initializing api')
+                  ? '言語データを読込中'
+                  : status;
+            const label = total > 1
+              ? `${niceStatus}… ${i + 1}/${total} ページ`
+              : `${niceStatus}…`;
+            setProgress(pageBase + offset, label);
+          });
+          parts.push(total > 1 ? `--- ページ ${i + 1} ---\n${text.trim()}\n` : text);
+        }
+
+        const combined = parts.join('\n').trim();
+        setProgress(100, '✅ 抽出完了');
+        ocrText.value = combined;
+        const charCount = combined.length;
+        const lineCount = combined ? combined.split(/\n/).length : 0;
+        stats.textContent = `(${charCount.toLocaleString()}文字 / ${lineCount}行)`;
+        resultArea.style.display = 'block';
+        if (!combined) {
+          showError(msg, '文字を検出できませんでした。解像度の高い画像で再度お試しください。');
+        }
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = origLabel;
+        setTimeout(() => { prog.style.display = 'none'; }, 1200);
+      }
+    });
+
+    document.getElementById('copyBtn').addEventListener('click', async () => {
+      const text = ocrText.value;
+      const btn = document.getElementById('copyBtn');
+      const orig = btn.textContent;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          ocrText.focus(); ocrText.select();
+          document.execCommand('copy');
+        }
+        btn.textContent = '✅ コピーしました';
+      } catch (e) {
+        btn.textContent = '⚠ 失敗 (テキストを長押しでコピー)';
+      }
+      setTimeout(() => { btn.textContent = orig; }, 1800);
+    });
+
+    document.getElementById('saveBtn').addEventListener('click', () => {
+      const blob = new Blob([ocrText.value], { type: 'text/plain;charset=utf-8' });
+      const base = safeFilename(outName.value, 'extracted');
+      download(blob, base + '.txt');
+    });
+  </script>
+</body>
+</html>
