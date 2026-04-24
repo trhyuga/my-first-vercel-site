@@ -80,6 +80,20 @@ function setLoadProgress(pct, text) {
 function hideLoadProgress() {
   dom.loadProg.style.display = 'none';
 }
+// Wraps a promise with a timeout. Rejects with a descriptive error so a
+// stuck file (HEIC decode hang, video that never fires loadedmetadata,
+// network-stuck face-api weights, etc.) gets skipped instead of freezing
+// the whole pipeline.
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`タイムアウト (${label}, ${ms}ms)`)), ms);
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
+
 function fmtDate(ts) {
   const d = new Date(ts);
   const y = d.getFullYear();
@@ -107,8 +121,10 @@ async function decodableBlob(file) {
   if (typeof heic2any !== 'function') {
     throw new Error('HEIC変換ライブラリが読み込めませんでした (オフライン?)');
   }
-  const result = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 });
-  // heic2any returns a Blob or array of Blobs (for multi-image HEIC)
+  const result = await withTimeout(
+    heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 }),
+    20000,
+    'HEIC ' + file.name);
   return Array.isArray(result) ? result[0] : result;
 }
 
@@ -363,7 +379,7 @@ function isVideo(file) {
 }
 
 function loadVideoMetadata(url) {
-  return new Promise((resolve, reject) => {
+  return withTimeout(new Promise((resolve, reject) => {
     const v = document.createElement('video');
     v.muted = true;
     v.preload = 'metadata';
@@ -377,11 +393,11 @@ function loadVideoMetadata(url) {
       });
     }, { once: true });
     v.addEventListener('error', () => reject(new Error('動画メタデータの読み込みに失敗しました')), { once: true });
-  });
+  }), 10000, 'video metadata');
 }
 
 function extractVideoFrameAt(url, atSec, durationSec) {
-  return new Promise((resolve, reject) => {
+  return withTimeout(new Promise((resolve, reject) => {
     const v = document.createElement('video');
     v.muted = true;
     v.preload = 'auto';
@@ -414,7 +430,7 @@ function extractVideoFrameAt(url, atSec, durationSec) {
       }, 'image/jpeg', 0.9);
     }, { once: true });
     v.addEventListener('error', () => fail(new Error('動画フレームの抽出に失敗しました')), { once: true });
-  });
+  }), 12000, 'video frame extract');
 }
 
 // -----------------------------------------------------------------------------
@@ -911,14 +927,19 @@ function pickLayout(item, outputOrientation, idx) {
               : 9 / 16;
   const itemAR = item.width && item.height ? item.width / item.height : outAR;
   if (Math.abs(itemAR - outAR) / outAR < 0.15) return 'cover-kenburns';
-  // Aspect mismatch — alternate layouts so the suite of mismatched clips
-  // doesn't all look the same. Photos with detected faces lean smart-crop
-  // (zoom into the subject); landscape-with-no-faces lean blur-fill so we
-  // don't lose the wide composition.
-  const variants = item.hasFaces
-    ? ['smart-crop', 'smart-crop', 'blur-fill']
-    : ['blur-fill',  'smart-crop', 'blur-fill'];
-  return variants[idx % variants.length];
+  // Videos can't pre-bake a blurred background (frame is constantly
+  // changing). For now they always smart-crop — video-band layout (video
+  // centred + photo borders) lands in the next sub-step.
+  if (item.kind === 'video') return 'smart-crop';
+  // Photos — content-based decision (no idx rotation):
+  //   • clear face subject → smart-crop (zoom in on the person)
+  //   • multi-person group → smart-crop (frames the people)
+  //   • wide landscape without faces → blur-fill (preserves composition)
+  //   • portrait orientation in landscape output → smart-crop
+  if (item.hasFaces && item.faceScore > 0.15) return 'smart-crop';
+  if (item.faceCount > 1) return 'smart-crop';
+  if (item.orientation === 'portrait' && outputOrientation === 'landscape') return 'smart-crop';
+  return 'blur-fill';
 }
 
 function makeKenburnsParams(idx) {
@@ -1054,25 +1075,48 @@ function applyStageOrientation(orientation) {
 // smoothstep — eases in and out for natural Ken-Burns motion
 function easeInOut(t) { return t * t * (3 - 2 * t); }
 
-async function preloadPhotoAssets(plan, onProgress) {
-  // For Step 5a we only decode photos. Videos resolve to a placeholder so
-  // the loop doesn't crash; their actual playback is wired in step 5d.
+async function preloadAssets(plan, onProgress) {
   const assets = new Map();
   let i = 0;
   for (const clip of plan.timeline) {
     i++;
-    if (clip.kind !== 'photo' && clip.kind !== 'video') continue;
-    if (clip.kind === 'video') {
-      assets.set(clip.photoId, { kind: 'video-stub' });
-      continue;
-    }
-    try {
-      const src = clip.ref.decodedBlob || clip.ref.file;
-      const bm = await createImageBitmap(src);
-      assets.set(clip.photoId, { kind: 'photo', bitmap: bm });
-    } catch (e) {
-      console.warn('preload failed', clip.ref.sourceName, e);
-      assets.set(clip.photoId, { kind: 'photo-failed' });
+    if (clip.kind === 'photo') {
+      try {
+        const src = clip.ref.decodedBlob || clip.ref.file;
+        const bm = await withTimeout(createImageBitmap(src), 8000, clip.ref.sourceName);
+        assets.set(clip.photoId, { kind: 'photo', bitmap: bm });
+      } catch (e) {
+        console.warn('preload failed', clip.ref.sourceName, e);
+        assets.set(clip.photoId, { kind: 'photo-failed' });
+      }
+    } else if (clip.kind === 'video') {
+      try {
+        const v = document.createElement('video');
+        v.src = clip.ref.objectUrl;
+        v.muted = true;             // step 6 will route audio through Web Audio
+        v.playsInline = true;
+        v.preload = 'auto';
+        v.crossOrigin = 'anonymous';
+        await withTimeout(new Promise((res, rej) => {
+          v.addEventListener('loadedmetadata', res, { once: true });
+          v.addEventListener('error', () => rej(new Error('video load')), { once: true });
+        }), 10000, 'preload ' + clip.ref.sourceName);
+        // Pre-seek to the highlight start so the very first frame after
+        // activation is the right one.
+        try {
+          await withTimeout(new Promise((res) => {
+            v.addEventListener('seeked', res, { once: true });
+            v.currentTime = clip.ref.highlightStartSec || 0;
+          }), 4000, 'preseek ' + clip.ref.sourceName);
+        } catch (_) { /* non-fatal */ }
+        assets.set(clip.photoId, {
+          kind: 'video', element: v, playing: false,
+          startSec: clip.ref.highlightStartSec || 0,
+        });
+      } catch (e) {
+        console.warn('video preload failed', clip.ref.sourceName, e);
+        assets.set(clip.photoId, { kind: 'video-failed' });
+      }
     }
     if (onProgress) onProgress(i / plan.timeline.length);
   }
@@ -1146,31 +1190,27 @@ function drawBlurFill(ctx, canvasW, canvasH, asset, t, kb) {
 // otherwise centres slightly above the middle (people are usually upper-half).
 // This is the alternative to blur-fill for aspect mismatch — it loses some
 // edges but fills the screen and keeps motion natural.
-function drawSmartCrop(ctx, canvasW, canvasH, asset, focalPoint, t, kb) {
+function drawSmartCrop(ctx, canvasW, canvasH, source, srcW, srcH, focalPoint, t, kb) {
   const tEased = easeInOut(t);
   const startZoom = 1.04;
   const endZoom = 1.18;
   const zoom = startZoom + (endZoom - startZoom) * tEased;
-  const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
   const baseScale = Math.max(canvasW / srcW, canvasH / srcH);
   const scale = baseScale * zoom;
   const drawW = srcW * scale;
   const drawH = srcH * scale;
   const fx = (focalPoint && focalPoint.x) || 0.5;
-  const fy = (focalPoint && focalPoint.y) || 0.42; // slight upward bias
-  // Place the focal photo coord at (fx*canvasW, fy*canvasH).
+  const fy = (focalPoint && focalPoint.y) || 0.42;
   let dx = fx * canvasW - fx * drawW;
   let dy = fy * canvasH - fy * drawH;
-  // Add a gentle pan along the slack axis so the result doesn't feel static.
   const slackX = drawW - canvasW;
   const slackY = drawH - canvasH;
   const pan = kb.panSign * 0.05 * tEased;
   if (kb.panAxis === 'x' && slackX > 0) dx += slackX * pan;
   else if (kb.panAxis === 'y' && slackY > 0) dy += slackY * pan;
-  // Clamp so we never reveal the canvas background through the photo.
   dx = Math.min(0, Math.max(canvasW - drawW, dx));
   dy = Math.min(0, Math.max(canvasH - drawH, dy));
-  ctx.drawImage(asset.bitmap, dx, dy, drawW, drawH);
+  ctx.drawImage(source, dx, dy, drawW, drawH);
 }
 
 function drawCoverKenburns(ctx, canvasW, canvasH, source, srcW, srcH, t, kb) {
@@ -1336,7 +1376,7 @@ class Renderer {
   }
 
   async preload(onProgress) {
-    this.assets = await preloadPhotoAssets(this.plan, onProgress);
+    this.assets = await preloadAssets(this.plan, onProgress);
   }
 
   renderFrame(elapsedSec) {
@@ -1345,10 +1385,30 @@ class Renderer {
     clearCanvas(ctx, w, h, '#000');
 
     const active = this.findActive(elapsedSec);
-    // Outgoing clip drawn first (under), incoming on top — both with their
-    // own crossfade alpha set on globalAlpha.
+    const activeIds = new Set(active.map(({ clip }) => clip.photoId));
+
+    // Lifecycle: pause videos that just left the active set, fast-rewind for
+    // possible re-entry on loop replay.
+    if (this.assets) {
+      for (const [id, asset] of this.assets) {
+        if (asset.kind === 'video' && asset.playing && !activeIds.has(id)) {
+          try { asset.element.pause(); } catch (_) {}
+          asset.playing = false;
+        }
+      }
+    }
+
     for (const { clip, alpha } of active) {
       if (alpha <= 0) continue;
+      // Activate any video clip that just entered.
+      if (clip.kind === 'video') {
+        const asset = this.assets.get(clip.photoId);
+        if (asset && asset.kind === 'video' && !asset.playing) {
+          asset.element.muted = true; // Step 6 routes audio through Web Audio
+          asset.element.play().catch(() => {});
+          asset.playing = true;
+        }
+      }
       const localT = elapsedSec - clip.startSec;
       ctx.save();
       ctx.globalAlpha = alpha;
@@ -1393,25 +1453,35 @@ class Renderer {
       return;
     }
     const asset = this.assets.get(clip.photoId);
-    if (!asset || asset.kind === 'photo-failed') return;
-    if (asset.kind === 'video-stub') {
+    if (!asset) return;
+    const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
+    const kb = clip.kenburns || makeKenburnsParams(0);
+    if (asset.kind === 'photo') {
+      if (clip.layout === 'blur-fill') {
+        drawBlurFill(ctx, w, h, asset, t, kb);
+      } else if (clip.layout === 'smart-crop') {
+        drawSmartCrop(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height,
+                      clip.ref.focalPoint, t, kb);
+      } else {
+        drawCoverKenburns(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height, t, kb);
+      }
+    } else if (asset.kind === 'video') {
+      const v = asset.element;
+      const srcW = v.videoWidth || 1, srcH = v.videoHeight || 1;
+      if (clip.layout === 'smart-crop') {
+        drawSmartCrop(ctx, w, h, v, srcW, srcH, clip.ref.focalPoint, t, kb);
+      } else {
+        drawCoverKenburns(ctx, w, h, v, srcW, srcH, t, kb);
+      }
+    } else if (asset.kind === 'photo-failed' || asset.kind === 'video-failed') {
       drawCardBackground(ctx, w, h);
       ctx.save();
       ctx.fillStyle = '#94a3b8';
       ctx.font = `400 ${Math.round(h * 0.025)}px ${fontStack()}`;
       ctx.textAlign = 'center';
-      ctx.fillText('🎞 動画クリップ (Step 5d で再生)', w / 2, h / 2);
+      ctx.fillText(asset.kind === 'video-failed' ? '🚫 動画読み込み失敗' : '🚫 写真読み込み失敗',
+                   w / 2, h / 2);
       ctx.restore();
-    } else if (asset.kind === 'photo') {
-      const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
-      const kb = clip.kenburns || makeKenburnsParams(0);
-      if (clip.layout === 'blur-fill') {
-        drawBlurFill(ctx, w, h, asset, t, kb);
-      } else if (clip.layout === 'smart-crop') {
-        drawSmartCrop(ctx, w, h, asset, clip.ref.focalPoint, t, kb);
-      } else {
-        drawCoverKenburns(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height, t, kb);
-      }
     }
     // Subtitles / chapter labels — draw on top of the photo within the same
     // clip-alpha context so they fade with the crossfade.
@@ -1456,6 +1526,10 @@ class Renderer {
         if (a.kind === 'photo' && a.bitmap && typeof a.bitmap.close === 'function') {
           try { a.bitmap.close(); } catch (_) {}
         }
+        if (a.kind === 'video' && a.element) {
+          try { a.element.pause(); } catch (_) {}
+          try { a.element.removeAttribute('src'); a.element.load(); } catch (_) {}
+        }
       }
     }
     this.assets = null;
@@ -1499,11 +1573,13 @@ async function ingestFiles(files) {
   dom.settingsPanel.style.display = 'flex';
   setSettingsBusy(true);
 
-  // Kick off the face-api model load in parallel — it doesn't need to block
-  // the first photos getting decoded; we just await per file when needed.
-  const faceReady = ensureFaceApi().catch((e) => {
-    console.warn('face-api unavailable — proceeding without face scoring', e);
-  });
+  // Kick off the face-api model load in parallel — bounded so a stalled
+  // CDN request doesn't freeze the whole pipeline. If it fails we keep
+  // going without face scoring.
+  const faceReady = withTimeout(ensureFaceApi(), 30000, 'face-api models')
+    .catch((e) => {
+      console.warn('face-api unavailable — proceeding without face scoring', e);
+    });
 
   try {
     // Process photos first (cheap), videos last (potentially slow).
@@ -1517,7 +1593,10 @@ async function ingestFiles(files) {
       const f = queue[i];
       try {
         if (!isVideo(f)) await faceReady;
-        const p = await processFile(f);
+        // 25s hard cap per file. Photos with HEIC + face-scan take ~3-5s
+        // typically; videos with frame extract ~1-2s. A file that exceeds
+        // this is almost certainly stuck — skip and move on.
+        const p = await withTimeout(processFile(f), 25000, f.name);
         state.photos.push(p);
       } catch (e) {
         console.warn('skipped file', f.name, e);
