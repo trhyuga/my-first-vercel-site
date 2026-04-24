@@ -36,7 +36,6 @@ const dom = {
   loadProgBar: document.getElementById('loadProgBar'),
   reviewPanel: document.getElementById('reviewPanel'),
   reviewStats: document.getElementById('reviewStats'),
-  thumbs: document.getElementById('thumbs'),
   settingsPanel: document.getElementById('settingsPanel'),
   modeGroup: document.getElementById('modeGroup'),
   countField: document.getElementById('countField'),
@@ -461,7 +460,6 @@ async function processImage(file) {
     faceScore: face.faceScore,
     bad,
     badReason: bad ? `ブレ (鮮明度 ${blurScore.toFixed(0)})` : null,
-    manualOverride: null,
   };
 }
 
@@ -524,7 +522,6 @@ async function processVideo(file) {
     faceScore: face.faceScore,
     bad,
     badReason: bad ? `ブレ (鮮明度 ${blurScore.toFixed(0)})` : null,
-    manualOverride: null,
     // video-specific
     durationSec: dur,
     highlightStartSec,
@@ -630,115 +627,35 @@ async function ingestFiles(files) {
 }
 
 // -----------------------------------------------------------------------------
-// Review grid — only the *best* of each similarity group is shown. The other
-// members are silently kept as "alternates" inside the group; user can tap
-// the rep to expand and pick a different one (later step), and the +N badge
-// signals duplicates were collapsed.
+// Review summary — no thumbnail grid. The dedup / best-pick logic still runs
+// (its result feeds the timeline), but the user sees only a one-line summary
+// of what was loaded.
 // -----------------------------------------------------------------------------
-function classifyPhoto(p) {
-  if (p.manualOverride === 'on') return 'on';
-  if (p.manualOverride === 'off') return 'bad';
-  if (p.bad) return 'bad';
-  return 'on';
-}
-
 function renderReview() {
   dom.reviewPanel.style.display = 'flex';
   const prefOri = getOutputOrientation();
   const groups = state.groups || [];
-  const counts = { on: 0, bad: 0, dups: 0, faces: 0 };
-  const frag = document.createDocumentFragment();
 
+  let kept = 0, dropped = 0, duplicatesMerged = 0, withFaces = 0, videos = 0;
   for (const g of groups) {
     const rep = pickBestOfGroup(g, prefOri);
-    rep.groupId = rep.id;
-    rep.groupSize = g.length;
     for (const m of g) m.isRep = (m === rep);
-
-    const cls = classifyPhoto(rep);
-    counts[cls]++;
-    counts.dups += (g.length - 1);
-    if (rep.hasFaces) counts.faces++;
-
-    const el = document.createElement('div');
-    el.className = 'thumb ' + cls;
-    const videoInfo = rep.kind === 'video'
-      ? `動画 ${rep.durationSec.toFixed(1)}s — ハイライト ${rep.highlightStartSec.toFixed(1)}s〜 (${rep.highlightSource === 'audio-peak' ? '音声ピーク' : '推定'})`
-      : null;
-    const faceInfo = rep.hasFaces
-      ? `${rep.faceCount}人 顔スコア ${rep.faceScore.toFixed(2)}`
-      : '顔検出なし';
-    const groupInfo = g.length > 1
-      ? `${g.length}枚の類似グループから厳選`
-      : null;
-    el.title = [
-      rep.sourceName,
-      fmtDate(rep.ts) + (rep.tsSource === 'mtime' ? ' (EXIFなし)' : ''),
-      videoInfo,
-      faceInfo,
-      `鮮明度 ${rep.blurScore.toFixed(0)} / 向き ${rep.orientation}`,
-      rep.gps ? `GPS: ${rep.gps.lat.toFixed(4)}, ${rep.gps.lng.toFixed(4)}` : 'GPSなし',
-      groupInfo,
-      rep.badReason ? `除外: ${rep.badReason}` : '',
-    ].filter(Boolean).join('\n');
-    el.dataset.id = rep.id;
-
-    const img = document.createElement('img');
-    img.loading = 'lazy';
-    img.src = rep.thumbUrl;
-    el.appendChild(img);
-
-    const badge = document.createElement('span');
-    badge.className = 'badge';
-    badge.textContent = fmtDate(rep.ts).slice(5);
-    el.appendChild(badge);
-
-    const stateEl = document.createElement('span');
-    stateEl.className = 'state';
-    stateEl.textContent = cls === 'on' ? '✅' : '❌';
-    el.appendChild(stateEl);
-
-    if (rep.kind === 'video') {
-      const vbadge = document.createElement('span');
-      vbadge.className = 'video-badge';
-      vbadge.textContent = `▶ ${rep.durationSec.toFixed(1)}s`;
-      el.appendChild(vbadge);
-    }
-
-    if (g.length > 1) {
-      const gbadge = document.createElement('span');
-      gbadge.className = 'group-badge';
-      gbadge.textContent = `+${g.length - 1}`;
-      el.appendChild(gbadge);
-    }
-
-    if (rep.hasFaces && rep.faceScore > 0.4) {
-      const happy = document.createElement('span');
-      happy.className = 'happy-badge';
-      happy.textContent = '😊';
-      el.appendChild(happy);
-    }
-
-    el.addEventListener('click', () => toggleManual(rep.id));
-    frag.appendChild(el);
+    if (rep.bad) dropped++; else kept++;
+    duplicatesMerged += (g.length - 1);
+    if (rep.hasFaces) withFaces++;
+    if (rep.kind === 'video') videos++;
   }
 
-  dom.thumbs.innerHTML = '';
-  dom.thumbs.appendChild(frag);
-
-  const totalGroups = groups.length;
-  const allPhotos = state.photos.length;
-  dom.reviewStats.textContent =
-    `${allPhotos}枚 → ${totalGroups}グループ — ✅${counts.on} / ❌${counts.bad} / 似たもの${counts.dups}枚を統合 / 笑顔${counts.faces}枚`;
-}
-
-function toggleManual(id) {
-  const p = state.photos.find(x => x.id === id);
-  if (!p) return;
-  const cur = classifyPhoto(p);
-  if (cur === 'on') p.manualOverride = 'off';
-  else p.manualOverride = 'on';
-  renderReview();
+  const total = state.photos.length;
+  const parts = [
+    `${total}件 (写真+動画)`,
+    `採用${kept}`,
+    dropped ? `ブレ等で除外${dropped}` : null,
+    duplicatesMerged ? `似たもの${duplicatesMerged}枚を統合` : null,
+    videos ? `動画${videos}` : null,
+    withFaces ? `笑顔/人物${withFaces}` : null,
+  ].filter(Boolean);
+  dom.reviewStats.textContent = parts.join(' / ');
 }
 
 // -----------------------------------------------------------------------------
