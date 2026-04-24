@@ -447,7 +447,38 @@
       });
     }
 
-    async function loadMedia(file) {
+    // ---- Audio routing ----
+    // srcVideo.muted = true silences Web Audio / captureStream output on every
+    // major browser, so we cannot rely on it while recording. Instead, once a
+    // video is loaded we wire the element's audio through an AudioContext:
+    //   MediaElementAudioSourceNode → MediaStreamDestination
+    // and intentionally do NOT connect to audioCtx.destination, so the
+    // element's speaker path stays silent while the destination stream
+    // carries the audio into MediaRecorder. createMediaElementSource() can
+    // only be called ONCE per element, so we cache it on first use.
+    let audioRouting = null;
+    async function ensureAudioRouting() {
+      if (audioRouting) return audioRouting;
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        const ctx = new Ctx();
+        if (ctx.state === 'suspended') { try { await ctx.resume(); } catch (e) {} }
+        const source = ctx.createMediaElementSource(srcVideo);
+        const dest = ctx.createMediaStreamDestination();
+        source.connect(dest);
+        audioRouting = { ctx, source, dest };
+        return audioRouting;
+      } catch (e) {
+        return null;
+      }
+    }
+    async function teardownAudioRouting() {
+      if (!audioRouting) return;
+      try { audioRouting.source.disconnect(); } catch (e) {}
+      try { await audioRouting.ctx.close(); } catch (e) {}
+      audioRouting = null;
+    }
       if (file.type.startsWith('video/')) return loadVideo(file);
       if (file.type.startsWith('image/')) return loadImage(file);
       alert('動画または画像ファイルを選択してください');
@@ -456,6 +487,8 @@
     async function loadVideo(file) {
       mediaKind = 'video';
       originalSize = file.size;
+      // Tear down previous audio routing so the new video can be re-sourced.
+      await teardownAudioRouting();
       srcImage.style.display = 'none';
       srcVideo.style.display = '';
       srcVideo.src = URL.createObjectURL(file);
@@ -521,6 +554,7 @@
       processStatus.innerHTML = '';
       detectStatus.innerHTML = '';
       window._blurredBlob = null;
+      await teardownAudioRouting();
       if (window._opfsName) {
         try {
           const root = await navigator.storage.getDirectory();
@@ -991,12 +1025,30 @@
         // to keep the in-memory chunk buffer small.
         const captureFps = useOpfs ? 60 : 30;
         const canvasStream = out.captureStream(captureFps);
-        try {
-          if (typeof srcVideo.captureStream === 'function') {
-            const s = srcVideo.captureStream();
-            s.getAudioTracks().forEach(t => canvasStream.addTrack(t));
-          }
-        } catch (e) { /* audio optional */ }
+
+        // Route the source video's audio through AudioContext →
+        // MediaStreamDestination so we can feed real audio into MediaRecorder
+        // without routing it to the user's speakers. createMediaElementSource
+        // reroutes the element's audio away from the built-in path; because
+        // we don't connect to audioCtx.destination, speakers stay silent.
+        let audioTrackAdded = false;
+        const routing = await ensureAudioRouting();
+        if (routing && routing.dest.stream.getAudioTracks().length) {
+          routing.dest.stream.getAudioTracks().forEach(t => {
+            canvasStream.addTrack(t); audioTrackAdded = true;
+          });
+        }
+        // Last-resort fallback: if AudioContext setup failed (rare),
+        // try srcVideo.captureStream(). On most browsers this will be
+        // silent when muted=false but is better than nothing.
+        if (!audioTrackAdded) {
+          try {
+            if (typeof srcVideo.captureStream === 'function') {
+              const s = srcVideo.captureStream();
+              s.getAudioTracks().forEach(t => { canvasStream.addTrack(t); audioTrackAdded = true; });
+            }
+          } catch (e) { /* audio optional */ }
+        }
 
         const mime = pickSupportedMime();
         const srcDurSec = srcVideo.duration || 10;
@@ -1086,8 +1138,11 @@
         let lastDetectAtMs = -Infinity;
         let detectBusy = false;
 
-        // Muted must be set BEFORE play() so iOS Safari allows inline playback.
-        srcVideo.muted = true;
+        // Important: do NOT mute the element. The audio comes out of
+        // AudioContext routing (which stays silent at the speakers because
+        // we don't connect to audioCtx.destination) — setting muted=true
+        // here would silence the MediaElementAudioSourceNode as well.
+        srcVideo.muted = false;
         srcVideo.playbackRate = 1;
         srcVideo.pause();
         srcVideo.currentTime = 0;
