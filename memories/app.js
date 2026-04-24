@@ -13,8 +13,16 @@
 // =============================================================================
 
 const BLUR_REJECT_THRESHOLD = 60;        // Laplacian variance below this → blurry
+const DARK_LUMA_THRESHOLD = 22;          // mean luminance (0-255) below = pocket/lens-cap
+const FLAT_VARIANCE_THRESHOLD = 30;      // luminance variance below = nearly uniform (no content)
+const VIDEO_MIN_DURATION_SEC = 1.5;      // shorter clips are likely accidental
 const DHASH_HAMMING_THRESHOLD = 10;      // 0-64; lower = stricter similarity
 const DEDUP_TIME_WINDOW_MS = 90 * 1000;  // similar shots must be < 90s apart
+const GPS_CLUSTER_RADIUS_M = 200;        // photos closer than this merge into one cluster
+const TITLE_CARD_SEC = 3.5;
+const CLOSER_CARD_SEC = 2.5;
+const PHOTO_MIN_SEC = 1.5;
+const PHOTO_MAX_SEC = 6.0;
 
 // -----------------------------------------------------------------------------
 // State
@@ -132,6 +140,34 @@ function downscaleToCanvas(img, maxDim) {
 // downscaled greyscale. It'll be conservative enough to keep reasonable photos
 // while catching obvious hand-shake shots.
 // -----------------------------------------------------------------------------
+// Mean + variance of luminance — used to spot lens-cap / pocket / blank-wall
+// shots that should be rejected even when sharp.
+function frameLumaStats(canvas) {
+  const w = canvas.width, h = canvas.height;
+  const { data } = canvas.getContext('2d').getImageData(0, 0, w, h);
+  let sum = 0, sumSq = 0, n = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    sum += lum;
+    sumSq += lum * lum;
+    n++;
+  }
+  const mean = sum / n;
+  return { mean, variance: sumSq / n - mean * mean };
+}
+
+// Build the "this photo/frame is unusable" reason, or null if acceptable.
+function rejectionReason({ blurScore, lumaMean, lumaVar, durationSec, hasVideoStream }) {
+  if (hasVideoStream === false) return '映像トラックなし';
+  if (durationSec !== undefined && durationSec < VIDEO_MIN_DURATION_SEC) {
+    return `短すぎ (${durationSec.toFixed(1)}s)`;
+  }
+  if (lumaMean < DARK_LUMA_THRESHOLD) return '暗すぎ (レンズカバー / ポケット撮影?)';
+  if (lumaVar < FLAT_VARIANCE_THRESHOLD) return 'ほぼ単色 (内容なし?)';
+  if (blurScore < BLUR_REJECT_THRESHOLD) return `ブレ (鮮明度 ${blurScore.toFixed(0)})`;
+  return null;
+}
+
 function laplacianVariance(canvas) {
   const w = canvas.width, h = canvas.height;
   const { data } = canvas.getContext('2d').getImageData(0, 0, w, h);
@@ -386,6 +422,7 @@ async function processImage(file) {
   const thumb = thumbDataUrl(img, 220);
   const analysisCanvas = downscaleToCanvas(img, 256);
   const blurScore = laplacianVariance(analysisCanvas);
+  const { mean: lumaMean, variance: lumaVar } = frameLumaStats(analysisCanvas);
   const dHash = computeDHash(analysisCanvas);
 
   // Face quality on a slightly larger canvas — TinyFaceDetector struggles
@@ -396,7 +433,8 @@ async function processImage(file) {
   const w = img.naturalWidth, h = img.naturalHeight;
   const orientation = w === h ? 'square' : (w > h ? 'landscape' : 'portrait');
 
-  const bad = blurScore < BLUR_REJECT_THRESHOLD;
+  const badReason = rejectionReason({ blurScore, lumaMean, lumaVar });
+  const bad = !!badReason;
 
   return {
     id: nextId(),
@@ -419,35 +457,45 @@ async function processImage(file) {
     faceCount: face.faceCount,
     faceScore: face.faceScore,
     bad,
-    badReason: bad ? `ブレ (鮮明度 ${blurScore.toFixed(0)})` : null,
+    badReason,
   };
 }
 
 async function processVideo(file) {
   const url = URL.createObjectURL(file);
   const meta = await loadVideoMetadata(url);
-  const dur = meta.durationSec || 0.001;
+  const dur = meta.durationSec || 0;
+  const w = meta.width || 0;
+  const h = meta.height || 0;
+  const hasVideoStream = w > 0 && h > 0;
 
   // Simple heuristic: skip the (often unsteady) intro and treat ~30% in as
   // the highlight start. Audio-RMS analysis and face-api.js were dropped
   // here because they made long-video ingest unbearably slow for marginal
   // benefit; videos already always live in their own solo group.
-  const highlightStartSec = dur * 0.30;
+  const highlightStartSec = Math.max(0, dur * 0.30);
 
-  // Sample a single frame just inside the highlight for the thumbnail and
-  // blur check. No face scoring on videos.
-  const frameAt = Math.max(0, Math.min(dur - 0.1, highlightStartSec + 0.4));
-  const img = await extractVideoFrameAt(url, frameAt, dur);
+  // For zero-content videos, skip the seek/draw entirely.
+  let blurScore = 0, lumaMean = 0, lumaVar = 0, thumb = '';
+  if (hasVideoStream && dur > 0.2) {
+    const frameAt = Math.max(0, Math.min(dur - 0.1, highlightStartSec + 0.4));
+    const img = await extractVideoFrameAt(url, frameAt, dur);
+    thumb = thumbDataUrl(img, 220);
+    const analysisCanvas = downscaleToCanvas(img, 256);
+    blurScore = laplacianVariance(analysisCanvas);
+    const stats = frameLumaStats(analysisCanvas);
+    lumaMean = stats.mean;
+    lumaVar = stats.variance;
+  }
 
-  const thumb = thumbDataUrl(img, 220);
-  const analysisCanvas = downscaleToCanvas(img, 256);
-  const blurScore = laplacianVariance(analysisCanvas);
-
-  const w = meta.width || img.naturalWidth;
-  const h = meta.height || img.naturalHeight;
   const orientation = w === h ? 'square' : (w > h ? 'landscape' : 'portrait');
   const ts = file.lastModified || Date.now();
-  const bad = blurScore < BLUR_REJECT_THRESHOLD;
+  const badReason = rejectionReason({
+    blurScore, lumaMean, lumaVar,
+    durationSec: dur,
+    hasVideoStream,
+  });
+  const bad = !!badReason;
 
   return {
     id: nextId(),
@@ -470,7 +518,7 @@ async function processVideo(file) {
     faceCount: 0,
     faceScore: 0,
     bad,
-    badReason: bad ? `ブレ (鮮明度 ${blurScore.toFixed(0)})` : null,
+    badReason,
     // video-specific
     durationSec: dur,
     highlightStartSec,
@@ -532,6 +580,379 @@ function getOutputOrientation() {
   if (!sel) return 'portrait';
   const v = sel.value;
   return v === 'landscape' || v === 'square' ? v : 'portrait';
+}
+
+// -----------------------------------------------------------------------------
+// GPS clustering + landmark name resolution
+// -----------------------------------------------------------------------------
+function haversineMeters(a, b) {
+  const R = 6371000;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLng = (b.lng - a.lng) * Math.PI / 180;
+  const φ1 = a.lat * Math.PI / 180;
+  const φ2 = b.lat * Math.PI / 180;
+  const x = Math.sin(dLat / 2) ** 2 + Math.sin(dLng / 2) ** 2 * Math.cos(φ1) * Math.cos(φ2);
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+function clusterByGps(items, radiusM = GPS_CLUSTER_RADIUS_M) {
+  // Greedy clustering with running centroid. Items missing GPS are kept apart
+  // (each becomes its own singleton "no-gps" cluster) so they interleave by
+  // time without forcing them to merge with anyone.
+  const clusters = [];
+  let noGpsCounter = 0;
+  for (const p of items) {
+    if (!p.gps) {
+      clusters.push({
+        id: `nogps_${noGpsCounter++}`,
+        lat: null, lng: null,
+        items: [p],
+        landmark: null,
+        label: null,
+        hasGps: false,
+      });
+      continue;
+    }
+    let placed = null, placedDist = Infinity;
+    for (const c of clusters) {
+      if (!c.hasGps) continue;
+      const d = haversineMeters(c, p.gps);
+      if (d <= radiusM && d < placedDist) {
+        placed = c; placedDist = d;
+      }
+    }
+    if (placed) {
+      placed.items.push(p);
+      const n = placed.items.length;
+      placed.lat = (placed.lat * (n - 1) + p.gps.lat) / n;
+      placed.lng = (placed.lng * (n - 1) + p.gps.lng) / n;
+    } else {
+      clusters.push({
+        id: `gps_${clusters.length}`,
+        lat: p.gps.lat, lng: p.gps.lng,
+        items: [p],
+        landmark: null,
+        label: null,
+        hasGps: true,
+      });
+    }
+  }
+  return clusters;
+}
+
+function resolveLandmark(cluster) {
+  if (!cluster.hasGps) return null;
+  const list = window.LANDMARKS || [];
+  let best = null, bestSlack = Infinity;
+  for (const lm of list) {
+    const d = haversineMeters({ lat: cluster.lat, lng: cluster.lng }, { lat: lm.lat, lng: lm.lng });
+    if (d <= lm.radius) {
+      // Prefer the landmark whose radius is *most* exceeded (i.e. clearest match).
+      const slack = lm.radius - d;
+      if (slack < bestSlack) { bestSlack = slack; best = lm; }
+    }
+  }
+  return best;
+}
+
+// Soft fallback when a cluster doesn't match any curated landmark. Throttled
+// to one request per ~1.1s as Nominatim's usage policy requires; failures are
+// silent (network down, CORS blocked, rate-limited — we just skip).
+let nominatimQueue = Promise.resolve();
+function reverseGeocodeNominatim(lat, lng) {
+  const job = nominatimQueue.then(async () => {
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=14&accept-language=ja`;
+      const res = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+        // The Referer header that the browser sends is what Nominatim's
+        // anti-abuse filter uses to identify our app.
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const a = data.address || {};
+      const candidates = [
+        a.tourism, a.attraction, a.amusement_park,
+        a.suburb, a.neighbourhood,
+        a.city_district, a.town, a.village, a.city,
+        a.county, a.state, a.country,
+      ].filter(Boolean);
+      return candidates[0] || data.display_name || null;
+    } catch (_) { return null; }
+  });
+  // Pace subsequent requests regardless of success/failure.
+  nominatimQueue = job.then(() => new Promise(r => setTimeout(r, 1100)));
+  return job;
+}
+
+async function nameClusters(clusters, useNominatim = true) {
+  // Pass 1: landmark dictionary (instant)
+  for (const c of clusters) {
+    const lm = resolveLandmark(c);
+    if (lm) {
+      c.landmark = lm;
+      c.label = lm.short || lm.name;
+    }
+  }
+  // Pass 2: Nominatim reverse-geocode for unmatched clusters with GPS
+  if (useNominatim) {
+    const pending = clusters.filter(c => c.hasGps && !c.label);
+    for (const c of pending) {
+      const name = await reverseGeocodeNominatim(c.lat, c.lng);
+      if (name) c.label = name;
+    }
+  }
+  // Pass 3: assign generic labels to the rest (keeps GPS-less clusters
+  // distinguishable in the chapter strip without misleading names).
+  let alpha = 0;
+  for (const c of clusters) {
+    if (!c.label) {
+      if (c.hasGps) c.label = `エリア ${String.fromCharCode(65 + alpha)}`;
+      // For no-GPS singletons we DON'T assign a label — they don't show as
+      // a distinct chapter, just inherit context from the surrounding photos.
+      alpha++;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Mode-based selection
+// -----------------------------------------------------------------------------
+function repScore(p) {
+  let s = 0;
+  if (p.bad) s -= 5;
+  if (p.faceScore !== undefined) s += p.faceScore * 1.4;
+  s += Math.log10(Math.max(1, p.blurScore)) * 0.5;
+  return s;
+}
+
+function diversifyAcrossClusters(reps, n) {
+  // Round-robin top-scored picks across clusters so a single dense location
+  // doesn't dominate the recommended cut.
+  const byCluster = new Map();
+  for (const r of reps) {
+    const cid = r.clusterId || 'solo';
+    if (!byCluster.has(cid)) byCluster.set(cid, []);
+    byCluster.get(cid).push(r);
+  }
+  for (const list of byCluster.values()) list.sort((a, b) => repScore(b) - repScore(a));
+  const queues = [...byCluster.values()];
+  const picked = [];
+  while (picked.length < n) {
+    let progress = false;
+    for (const q of queues) {
+      if (q.length && picked.length < n) {
+        picked.push(q.shift());
+        progress = true;
+      }
+    }
+    if (!progress) break;
+  }
+  return picked;
+}
+
+function selectByMode(reps, mode, opts) {
+  // reps already filtered to non-bad + assigned a clusterId
+  const usable = reps.filter(r => !r.bad);
+  if (mode === 'all-unique') return usable.slice();
+  if (mode === 'recommended') return diversifyAcrossClusters(usable, Math.min(15, usable.length));
+  if (mode === 'count') {
+    const n = Math.max(3, Math.min(usable.length, opts.count || 15));
+    return diversifyAcrossClusters(usable, n);
+  }
+  if (mode === 'seconds') {
+    // Density-bounded: at least PHOTO_MIN_SEC per slide. Pick top-by-score
+    // diversified across clusters.
+    const slots = Math.max(3, Math.floor(opts.seconds / PHOTO_MIN_SEC));
+    const n = Math.min(usable.length, slots);
+    return diversifyAcrossClusters(usable, n);
+  }
+  return usable.slice();
+}
+
+// -----------------------------------------------------------------------------
+// Timeline construction
+// -----------------------------------------------------------------------------
+function ymdString(ts) {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function fmtJpDate(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+function fmtTitleDateRange(timestamps) {
+  const ymds = [...new Set(timestamps.map(ymdString))].sort();
+  if (!ymds.length) return '';
+  if (ymds.length === 1) {
+    const [y, m, d] = ymds[0].split('-');
+    return `${y}.${m}.${d}`;
+  }
+  const [y1, m1, d1] = ymds[0].split('-');
+  const [y2, m2, d2] = ymds[ymds.length - 1].split('-');
+  if (y1 === y2 && m1 === m2) return `${y1}.${m1}.${d1} – ${d2}`;
+  if (y1 === y2) return `${y1}.${m1}.${d1} – ${m2}.${d2}`;
+  return `${y1}.${m1}.${d1} – ${y2}.${m2}.${d2}`;
+}
+function fmtLocationSummary(clusters) {
+  const labels = clusters.map(c => c.label).filter(Boolean);
+  const u = [...new Set(labels)];
+  if (!u.length) return '';
+  if (u.length === 1) return u[0];
+  if (u.length <= 3) return u.join(' / ');
+  return `${u.slice(0, 2).join(' / ')} ほか`;
+}
+
+function orderForTimeline(selected, clusters) {
+  // Keep same-cluster items contiguous, ordered by the cluster's earliest
+  // timestamp; within a cluster, oldest first. This matches the user's rule:
+  // "同じ場所だと判断できるものはなるべく固めて順に配置".
+  const cidOf = (p) => p.clusterId || 'solo';
+  const byCid = new Map();
+  for (const p of selected) {
+    const k = cidOf(p);
+    if (!byCid.has(k)) byCid.set(k, []);
+    byCid.get(k).push(p);
+  }
+  for (const list of byCid.values()) list.sort((a, b) => a.ts - b.ts);
+  const cidOrder = [...byCid.entries()]
+    .sort((a, b) => a[1][0].ts - b[1][0].ts)
+    .map(([k]) => k);
+  return cidOrder.flatMap(k => byCid.get(k));
+}
+
+function distinctDays(items) {
+  return [...new Set(items.map(p => ymdString(p.ts)))];
+}
+
+function planPerPhotoSec(itemCount, opts) {
+  // Returns { perPhotoSec, totalSec } given the user's mode + BGM.
+  // Body of the timeline only — title and closer are added separately.
+  if (opts.bgmDurationSec) {
+    // Auto-derive: BGM length minus title+closer divided across items.
+    const bodyTarget = Math.max(itemCount * PHOTO_MIN_SEC,
+                                opts.bgmDurationSec - TITLE_CARD_SEC - CLOSER_CARD_SEC);
+    let per = bodyTarget / itemCount;
+    per = Math.max(PHOTO_MIN_SEC, Math.min(PHOTO_MAX_SEC, per));
+    return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
+  }
+  if (opts.mode === 'seconds') {
+    const bodySec = Math.max(PHOTO_MIN_SEC * itemCount,
+                             (opts.seconds || 30) - TITLE_CARD_SEC - CLOSER_CARD_SEC);
+    let per = bodySec / itemCount;
+    per = Math.max(PHOTO_MIN_SEC, Math.min(PHOTO_MAX_SEC, per));
+    return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
+  }
+  const per = Math.max(PHOTO_MIN_SEC, Math.min(PHOTO_MAX_SEC, opts.perPhotoSec || 3));
+  return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
+}
+
+function pickLayout(item, outputOrientation) {
+  const outAR = outputOrientation === 'landscape' ? 16 / 9
+              : outputOrientation === 'square'   ? 1
+              : 9 / 16;
+  const itemAR = item.width && item.height ? item.width / item.height : outAR;
+  // Aspect-match (within ±15%) → pan-zoom across the full frame.
+  // Otherwise → blur-fill: blurred zoom-fill background + sharp letterbox.
+  if (Math.abs(itemAR - outAR) / outAR < 0.15) return 'cover-kenburns';
+  return 'blur-fill';
+}
+
+function buildTimeline(orderedItems, allClusters, opts) {
+  const { perPhotoSec, totalSec } = planPerPhotoSec(orderedItems.length, opts);
+  const timeline = [];
+
+  // --- Title card ---
+  const dateLabel = fmtTitleDateRange(orderedItems.map(p => p.ts));
+  const usedClusters = [...new Set(orderedItems.map(p => p.clusterId).filter(Boolean))]
+    .map(cid => allClusters.find(c => c.id === cid))
+    .filter(Boolean);
+  const locLabel = fmtLocationSummary(usedClusters);
+  timeline.push({
+    kind: 'title',
+    durationSec: TITLE_CARD_SEC,
+    title: dateLabel || 'Memories',
+    subtitle: locLabel || null,
+  });
+
+  // --- Body clips with day/location chapter overlays ---
+  let lastDay = null, lastClusterId = null;
+  const days = distinctDays(orderedItems);
+  const showDayLabel = days.length > 1; // single-day trip → date is on the title card only
+  for (const item of orderedItems) {
+    const overlays = [];
+    const day = ymdString(item.ts);
+    const cid = item.clusterId || null;
+    const cluster = allClusters.find(c => c.id === cid);
+
+    const dayChanged = day !== lastDay;
+    const locChanged = cid !== lastClusterId && cluster && cluster.label;
+
+    if (opts.subtitlesOn) {
+      if (dayChanged && showDayLabel) {
+        overlays.push({
+          kind: 'date',
+          text: fmtJpDate(item.ts),
+          enterAt: 0.25, holdUntil: perPhotoSec - 0.25, fadeMs: 350,
+        });
+      }
+      if (locChanged) {
+        overlays.push({
+          kind: 'location',
+          text: '📍 ' + cluster.label,
+          enterAt: 0.45, holdUntil: perPhotoSec - 0.4, fadeMs: 400,
+        });
+      }
+    }
+
+    timeline.push({
+      kind: item.kind === 'video' ? 'video' : 'photo',
+      photoId: item.id,
+      ref: item,
+      durationSec: perPhotoSec,
+      layout: pickLayout(item, opts.orientation),
+      overlays,
+    });
+
+    lastDay = day;
+    if (cluster && cluster.label) lastClusterId = cid;
+  }
+
+  // --- Closer ---
+  timeline.push({
+    kind: 'closer',
+    durationSec: CLOSER_CARD_SEC,
+    title: locLabel || dateLabel,
+    subtitle: 'Memories',
+  });
+
+  // Cumulative startSec
+  let t = 0;
+  for (const c of timeline) {
+    c.startSec = t;
+    t += c.durationSec;
+  }
+
+  return { timeline, totalSec, perPhotoSec, days, clusters: usedClusters };
+}
+
+// Pulls together everything: groups → reps → cluster → name → select → order
+// → timeline. Async because of Nominatim. Returns the final plan.
+async function buildPlan(opts) {
+  const prefOri = opts.orientation;
+  // Pick rep from each similarity group and tag each photo with its rep.
+  const reps = state.groups.map(g => pickBestOfGroup(g, prefOri));
+  // Cluster reps by GPS; tag each rep with clusterId.
+  const clusters = clusterByGps(reps);
+  for (const c of clusters) for (const p of c.items) p.clusterId = c.id;
+  await nameClusters(clusters, /*useNominatim*/ opts.useNominatim !== false);
+  // Selection mode → ordered list
+  const selected = selectByMode(reps, opts.mode, opts);
+  const ordered = orderForTimeline(selected, clusters);
+  return { ordered, ...buildTimeline(ordered, clusters, opts) };
 }
 
 // -----------------------------------------------------------------------------
@@ -697,12 +1118,100 @@ function bindSettings() {
     dom.catalogHint.textContent = `${catalog.length}曲の中から、写真の雰囲気に合いそうなものを自動選曲します。`;
   }
 
-  dom.previewBtn.addEventListener('click', () => {
-    alert('プレビューは Step 5 で実装します。');
-  });
+  dom.previewBtn.addEventListener('click', onPreview);
   dom.exportBtn.addEventListener('click', () => {
     alert('書き出しは Step 6 で実装します。');
   });
+}
+
+// -----------------------------------------------------------------------------
+// Plan inspector — Step 4 deliverable. Shows what the renderer will play
+// without actually rendering yet. Replaced by the real preview in Step 5.
+// -----------------------------------------------------------------------------
+function readPlanOpts() {
+  return {
+    orientation: getOutputOrientation(),
+    mode: document.querySelector('input[name="mode"]:checked').value,
+    count: parseInt(document.getElementById('countInput').value, 10) || 15,
+    seconds: parseInt(document.getElementById('secondsInput').value, 10) || 30,
+    perPhotoSec: parseFloat(document.getElementById('perPhotoInput').value) || 3,
+    bgmDurationSec: null, // wired in step 6 once BGM is loaded
+    subtitlesOn: document.getElementById('subtitles').value !== 'off',
+    useNominatim: true,
+  };
+}
+
+async function onPreview() {
+  if (!state.groups || !state.groups.length) {
+    alert('先に写真を読み込んでください');
+    return;
+  }
+  dom.previewBtn.disabled = true;
+  const orig = dom.previewBtn.textContent;
+  dom.previewBtn.textContent = '構成中…';
+  try {
+    const plan = await buildPlan(readPlanOpts());
+    renderPlanSummary(plan);
+  } catch (e) {
+    console.error(e);
+    showError('構成エラー: ' + (e.message || e));
+  } finally {
+    dom.previewBtn.disabled = false;
+    dom.previewBtn.textContent = orig;
+  }
+}
+
+function showError(msg) {
+  dom.output.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'alert error';
+  div.textContent = msg;
+  dom.output.appendChild(div);
+}
+
+function renderPlanSummary(plan) {
+  dom.stagePanel.style.display = 'flex';
+  dom.output.innerHTML = '';
+  const { timeline, totalSec, perPhotoSec, days, clusters } = plan;
+  const photoCount = timeline.filter(c => c.kind === 'photo').length;
+  const videoCount = timeline.filter(c => c.kind === 'video').length;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'alert success';
+  const lines = [
+    `🎬 構成完了 — 全 ${totalSec.toFixed(1)} 秒 / 1枚あたり ${perPhotoSec.toFixed(2)} 秒`,
+    `タイトル: ${timeline[0].title}${timeline[0].subtitle ? ' / ' + timeline[0].subtitle : ''}`,
+    `章 (日付/場所の切替): ${days.length}日 × ${clusters.length || 'GPSなし'}場所`,
+    `内訳: 写真 ${photoCount} / 動画 ${videoCount}`,
+  ];
+  if (clusters.length) {
+    const labels = clusters.map(c => c.label).filter(Boolean);
+    if (labels.length) lines.push('場所: ' + labels.join(' → '));
+  }
+  wrap.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+  dom.output.appendChild(wrap);
+
+  const detail = document.createElement('details');
+  const sum = document.createElement('summary');
+  sum.textContent = 'タイムライン詳細';
+  detail.appendChild(sum);
+  const ul = document.createElement('ul');
+  ul.style.cssText = 'font-size:0.78rem;line-height:1.55;padding-left:1.2em;color:#475569;';
+  for (const c of timeline) {
+    const li = document.createElement('li');
+    if (c.kind === 'title' || c.kind === 'closer') {
+      li.textContent = `[${c.kind}] ${c.startSec.toFixed(1)}s — ${c.title}${c.subtitle ? ' / ' + c.subtitle : ''}`;
+    } else {
+      const d = fmtDate(c.ref.ts).slice(0, 10);
+      const ovl = c.overlays.map(o => o.text).join(' + ') || '—';
+      li.textContent = `[${c.kind}] ${c.startSec.toFixed(1)}s ${c.layout} ${d} ${ovl}`;
+    }
+    ul.appendChild(li);
+  }
+  detail.appendChild(ul);
+  dom.output.appendChild(detail);
+
+  dom.stageStatus.textContent = '⏸ Step 5 で実映像のプレビュー実装予定';
 }
 
 // -----------------------------------------------------------------------------
