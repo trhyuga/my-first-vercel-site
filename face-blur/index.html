@@ -741,17 +741,24 @@
     // GC win on mobile). Canvases are bucketed by rounded-up size so a
     // slightly-changing face doesn't bypass the cache. OffscreenCanvas is
     // used when available — cheaper than DOM canvases.
+    // Tight canvas pool. Bucket by 32 px so a moving / re-sized face shares
+    // buckets, and cap aggressively so iOS Safari doesn't see the pool as a
+    // memory leak that grows with the video. Keep a global ceiling too.
     const canvasPool = new Map(); // key "w_h" -> Canvas[]
-    function bucketKey(w, h) { return `${Math.ceil(w / 16) * 16}_${Math.ceil(h / 16) * 16}`; }
+    const POOL_PER_BUCKET = 2;
+    const POOL_MAX_TOTAL = 16;
+    let poolTotal = 0;
+    function bucketKey(w, h) { return `${Math.ceil(w / 32) * 32}_${Math.ceil(h / 32) * 32}`; }
     function rentCanvas(w, h) {
       const key = bucketKey(w, h);
       const pool = canvasPool.get(key);
       if (pool && pool.length) {
         const c = pool.pop();
+        poolTotal--;
         return c;
       }
-      const bw = Math.ceil(w / 16) * 16;
-      const bh = Math.ceil(h / 16) * 16;
+      const bw = Math.ceil(w / 32) * 32;
+      const bh = Math.ceil(h / 32) * 32;
       if (typeof OffscreenCanvas !== 'undefined') {
         return new OffscreenCanvas(bw, bh);
       }
@@ -760,10 +767,14 @@
       return c;
     }
     function releaseCanvas(c) {
+      if (poolTotal >= POOL_MAX_TOTAL) return; // drop on the floor
       const key = bucketKey(c.width, c.height);
       let pool = canvasPool.get(key);
       if (!pool) { pool = []; canvasPool.set(key, pool); }
-      if (pool.length < 8) pool.push(c);
+      if (pool.length < POOL_PER_BUCKET) {
+        pool.push(c);
+        poolTotal++;
+      }
     }
 
     // Fast two-step blur: single downscale + upscale with native gaussian.
@@ -950,7 +961,11 @@
         out.width = vw; out.height = vh;
         const outCtx = out.getContext('2d', { willReadFrequently: true });
 
-        const canvasStream = out.captureStream(60);
+        // Build output stream: processed canvas video + original audio track.
+        // Stick with 30 fps to keep MediaRecorder buffers small enough that
+        // long videos don't push iOS Safari over its tab memory ceiling
+        // mid-processing. (60 fps doubles the buffered data.)
+        const canvasStream = out.captureStream(30);
         try {
           if (typeof srcVideo.captureStream === 'function') {
             const s = srcVideo.captureStream();
@@ -961,9 +976,15 @@
         const mime = pickSupportedMime();
         const srcDurSec = srcVideo.duration || 10;
         const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
-        const resolutionFloor = Math.round(vw * vh * 30 * 0.15);
-        const targetBps = Math.max(15_000_000, resolutionFloor, Math.round(srcBps * 1.3));
-        const cappedBps = Math.min(50_000_000, targetBps);
+        // Memory budget: encoded chunks live in RAM until we Blob() them at the
+        // end. iOS Safari reloads the tab somewhere around ~250-400 MB of
+        // encoded video, so we target a bitrate that keeps the entire output
+        // under ~150 MB by default — even for longer clips.
+        const memBudgetBytes = 150 * 1024 * 1024;
+        const memBpsCap = Math.round((memBudgetBytes * 8) / Math.max(srcDurSec, 5));
+        const resolutionFloor = Math.round(vw * vh * 30 * 0.10);
+        const desiredBps = Math.max(8_000_000, resolutionFloor, Math.round(srcBps * 1.05));
+        const cappedBps = Math.max(4_000_000, Math.min(desiredBps, memBpsCap, 18_000_000));
 
         // MediaRecorder can throw on some browsers when the bitrate/mime
         // combination isn't supported; retry with a lower bitrate, then with
@@ -1248,7 +1269,7 @@
         // longer need any of these.
         chunks.length = 0;
         try { canvasStream.getTracks().forEach(t => t.stop()); } catch (e) {}
-        try { canvasPool.clear(); } catch (e) {}
+        try { canvasPool.clear(); poolTotal = 0; } catch (e) {}
         tracks = [];
         // Drop the big output canvas backing store too
         try { out.width = 1; out.height = 1; } catch (e) {}
