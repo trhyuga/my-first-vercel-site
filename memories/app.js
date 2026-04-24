@@ -24,6 +24,8 @@ const TITLE_CARD_SEC = 3.5;
 const CLOSER_CARD_SEC = 2.5;
 const PHOTO_MIN_SEC = 1.5;
 const PHOTO_MAX_SEC = 6.0;
+const PHOTO_DEFAULT_SEC = 3.0;
+const XFADE_SEC = 0.5;
 
 // -----------------------------------------------------------------------------
 // State
@@ -268,12 +270,12 @@ async function scoreFacesIn(canvas) {
       .withFaceLandmarks()
       .withFaceExpressions();
   } catch (_) {
-    return { hasFaces: false, faceCount: 0, faceScore: 0 };
+    return { hasFaces: false, faceCount: 0, faceScore: 0, focalPoint: null };
   }
   if (!detections || !detections.length) {
-    return { hasFaces: false, faceCount: 0, faceScore: 0 };
+    return { hasFaces: false, faceCount: 0, faceScore: 0, focalPoint: null };
   }
-  let best = -Infinity;
+  let best = -Infinity, bestBox = null;
   for (const d of detections) {
     const exp = d.expressions || {};
     const happy = exp.happy || 0;
@@ -297,9 +299,19 @@ async function scoreFacesIn(canvas) {
       - angry * 0.5
       + eyesOpen * 0.5
       - (1 - eyesOpen) * 0.7;
-    if (score > best) best = score;
+    if (score > best) {
+      best = score;
+      bestBox = d.detection ? d.detection.box : null;
+    }
   }
-  return { hasFaces: true, faceCount: detections.length, faceScore: best };
+  let focalPoint = null;
+  if (bestBox && canvas.width && canvas.height) {
+    focalPoint = {
+      x: Math.max(0.15, Math.min(0.85, (bestBox.x + bestBox.width / 2) / canvas.width)),
+      y: Math.max(0.18, Math.min(0.82, (bestBox.y + bestBox.height / 2) / canvas.height)),
+    };
+  }
+  return { hasFaces: true, faceCount: detections.length, faceScore: best, focalPoint };
 }
 
 // -----------------------------------------------------------------------------
@@ -457,6 +469,7 @@ async function processImage(file) {
     hasFaces: face.hasFaces,
     faceCount: face.faceCount,
     faceScore: face.faceScore,
+    focalPoint: face.focalPoint,
     bad,
     badReason,
   };
@@ -864,37 +877,48 @@ function distinctDays(items) {
   return [...new Set(items.map(p => ymdString(p.ts)))];
 }
 
+// Per-photo seconds is fully auto — never user-controlled. Three sources:
+//   1. BGM track length / count  (when BGM is set)
+//   2. Total seconds / count     (when mode=seconds)
+//   3. Density curve from count  (default fallback — fewer photos = linger longer)
 function planPerPhotoSec(itemCount, opts) {
-  // Returns { perPhotoSec, totalSec } given the user's mode + BGM.
-  // Body of the timeline only — title and closer are added separately.
+  const clamp = (s) => Math.max(PHOTO_MIN_SEC, Math.min(PHOTO_MAX_SEC, s));
   if (opts.bgmDurationSec) {
-    // Auto-derive: BGM length minus title+closer divided across items.
     const bodyTarget = Math.max(itemCount * PHOTO_MIN_SEC,
                                 opts.bgmDurationSec - TITLE_CARD_SEC - CLOSER_CARD_SEC);
-    let per = bodyTarget / itemCount;
-    per = Math.max(PHOTO_MIN_SEC, Math.min(PHOTO_MAX_SEC, per));
+    const per = clamp(bodyTarget / itemCount);
     return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
   }
   if (opts.mode === 'seconds') {
     const bodySec = Math.max(PHOTO_MIN_SEC * itemCount,
                              (opts.seconds || 30) - TITLE_CARD_SEC - CLOSER_CARD_SEC);
-    let per = bodySec / itemCount;
-    per = Math.max(PHOTO_MIN_SEC, Math.min(PHOTO_MAX_SEC, per));
+    const per = clamp(bodySec / itemCount);
     return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
   }
-  const per = Math.max(PHOTO_MIN_SEC, Math.min(PHOTO_MAX_SEC, opts.perPhotoSec || 3));
+  // Density curve: 1-6 photos → 4.5s, 7-15 → ~3.5s, 16-30 → 3.0s, 31+ → 2.5s.
+  let per = PHOTO_DEFAULT_SEC;
+  if (itemCount <= 6) per = 4.5;
+  else if (itemCount <= 15) per = 3.5;
+  else if (itemCount <= 30) per = 3.0;
+  else per = 2.5;
+  per = clamp(per);
   return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
 }
 
-function pickLayout(item, outputOrientation) {
+function pickLayout(item, outputOrientation, idx) {
   const outAR = outputOrientation === 'landscape' ? 16 / 9
               : outputOrientation === 'square'   ? 1
               : 9 / 16;
   const itemAR = item.width && item.height ? item.width / item.height : outAR;
-  // Aspect-match (within ±15%) → pan-zoom across the full frame.
-  // Otherwise → blur-fill: blurred zoom-fill background + sharp letterbox.
   if (Math.abs(itemAR - outAR) / outAR < 0.15) return 'cover-kenburns';
-  return 'blur-fill';
+  // Aspect mismatch — alternate layouts so the suite of mismatched clips
+  // doesn't all look the same. Photos with detected faces lean smart-crop
+  // (zoom into the subject); landscape-with-no-faces lean blur-fill so we
+  // don't lose the wide composition.
+  const variants = item.hasFaces
+    ? ['smart-crop', 'smart-crop', 'blur-fill']
+    : ['blur-fill',  'smart-crop', 'blur-fill'];
+  return variants[idx % variants.length];
 }
 
 function makeKenburnsParams(idx) {
@@ -963,7 +987,7 @@ function buildTimeline(orderedItems, allClusters, opts) {
       photoId: item.id,
       ref: item,
       durationSec: perPhotoSec,
-      layout: pickLayout(item, opts.orientation),
+      layout: pickLayout(item, opts.orientation, timeline.length),
       kenburns: makeKenburnsParams(timeline.length),
       overlays,
     });
@@ -1117,6 +1141,38 @@ function drawBlurFill(ctx, canvasW, canvasH, asset, t, kb) {
   ctx.drawImage(asset.bitmap, dx, dy, fgW, fgH);
 }
 
+// Smart-crop: aggressive cover-zoom that biases the visible window toward
+// the subject. Uses the photo's faceapi-detected focal point if present;
+// otherwise centres slightly above the middle (people are usually upper-half).
+// This is the alternative to blur-fill for aspect mismatch — it loses some
+// edges but fills the screen and keeps motion natural.
+function drawSmartCrop(ctx, canvasW, canvasH, asset, focalPoint, t, kb) {
+  const tEased = easeInOut(t);
+  const startZoom = 1.04;
+  const endZoom = 1.18;
+  const zoom = startZoom + (endZoom - startZoom) * tEased;
+  const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
+  const baseScale = Math.max(canvasW / srcW, canvasH / srcH);
+  const scale = baseScale * zoom;
+  const drawW = srcW * scale;
+  const drawH = srcH * scale;
+  const fx = (focalPoint && focalPoint.x) || 0.5;
+  const fy = (focalPoint && focalPoint.y) || 0.42; // slight upward bias
+  // Place the focal photo coord at (fx*canvasW, fy*canvasH).
+  let dx = fx * canvasW - fx * drawW;
+  let dy = fy * canvasH - fy * drawH;
+  // Add a gentle pan along the slack axis so the result doesn't feel static.
+  const slackX = drawW - canvasW;
+  const slackY = drawH - canvasH;
+  const pan = kb.panSign * 0.05 * tEased;
+  if (kb.panAxis === 'x' && slackX > 0) dx += slackX * pan;
+  else if (kb.panAxis === 'y' && slackY > 0) dy += slackY * pan;
+  // Clamp so we never reveal the canvas background through the photo.
+  dx = Math.min(0, Math.max(canvasW - drawW, dx));
+  dy = Math.min(0, Math.max(canvasH - drawH, dy));
+  ctx.drawImage(asset.bitmap, dx, dy, drawW, drawH);
+}
+
 function drawCoverKenburns(ctx, canvasW, canvasH, source, srcW, srcH, t, kb) {
   const tEased = easeInOut(t);
   const zoom = kb.startZoom + (kb.endZoom - kb.startZoom) * tEased;
@@ -1149,7 +1205,8 @@ function fontStack() {
 
 function drawTitleCard(ctx, w, h, clip, localT) {
   drawCardBackground(ctx, w, h);
-  // Fade in 0→0.4s, hold, fade out last 1.0s
+  // Internal fade in/out — multiplied with whatever globalAlpha the renderer
+  // already set for crossfade.
   const fadeIn = 0.5, fadeOut = 1.0;
   const dur = clip.durationSec;
   let alpha;
@@ -1158,7 +1215,7 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   else alpha = 1;
 
   ctx.save();
-  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  ctx.globalAlpha *= Math.max(0, Math.min(1, alpha));
   ctx.textAlign = 'center';
   ctx.fillStyle = '#fff';
   const titleSize = Math.max(40, Math.round(h * 0.06));
@@ -1168,7 +1225,7 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   if (clip.subtitle) {
     const subSize = Math.max(20, Math.round(h * 0.028));
     ctx.font = `400 ${subSize}px ${fontStack()}`;
-    ctx.fillStyle = '#94a3b8';
+    ctx.fillStyle = '#cbd5e1';
     ctx.textBaseline = 'top';
     ctx.fillText(clip.subtitle, w / 2, h * 0.5 + h * 0.015);
   }
@@ -1184,9 +1241,9 @@ function drawCloserCard(ctx, w, h, clip, localT) {
   else if (localT > dur - fadeOut) alpha = Math.max(0, (dur - localT) / fadeOut);
   else alpha = 1;
   ctx.save();
-  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  ctx.globalAlpha *= Math.max(0, Math.min(1, alpha));
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#e2e8f0';
+  ctx.fillStyle = '#cbd5e1';
   const subSize = Math.max(20, Math.round(h * 0.028));
   ctx.font = `400 ${subSize}px ${fontStack()}`;
   ctx.textBaseline = 'bottom';
@@ -1196,6 +1253,66 @@ function drawCloserCard(ctx, w, h, clip, localT) {
   ctx.font = `700 ${titleSize}px ${fontStack()}`;
   ctx.textBaseline = 'top';
   ctx.fillText(clip.subtitle || 'Memories', w / 2, h * 0.5 + h * 0.015);
+  ctx.restore();
+}
+
+// Rounded-rect path helper (no Path2D dependency for older WebViews).
+function roundRect(ctx, x, y, w, h, r) {
+  const rad = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rad, y);
+  ctx.lineTo(x + w - rad, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rad);
+  ctx.lineTo(x + w, y + h - rad);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rad, y + h);
+  ctx.lineTo(x + rad, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rad);
+  ctx.lineTo(x, y + rad);
+  ctx.quadraticCurveTo(x, y, x + rad, y);
+  ctx.closePath();
+}
+
+// Date / location chapter overlays. Date sits near the top, location near
+// the bottom so they don't collide when both fire on the same clip. Timing
+// uses each overlay's own enterAt / holdUntil (in clip-local seconds).
+function drawOverlay(ctx, w, h, ovl, localT) {
+  const fadeSec = (ovl.fadeMs || 350) / 1000;
+  let alpha;
+  if (localT < ovl.enterAt) return;
+  if (localT < ovl.enterAt + fadeSec) alpha = (localT - ovl.enterAt) / fadeSec;
+  else if (localT < ovl.holdUntil) alpha = 1;
+  else if (localT < ovl.holdUntil + fadeSec) alpha = 1 - (localT - ovl.holdUntil) / fadeSec;
+  else return;
+  alpha = Math.max(0, Math.min(1, alpha));
+  if (alpha <= 0) return;
+
+  const text = ovl.text || '';
+  const fontSize = Math.max(20, Math.round(h * 0.032));
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.font = `700 ${fontSize}px ${fontStack()}`;
+  ctx.textBaseline = 'middle';
+  const padX = fontSize * 0.7;
+  const padY = fontSize * 0.4;
+  const metrics = ctx.measureText(text);
+  const boxW = metrics.width + padX * 2;
+  const boxH = fontSize + padY * 2;
+  const boxX = (w - boxW) / 2;
+  const boxY = ovl.kind === 'date' ? Math.round(h * 0.06)
+                                   : Math.round(h * 0.86 - boxH);
+  // Slight drop shadow for legibility on busy backgrounds
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 2;
+  ctx.fillStyle = 'rgba(15,23,42,0.55)';
+  roundRect(ctx, boxX, boxY, boxW, boxH, boxH * 0.45);
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, w / 2, boxY + boxH / 2);
   ctx.restore();
 }
 
@@ -1227,13 +1344,46 @@ class Renderer {
     const w = this.canvas.width, h = this.canvas.height;
     clearCanvas(ctx, w, h, '#000');
 
-    // Find the active clip — Step 5a uses hard cuts (no overlap).
-    const clip = this.plan.timeline.find(c =>
-      elapsedSec >= c.startSec && elapsedSec < c.startSec + c.durationSec
-    );
-    if (!clip) return;
-    const localT = elapsedSec - clip.startSec;
+    const active = this.findActive(elapsedSec);
+    // Outgoing clip drawn first (under), incoming on top — both with their
+    // own crossfade alpha set on globalAlpha.
+    for (const { clip, alpha } of active) {
+      if (alpha <= 0) continue;
+      const localT = elapsedSec - clip.startSec;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      this.drawClip(clip, localT);
+      ctx.restore();
+    }
+  }
 
+  findActive(t) {
+    const half = XFADE_SEC / 2;
+    const out = [];
+    const tl = this.plan.timeline;
+    for (let i = 0; i < tl.length; i++) {
+      const clip = tl[i];
+      const isFirst = i === 0;
+      const isLast = i === tl.length - 1;
+      const renderStart = clip.startSec - (isFirst ? 0 : half);
+      const clipEnd = clip.startSec + clip.durationSec;
+      const renderEnd = clipEnd + (isLast ? 0 : half);
+      if (t < renderStart || t >= renderEnd) continue;
+      let alpha = 1;
+      if (!isFirst && t < clip.startSec + half) {
+        alpha = (t - (clip.startSec - half)) / XFADE_SEC;
+      }
+      if (!isLast && t > clipEnd - half) {
+        alpha = Math.min(alpha, ((clipEnd + half) - t) / XFADE_SEC);
+      }
+      out.push({ clip, alpha: Math.max(0, Math.min(1, alpha)) });
+    }
+    return out;
+  }
+
+  drawClip(clip, localT) {
+    const ctx = this.ctx;
+    const w = this.canvas.width, h = this.canvas.height;
     if (clip.kind === 'title') {
       drawTitleCard(ctx, w, h, clip, localT);
       return;
@@ -1242,13 +1392,9 @@ class Renderer {
       drawCloserCard(ctx, w, h, clip, localT);
       return;
     }
-
     const asset = this.assets.get(clip.photoId);
     if (!asset || asset.kind === 'photo-failed') return;
     if (asset.kind === 'video-stub') {
-      // Placeholder — Step 5d hooks in actual video playback. For now show
-      // the captured thumbnail (already a still) using the photo path if
-      // available, or a tinted card.
       drawCardBackground(ctx, w, h);
       ctx.save();
       ctx.fillStyle = '#94a3b8';
@@ -1256,16 +1402,21 @@ class Renderer {
       ctx.textAlign = 'center';
       ctx.fillText('🎞 動画クリップ (Step 5d で再生)', w / 2, h / 2);
       ctx.restore();
-      return;
-    }
-    if (asset.kind === 'photo') {
+    } else if (asset.kind === 'photo') {
       const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
       const kb = clip.kenburns || makeKenburnsParams(0);
       if (clip.layout === 'blur-fill') {
         drawBlurFill(ctx, w, h, asset, t, kb);
+      } else if (clip.layout === 'smart-crop') {
+        drawSmartCrop(ctx, w, h, asset, clip.ref.focalPoint, t, kb);
       } else {
         drawCoverKenburns(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height, t, kb);
       }
+    }
+    // Subtitles / chapter labels — draw on top of the photo within the same
+    // clip-alpha context so they fade with the crossfade.
+    if (clip.overlays && clip.overlays.length) {
+      for (const ovl of clip.overlays) drawOverlay(ctx, w, h, ovl, localT);
     }
   }
 
@@ -1453,24 +1604,6 @@ function getCurrentBgmKind() {
   return r ? r.value : 'none';
 }
 
-// When BGM is selected the per-photo seconds become an auto-derived value
-// (BGM length / photo count). The actual computation happens at timeline-build
-// time — this just locks the input + shows the user a hint.
-function syncPerPhotoField() {
-  const bgmKind = getCurrentBgmKind();
-  const auto = bgmKind === 'catalog' || bgmKind === 'upload';
-  const input = document.getElementById('perPhotoInput');
-  const label = input ? input.previousElementSibling : null;
-  if (!input) return;
-  input.disabled = auto;
-  input.style.opacity = auto ? '0.55' : '';
-  if (label) {
-    label.textContent = auto
-      ? '1枚あたりの表示秒 (BGMから自動)'
-      : '1枚あたりの表示秒';
-  }
-}
-
 function bindSettings() {
   dom.modeGroup.addEventListener('change', () => {
     const mode = document.querySelector('input[name="mode"]:checked').value;
@@ -1481,12 +1614,10 @@ function bindSettings() {
     const bgm = getCurrentBgmKind();
     dom.catalogField.style.display = (bgm === 'catalog') ? '' : 'none';
     dom.uploadField.style.display = (bgm === 'upload') ? '' : 'none';
-    syncPerPhotoField();
   });
   document.getElementById('orientation').addEventListener('change', () => {
     if (state.groups && state.groups.length) renderReview();
   });
-  syncPerPhotoField();
   // populate catalog
   const catalog = (window.MUSIC_CATALOG || []);
   dom.catalogSelect.innerHTML = '';
@@ -1536,10 +1667,10 @@ function readPlanOpts() {
   const track = getSelectedCatalogTrack();
   return {
     orientation: getOutputOrientation(),
+    resolution: document.getElementById('resolution').value,
     mode: document.querySelector('input[name="mode"]:checked').value,
     count: parseInt(document.getElementById('countInput').value, 10) || 15,
     seconds: parseInt(document.getElementById('secondsInput').value, 10) || 30,
-    perPhotoSec: parseFloat(document.getElementById('perPhotoInput').value) || 3,
     bgmDurationSec: track ? track.durationSec : null,
     bgmTempo: track ? bgmTempoFromTags(track.tags) : 'medium',
     subtitlesOn: document.getElementById('subtitles').value !== 'off',
