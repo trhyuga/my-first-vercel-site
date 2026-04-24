@@ -1112,15 +1112,14 @@
         //    frames. That removes GPU contention, keeps the canvas at source
         //    framerate, and stops 別人ぼかし from flip-flopping.
         // Adaptive detection cadence.
-        //   - When a shouldBlur track has a recent hit, detection is cheap/slow
-        //     (NORMAL_INTERVAL). We rely on the sticky track + velocity
-        //     prediction + growing uncertainty pad to keep the head covered.
-        //   - When the target is "lost" (no recent shouldBlur detection), we
-        //     ramp detection up to FAST_INTERVAL so a returning face is
-        //     re-acquired in a fraction of a second.
-        const NORMAL_INTERVAL_MS = 400;
-        const FAST_INTERVAL_MS = 150;
-        const RECENT_HIT_MS = 1500;
+        //   - As long as we have at least one shouldBlur track alive, we're
+        //     "active" and run detection slowly — the track's velocity
+        //     extrapolation handles coverage and we don't need frequent face
+        //     confirmations during back-turned / occluded stretches.
+        //   - When NO shouldBlur track exists (target truly gone or not yet
+        //     acquired), we switch to fast cadence to re-acquire quickly.
+        const NORMAL_INTERVAL_MS = 600;
+        const FAST_INTERVAL_MS = 220;
         // Keep a shouldBlur track alive for this long once it's been
         // established — enough for extended back-turned / occluded periods
         // while the subject stays inside the frame.
@@ -1290,9 +1289,11 @@
         }
 
         function currentDetectIntervalMs() {
-          const nowMs = performance.now();
-          // Active if any shouldBlur track got a detection hit recently.
-          const hasActive = tracks.some(t => t.shouldBlur && (nowMs - t.detectedAtMs) < RECENT_HIT_MS);
+          // "Active" just means we're still blurring someone. Even if that
+          // track hasn't been re-confirmed by detection recently (back-turned
+          // stretches), we still don't need to hunt — the sticky track is
+          // covering the head. Ramp up only when the target is truly gone.
+          const hasActive = tracks.some(t => t.shouldBlur);
           return hasActive ? NORMAL_INTERVAL_MS : FAST_INTERVAL_MS;
         }
 
@@ -1335,10 +1336,13 @@
             const refDim = Math.max(headBox.width, headBox.height) || 100;
             const speed = Math.hypot(t.vx || 0, t.vy || 0);
             const speedPadFrac = (speed * extrapSec * 0.5) / refDim;
-            // Uncertainty grows with how long ago we last saw the face — the
-            // longer we've been purely predicting, the wider the blur.
-            const stalePadFrac = Math.min(0.9, ageSec * 0.10);
-            const padExtra = Math.min(1.0, speedPadFrac + stalePadFrac);
+            // Uncertainty pad has to stay bounded: a huge pad would blow up
+            // the offscreen patch canvas size and make the per-frame blur
+            // work unpredictable. The head-box itself is already a generous
+            // region (hair + chin + ears), so 50% extra is plenty to cover
+            // moderate drift without tanking draw performance.
+            const stalePadFrac = Math.min(0.5, ageSec * 0.07);
+            const padExtra = Math.min(0.6, speedPadFrac + stalePadFrac);
             applyBlurToBox(outCtx, headBox, out, padExtra);
           }
 
