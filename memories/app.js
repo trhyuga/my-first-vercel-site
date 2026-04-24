@@ -2129,6 +2129,120 @@ const VIDEO_DUCK_LEVEL = 0.35;
 const DUCK_RAMP_SEC = 0.30;
 const UNDUCK_RAMP_SEC = 0.40;
 
+// Procedural BGM presets — Web Audio chord-pad + arpeggio. No external CDN
+// dependency. Note frequencies are equal-tempered values for the named chord.
+const SYNTH_PRESETS = {
+  warm: {
+    pad: [261.63, 329.63, 392.00],                         // C major
+    arp: [523.25, 659.25, 783.99, 659.25],                 // C5 E5 G5 E5
+    arpRate: 0.70, cutoff: 1100,
+  },
+  memorial: {
+    pad: [261.63, 329.63, 392.00],                         // C major (cleaner)
+    arp: [523.25, 659.25, 783.99, 1046.50, 783.99, 659.25],
+    arpRate: 0.85, cutoff: 900,
+  },
+  nostalgic: {
+    pad: [220.00, 277.18, 329.63],                         // A minor
+    arp: [440.00, 523.25, 659.25, 523.25],
+    arpRate: 0.75, cutoff: 800,
+  },
+  bright: {
+    pad: [196.00, 246.94, 293.66],                         // G major
+    arp: [392.00, 493.88, 587.33, 493.88, 587.33, 783.99],
+    arpRate: 0.55, cutoff: 1400,
+  },
+  gentle: {
+    pad: [261.63, 311.13, 392.00],                         // C minor
+    arp: [523.25, 622.25, 783.99, 622.25],
+    arpRate: 0.90, cutoff: 700,
+  },
+};
+
+// Generates the BGM in real time from a SYNTH_PRESETS preset. Two layers:
+//   1. Sustained sawtooth chord pad through a low-pass filter with a slow
+//      LFO on the cutoff (gives a breathing, warm pad).
+//   2. Sine-wave arpeggio with pluck envelopes (music-box-like melody).
+// Exposes `output` so AudioMixer can treat it like the BGM gain (BGM
+// ducking during videos works for free).
+class SynthSource {
+  constructor(ctx, presetName, totalSec) {
+    this.ctx = ctx;
+    this.preset = SYNTH_PRESETS[presetName] || SYNTH_PRESETS.warm;
+    this.totalSec = Math.max(8, totalSec);
+    this.nodes = [];
+    this.notesGain = ctx.createGain();
+    this.notesGain.gain.value = 0;
+    this.output = ctx.createGain();
+    this.output.gain.value = 1.0;
+    this.notesGain.connect(this.output);
+  }
+  start() {
+    const ctx = this.ctx;
+    const t0 = ctx.currentTime;
+    const dur = this.totalSec;
+    const p = this.preset;
+    // Internal envelope: fade in 1.5s → sustain 0.7 → fade out 1.5s.
+    const sustainEnd = Math.max(1.5, dur - 1.5);
+    this.notesGain.gain.setValueAtTime(0, t0);
+    this.notesGain.gain.linearRampToValueAtTime(0.7, t0 + 1.5);
+    this.notesGain.gain.setValueAtTime(0.7, t0 + sustainEnd);
+    this.notesGain.gain.linearRampToValueAtTime(0, t0 + dur);
+    // --- Chord pad layer ---
+    for (const freq of p.pad) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = freq;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = p.cutoff;
+      filter.Q.value = 0.7;
+      const padGain = ctx.createGain();
+      padGain.gain.value = 0.11;
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 0.04;
+      const lfoG = ctx.createGain();
+      lfoG.gain.value = 350;
+      lfo.connect(lfoG).connect(filter.frequency);
+      osc.connect(filter).connect(padGain).connect(this.notesGain);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.1);
+      lfo.start(t0);
+      lfo.stop(t0 + dur + 0.1);
+      this.nodes.push(osc, filter, padGain, lfo, lfoG);
+    }
+    // --- Arpeggio layer ---
+    const arpMaster = ctx.createGain();
+    arpMaster.gain.value = 0.55;
+    arpMaster.connect(this.notesGain);
+    this.nodes.push(arpMaster);
+    const noteCount = Math.ceil(dur / p.arpRate);
+    for (let i = 0; i < noteCount; i++) {
+      const t = t0 + i * p.arpRate;
+      if (t >= t0 + dur - 0.3) break;
+      const freq = p.arp[i % p.arp.length];
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const env = ctx.createGain();
+      env.gain.setValueAtTime(0, t);
+      env.gain.linearRampToValueAtTime(0.18, t + 0.02);
+      env.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+      osc.connect(env).connect(arpMaster);
+      osc.start(t);
+      osc.stop(t + 0.8);
+      this.nodes.push(osc, env);
+    }
+  }
+  stop() {
+    for (const n of this.nodes) {
+      try { if (n.stop) n.stop(); } catch (_) {}
+      try { n.disconnect(); } catch (_) {}
+    }
+    this.nodes = [];
+  }
+}
+
 class AudioMixer {
   constructor() {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -2141,10 +2255,20 @@ class AudioMixer {
     this.activeVideoCount = 0;
   }
 
-  // Loads + connects the BGM source. `blobOrUrl` is a Blob (uploaded BGM)
-  // or a URL string (catalog track). Schedules a fade-out so the track
-  // ends gracefully even if its endCue doesn't fall on the timeline end.
-  async setupBgm(blobOrUrl, totalSec, fadeOutSec = 1.5) {
+  // Loads + connects the BGM source. `source` is a Blob (uploaded BGM), a
+  // URL string (external track), or an object { kind:'synth', preset } for
+  // the built-in procedural BGM. Schedules a fade-out so the track ends
+  // gracefully even if its endCue doesn't fall on the timeline end.
+  async setupBgm(source, totalSec, fadeOutSec = 1.5) {
+    if (source && typeof source === 'object' && source.kind === 'synth') {
+      this.synth = new SynthSource(this.ctx, source.preset, totalSec);
+      this.bgmGain = this.synth.output;
+      this.bgmGain.connect(this.dest);
+      this.bgmGain.connect(this.ctx.destination);
+      this.bgmFadeOutAtSec = null; // SynthSource handles its own envelope
+      return;
+    }
+    const blobOrUrl = source;
     const el = new Audio();
     el.crossOrigin = 'anonymous';
     el.preload = 'auto';
@@ -2181,6 +2305,7 @@ class AudioMixer {
   }
 
   start() {
+    if (this.synth) this.synth.start();
     if (this.bgmEl) this.bgmEl.play().catch(() => {});
     if (this.bgmGain && this.bgmFadeOutAtSec != null) {
       const t0 = this.ctx.currentTime;
@@ -2224,6 +2349,9 @@ class AudioMixer {
   }
 
   destroy() {
+    if (this.synth) {
+      try { this.synth.stop(); } catch (_) {}
+    }
     if (this.bgmEl) {
       try { this.bgmEl.pause(); } catch (_) {}
       if (this.bgmEl.src && this.bgmEl.src.startsWith('blob:')) {
@@ -2581,8 +2709,10 @@ async function resolveBgmSource() {
   }
   if (radio.value === 'catalog') {
     const track = getSelectedCatalogTrack();
-    if (!track || !track.url) return null;
-    return track.url;
+    if (!track) return null;
+    if (track.kind === 'synth') return { kind: 'synth', preset: track.preset };
+    if (track.url) return track.url;
+    return null;
   }
   return null;
 }
