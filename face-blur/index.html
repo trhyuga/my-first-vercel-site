@@ -338,6 +338,13 @@
             <div class="mode-chip" data-strict="loose">🫥 ゆるめ<span class="sub">自分を取りこぼしにくい</span></div>
           </div>
         </div>
+        <div class="field">
+          <label>品質プリセット</label>
+          <div class="mode-row">
+            <div class="mode-chip active" data-quality="balanced">⚡ 標準<span class="sub">スマホ向き・軽量</span></div>
+            <div class="mode-chip" data-quality="high">💻 高品質<span class="sub">PC推奨・検出頻度UP・厳密</span></div>
+          </div>
+        </div>
         <div class="btn-row" style="margin-top:0.6rem;">
           <button class="btn btn-secondary" id="detectBtn">🔍 顔を検出</button>
           <button class="btn btn-secondary hidden" id="clearSelBtn">選択を解除</button>
@@ -611,6 +618,13 @@
       const k = chip.dataset.strict;
       MATCH_THRESHOLD = (k === 'strict') ? 0.40 : (k === 'loose') ? 0.58 : 0.48;
       document.querySelectorAll('.mode-chip[data-strict]').forEach(c => c.classList.toggle('active', c === chip));
+    }));
+
+    // Quality preset: flips compute/quality tradeoffs for video processing.
+    let qualityMode = 'balanced'; // 'balanced' | 'high'
+    document.querySelectorAll('.mode-chip[data-quality]').forEach(chip => chip.addEventListener('click', () => {
+      qualityMode = chip.dataset.quality;
+      document.querySelectorAll('.mode-chip[data-quality]').forEach(c => c.classList.toggle('active', c === chip));
     }));
 
     function clearFaces() {
@@ -1056,13 +1070,20 @@
         const srcDurSec = srcVideo.duration || 10;
         const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
         // With OPFS streaming the encoded data goes to disk, so we can budget
-        // ~1 GB of final output without touching RAM for more than one chunk
-        // at a time. Without OPFS we keep the 150 MB in-RAM ceiling.
-        const memBudgetBytes = (useOpfs ? 1024 : 150) * 1024 * 1024;
+        // more generously without touching RAM for more than one chunk at a
+        // time. High-quality preset raises both the per-second target and
+        // the total budget because PCs tolerate the heavier output.
+        const memBudgetMB = useOpfs ? (qualityMode === 'high' ? 2048 : 1024) : (qualityMode === 'high' ? 300 : 150);
+        const memBudgetBytes = memBudgetMB * 1024 * 1024;
         const memBpsCap = Math.round((memBudgetBytes * 8) / Math.max(srcDurSec, 5));
-        const resolutionFloor = Math.round(vw * vh * captureFps * 0.12);
-        const desiredBps = Math.max(8_000_000, resolutionFloor, Math.round(srcBps * 1.1));
-        const hardCap = useOpfs ? 40_000_000 : 18_000_000;
+        const bitPerPixel = qualityMode === 'high' ? 0.20 : 0.12;
+        const resolutionFloor = Math.round(vw * vh * captureFps * bitPerPixel);
+        const srcHeadroom = qualityMode === 'high' ? 1.3 : 1.1;
+        const floorBps = qualityMode === 'high' ? 14_000_000 : 8_000_000;
+        const desiredBps = Math.max(floorBps, resolutionFloor, Math.round(srcBps * srcHeadroom));
+        const hardCap = qualityMode === 'high'
+          ? (useOpfs ? 80_000_000 : 30_000_000)
+          : (useOpfs ? 40_000_000 : 18_000_000);
         const cappedBps = Math.max(4_000_000, Math.min(desiredBps, memBpsCap, hardCap));
 
         // MediaRecorder can throw on some browsers when the bitrate/mime
@@ -1099,7 +1120,9 @@
         const stopped = new Promise(res => { recorder.onstop = res; });
 
         // Always SSD during video — good recall for profiles / small faces.
-        const detOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3, maxResults: 100 });
+        // High-quality preset bumps minConfidence so weak detections don't
+        // turn into a bystander identity check (and then a false blur).
+        const detOpts = new faceapi.SsdMobilenetv1Options({ minConfidence: DET_MIN_CONFIDENCE, maxResults: 100 });
 
         // Track-based pipeline:
         //  - Run a full detection every DETECT_INTERVAL_MS (~4 fps).
@@ -1111,15 +1134,20 @@
         //    velocity — no descriptor compares, no ML work on intermediate
         //    frames. That removes GPU contention, keeps the canvas at source
         //    framerate, and stops 別人ぼかし from flip-flopping.
-        // Adaptive detection cadence.
-        //   - As long as we have at least one shouldBlur track alive, we're
-        //     "active" and run detection slowly — the track's velocity
-        //     extrapolation handles coverage and we don't need frequent face
-        //     confirmations during back-turned / occluded stretches.
-        //   - When NO shouldBlur track exists (target truly gone or not yet
-        //     acquired), we switch to fast cadence to re-acquire quickly.
-        const NORMAL_INTERVAL_MS = 600;
-        const FAST_INTERVAL_MS = 220;
+        // Quality preset picks the compute/quality tradeoff.
+        //  balanced (default): light detection cadence + generous uncertainty
+        //    padding. Best for mobile — smooth playback, decent accuracy.
+        //  high (PC): aggressive detection frequency, tight padding, stricter
+        //    detector confidence, higher bitrate ceiling. Heavier on CPU/GPU
+        //    but minimal smoothness loss vs the source and very precise blur
+        //    placement (fewer bystanders caught, target stays exactly on).
+        const HIGH_Q = (qualityMode === 'high');
+        const NORMAL_INTERVAL_MS = HIGH_Q ? 250 : 600;
+        const FAST_INTERVAL_MS   = HIGH_Q ? 120 : 220;
+        const DET_MIN_CONFIDENCE = HIGH_Q ? 0.45 : 0.30;
+        const STALE_PAD_CAP      = HIGH_Q ? 0.25 : 0.50;
+        const STALE_PAD_RATE     = HIGH_Q ? 0.04 : 0.07;
+        const TOTAL_PAD_CAP      = HIGH_Q ? 0.40 : 0.60;
         // Keep a shouldBlur track alive for this long once it's been
         // established — enough for extended back-turned / occluded periods
         // while the subject stays inside the frame.
@@ -1336,13 +1364,12 @@
             const refDim = Math.max(headBox.width, headBox.height) || 100;
             const speed = Math.hypot(t.vx || 0, t.vy || 0);
             const speedPadFrac = (speed * extrapSec * 0.5) / refDim;
-            // Uncertainty pad has to stay bounded: a huge pad would blow up
-            // the offscreen patch canvas size and make the per-frame blur
-            // work unpredictable. The head-box itself is already a generous
-            // region (hair + chin + ears), so 50% extra is plenty to cover
-            // moderate drift without tanking draw performance.
-            const stalePadFrac = Math.min(0.5, ageSec * 0.07);
-            const padExtra = Math.min(0.6, speedPadFrac + stalePadFrac);
+            // Uncertainty pad stays bounded (large pad = large offscreen
+            // patch = slower frame). High-quality mode uses tighter caps so
+            // the blur hugs the head closely; balanced mode keeps a wider
+            // safety margin for the longer detection gaps.
+            const stalePadFrac = Math.min(STALE_PAD_CAP, ageSec * STALE_PAD_RATE);
+            const padExtra = Math.min(TOTAL_PAD_CAP, speedPadFrac + stalePadFrac);
             applyBlurToBox(outCtx, headBox, out, padExtra);
           }
 
