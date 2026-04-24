@@ -613,6 +613,11 @@
       return new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3, maxResults: 100 });
     }
 
+    // Identity match threshold (euclidean distance between 128D descriptors).
+    // Smaller = stricter. Slider drives this live. Declared before the
+    // slider initialization so applyStrict() doesn't trip the let TDZ.
+    let MATCH_THRESHOLD = 0.40;
+
     const strictRange = document.getElementById('strictRange');
     const strictVal = document.getElementById('strictVal');
     function strictLabel(v) {
@@ -783,10 +788,6 @@
     });
 
     // ---- Full-video processing ----
-    // Match threshold (euclidean distance between 128D descriptors).
-    // Default 0.40 (厳しめ) — identity is decided only at detection time and
-    // then frozen on the track, so a tight threshold does not cause flicker.
-    let MATCH_THRESHOLD = 0.40;
     let processedBlob = null;
 
     function euclidean(a, b) {
