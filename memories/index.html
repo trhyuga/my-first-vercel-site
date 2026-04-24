@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0ea5e9" />
   <title>思い出動画メーカー | TR-Labo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=Shippori+Mincho:wght@700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
@@ -51,7 +54,7 @@
         <label>枚数モード</label>
         <div class="radio-group" id="modeGroup">
           <label><input type="radio" name="mode" value="all-unique" checked><span>✨ 全部 (似たのは除外)</span></label>
-          <label><input type="radio" name="mode" value="recommended"><span>🌟 おすすめ厳選 (15枚前後)</span></label>
+          <label><input type="radio" name="mode" value="recommended"><span>🌟 おすすめ厳選 (枚数自動)</span></label>
           <label><input type="radio" name="mode" value="count"><span>🎯 枚数指定</span></label>
           <label><input type="radio" name="mode" value="seconds"><span>⏱️ 秒数ピッタリ</span></label>
         </div>
@@ -145,6 +148,7 @@
   <script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
   <script src="./music.js"></script>
   <script src="./landmarks.js"></script>
   <script src="./app.js"></script>

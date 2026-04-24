@@ -1153,6 +1153,29 @@ function applyStageOrientation(orientation) {
 // smoothstep — eases in and out for natural Ken-Burns motion
 function easeInOut(t) { return t * t * (3 - 2 * t); }
 
+// Decode a photo ref to an ImageBitmap that's no larger than `maxDim` along
+// its long side. Without this, decoding 30+ full-resolution iPhone photos
+// (each ~24 MP) blows past mobile RAM caps and the browser tab crashes
+// during preview. 1600px is enough to look sharp at 1080p output even with
+// the kenburns 1.18× zoom.
+async function decodeBitmapForRender(ref, maxDim = 1600) {
+  const src = ref.decodedBlob || ref.file;
+  const w = ref.width || 0, h = ref.height || 0;
+  if (w && h && (w > maxDim || h > maxDim)) {
+    const scale = maxDim / Math.max(w, h);
+    try {
+      return await createImageBitmap(src, {
+        resizeWidth: Math.round(w * scale),
+        resizeHeight: Math.round(h * scale),
+        resizeQuality: 'high',
+      });
+    } catch (_) {
+      // Older browsers may not support resize options — fall through.
+    }
+  }
+  return await createImageBitmap(src);
+}
+
 async function preloadAssets(plan, onProgress) {
   const assets = new Map();
   let i = 0;
@@ -1162,7 +1185,7 @@ async function preloadAssets(plan, onProgress) {
       try {
         const refs = clip.refs || [clip.ref];
         const bms = await Promise.all(refs.map(r =>
-          withTimeout(createImageBitmap(r.decodedBlob || r.file), 8000, r.sourceName)
+          withTimeout(decodeBitmapForRender(r), 8000, r.sourceName)
         ));
         assets.set(clip.photoId, { kind: 'stack-pair', bitmaps: bms });
       } catch (e) {
@@ -1171,8 +1194,7 @@ async function preloadAssets(plan, onProgress) {
       }
     } else if (clip.kind === 'photo') {
       try {
-        const src = clip.ref.decodedBlob || clip.ref.file;
-        const bm = await withTimeout(createImageBitmap(src), 8000, clip.ref.sourceName);
+        const bm = await withTimeout(decodeBitmapForRender(clip.ref), 8000, clip.ref.sourceName);
         assets.set(clip.photoId, { kind: 'photo', bitmap: bm });
       } catch (e) {
         console.warn('preload failed', clip.ref.sourceName, e);
@@ -1201,7 +1223,7 @@ async function preloadAssets(plan, onProgress) {
         if (clip.layout === 'video-band' && clip.borderRefs && clip.borderRefs.length >= 2) {
           try {
             borderBitmaps = await Promise.all(clip.borderRefs.slice(0, 2).map(r =>
-              withTimeout(createImageBitmap(r.decodedBlob || r.file), 8000, r.sourceName)
+              withTimeout(decodeBitmapForRender(r, 1200), 8000, r.sourceName)
             ));
           } catch (_) { borderBitmaps = null; }
         }
@@ -2057,10 +2079,10 @@ function bindSettings() {
   }
   const catalogRadio = document.getElementById('bgmCatalogRadio');
   if (!catalog.length) {
-    catalogRadio.disabled = true;
-    const label = catalogRadio.closest('label');
-    if (label) label.style.opacity = '0.5';
-    dom.catalogHint.textContent = '推奨曲リストは現在空です (music.js に追加で有効化)。手持ちのBGMをアップロードしてください。';
+    // Stay selectable so the user isn't blocked — when picked but the
+    // catalog is empty, the BGM source resolves to null and the export
+    // proceeds silently.
+    dom.catalogHint.textContent = '推奨曲は現在準備中。選んでもBGMなしで書き出されます (手持ちBGMはアップロードを使ってください)。';
   } else {
     dom.catalogHint.textContent = `${catalog.length}曲のなかから、長さ・ムードに合うものを自動で選びます。短めの曲は枚数が少ないとき優先。`;
   }
