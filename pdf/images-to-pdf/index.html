@@ -6,6 +6,108 @@
   <meta name="theme-color" content="#0ea5e9" />
   <title>画像→PDF | PDFツール</title>
   <link rel="stylesheet" href="../shared.css" />
+  <style>
+    /* ---- Per-image editor (rotate + crop) ---- */
+    .thumb { position: relative; }
+    .thumb .edit {
+      position: absolute; top: 0.25rem; left: 0.3rem;
+      background: rgba(14,165,233,0.92);
+      color: #fff; border: none;
+      width: 24px; height: 24px; border-radius: 6px;
+      font-size: 0.78rem; padding: 0; min-height: auto; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .editor-modal {
+      position: fixed; inset: 0;
+      background: rgba(15,23,42,0.9);
+      z-index: 100;
+      display: none;
+      flex-direction: column;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+    .editor-modal.active { display: flex; }
+    .editor-header {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.6rem 0.75rem;
+      background: rgba(15,23,42,0.95);
+      color: #fff;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .editor-header .title { flex: 1; font-size: 0.95rem; font-weight: 700; }
+    .editor-header button {
+      padding: 0.4rem 0.8rem; font-size: 0.85rem;
+      min-height: 38px; border-radius: 8px; font-family: inherit;
+      cursor: pointer; font-weight: 600;
+    }
+    .editor-header .close-btn { background: rgba(255,255,255,0.1); color:#fff; border:1px solid rgba(255,255,255,0.2); }
+    .editor-header .save-btn { background: linear-gradient(135deg, #0ea5e9, #06b6d4); color:#fff; border:none; box-shadow: 0 4px 14px rgba(14,165,233,0.3); }
+    .edit-stage {
+      flex: 1; min-height: 0;
+      position: relative;
+      display: flex; align-items: center; justify-content: center;
+      padding: 1rem;
+      background: repeating-conic-gradient(#222 0% 25%, #2a2a2a 0% 50%) 50% / 24px 24px;
+    }
+    .edit-canvas-wrap {
+      position: relative;
+      max-width: 100%; max-height: 100%;
+    }
+    .edit-canvas-wrap canvas {
+      display: block;
+      max-width: 100%;
+      max-height: calc(100vh - 220px);
+      max-height: calc(100dvh - 220px);
+      object-fit: contain;
+    }
+    .crop-box {
+      position: absolute;
+      border: 2px solid #0ea5e9;
+      box-sizing: border-box;
+      pointer-events: none;
+      box-shadow: 0 0 0 9999px rgba(15,23,42,0.55);
+    }
+    .crop-handle {
+      position: absolute;
+      width: 28px; height: 28px;
+      background: #0ea5e9;
+      border: 3px solid #fff;
+      border-radius: 50%;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+      pointer-events: auto;
+      touch-action: none;
+      cursor: grab;
+    }
+    .crop-handle:active { cursor: grabbing; }
+    .crop-handle.tl { top: -14px; left: -14px; }
+    .crop-handle.tr { top: -14px; right: -14px; }
+    .crop-handle.bl { bottom: -14px; left: -14px; }
+    .crop-handle.br { bottom: -14px; right: -14px; }
+    .editor-controls {
+      background: rgba(15,23,42,0.95);
+      padding: 0.7rem 0.75rem;
+      display: flex; gap: 0.4rem; flex-wrap: wrap;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      justify-content: center;
+    }
+    .editor-controls button {
+      background: rgba(255,255,255,0.08);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      padding: 0.55rem 0.9rem;
+      border-radius: 9px;
+      font-size: 0.85rem; font-weight: 600;
+      min-height: 40px; cursor: pointer;
+      font-family: inherit;
+    }
+    .editor-controls button:active { transform: scale(0.96); background: rgba(255,255,255,0.14); }
+    .editor-hint {
+      color: rgba(255,255,255,0.6);
+      font-size: 0.72rem;
+      text-align: center;
+      padding: 0.2rem 0.5rem 0.5rem;
+      background: rgba(15,23,42,0.95);
+    }
+  </style>
 </head>
 <body>
   <div class="container">
@@ -64,6 +166,34 @@
     <div id="msg"></div>
   </div>
 
+  <!-- Per-image rotate + crop editor -->
+  <div class="editor-modal" id="editorModal" aria-hidden="true">
+    <div class="editor-header">
+      <button class="close-btn" id="edClose" type="button">✕ キャンセル</button>
+      <div class="title" id="edTitle">画像を編集</div>
+      <button class="save-btn" id="edSave" type="button">✓ 保存</button>
+    </div>
+    <div class="edit-stage">
+      <div class="edit-canvas-wrap" id="edWrap">
+        <canvas id="edCanvas"></canvas>
+        <div class="crop-box" id="edCrop">
+          <div class="crop-handle tl" data-corner="tl"></div>
+          <div class="crop-handle tr" data-corner="tr"></div>
+          <div class="crop-handle bl" data-corner="bl"></div>
+          <div class="crop-handle br" data-corner="br"></div>
+        </div>
+      </div>
+    </div>
+    <div class="editor-controls">
+      <button type="button" id="edRotL">⟲ 左90°</button>
+      <button type="button" id="edRot180">⤭ 180°</button>
+      <button type="button" id="edRotR">⟳ 右90°</button>
+      <button type="button" id="edCropFull">🗖 枠リセット</button>
+      <button type="button" id="edReset">↺ 全リセット</button>
+    </div>
+    <div class="editor-hint">四隅の丸をドラッグして切り抜き範囲を調整 · 保存で適用</div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="../shared.js"></script>
   <script>
@@ -100,10 +230,182 @@
         del.className = 'del'; del.textContent = '✕';
         del.addEventListener('click', (e) => { e.stopPropagation(); images.splice(i, 1); render(); });
         wrap.appendChild(del);
+        const edit = document.createElement('button');
+        edit.className = 'edit'; edit.textContent = '✎';
+        edit.title = '回転・トリミング';
+        edit.addEventListener('click', (e) => { e.stopPropagation(); openEditor(i); });
+        wrap.appendChild(edit);
         grid.appendChild(wrap);
       });
       controls.style.display = images.length ? 'flex' : 'none';
     }
+
+    // ---- Per-image editor (rotate + crop) ----
+    const edModal = document.getElementById('editorModal');
+    const edCanvas = document.getElementById('edCanvas');
+    const edCrop = document.getElementById('edCrop');
+    const edWrap = document.getElementById('edWrap');
+    const edTitle = document.getElementById('edTitle');
+    const editorState = {
+      index: -1,
+      img: null,
+      rotation: 0, // 0, 90, 180, 270
+      crop: { x: 0, y: 0, w: 0, h: 0 },
+    };
+
+    function redrawEditorCanvas() {
+      const img = editorState.img;
+      if (!img) return;
+      const r = ((editorState.rotation % 360) + 360) % 360;
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      const cw = (r === 90 || r === 270) ? ih : iw;
+      const ch = (r === 90 || r === 270) ? iw : ih;
+      edCanvas.width = cw; edCanvas.height = ch;
+      const ctx = edCanvas.getContext('2d');
+      ctx.save();
+      ctx.translate(cw / 2, ch / 2);
+      ctx.rotate(r * Math.PI / 180);
+      ctx.drawImage(img, -iw / 2, -ih / 2);
+      ctx.restore();
+    }
+
+    function resetCropToFull() {
+      editorState.crop = { x: 0, y: 0, w: edCanvas.width, h: edCanvas.height };
+    }
+
+    function updateCropBox() {
+      const rect = edCanvas.getBoundingClientRect();
+      const wrapRect = edWrap.getBoundingClientRect();
+      const ox = rect.left - wrapRect.left;
+      const oy = rect.top - wrapRect.top;
+      if (!edCanvas.width || !edCanvas.height) return;
+      const sx = rect.width / edCanvas.width;
+      const sy = rect.height / edCanvas.height;
+      const cr = editorState.crop;
+      edCrop.style.left = (ox + cr.x * sx) + 'px';
+      edCrop.style.top = (oy + cr.y * sy) + 'px';
+      edCrop.style.width = (cr.w * sx) + 'px';
+      edCrop.style.height = (cr.h * sy) + 'px';
+    }
+
+    function openEditor(idx) {
+      const im = images[idx];
+      if (!im) return;
+      editorState.index = idx;
+      editorState.rotation = 0;
+      const img = new Image();
+      img.onload = () => {
+        editorState.img = img;
+        redrawEditorCanvas();
+        resetCropToFull();
+        edTitle.textContent = `画像を編集 (${idx + 1}/${images.length})`;
+        edModal.classList.add('active');
+        edModal.setAttribute('aria-hidden', 'false');
+        // Position the crop box after layout has settled.
+        requestAnimationFrame(() => { updateCropBox(); setTimeout(updateCropBox, 80); });
+      };
+      img.src = im.dataUrl;
+    }
+    function closeEditor() {
+      edModal.classList.remove('active');
+      edModal.setAttribute('aria-hidden', 'true');
+      editorState.img = null;
+      editorState.index = -1;
+    }
+
+    document.getElementById('edClose').addEventListener('click', closeEditor);
+    document.getElementById('edRotL').addEventListener('click', () => {
+      editorState.rotation = (editorState.rotation + 270) % 360;
+      redrawEditorCanvas(); resetCropToFull(); updateCropBox();
+    });
+    document.getElementById('edRotR').addEventListener('click', () => {
+      editorState.rotation = (editorState.rotation + 90) % 360;
+      redrawEditorCanvas(); resetCropToFull(); updateCropBox();
+    });
+    document.getElementById('edRot180').addEventListener('click', () => {
+      editorState.rotation = (editorState.rotation + 180) % 360;
+      redrawEditorCanvas(); resetCropToFull(); updateCropBox();
+    });
+    document.getElementById('edCropFull').addEventListener('click', () => {
+      resetCropToFull(); updateCropBox();
+    });
+    document.getElementById('edReset').addEventListener('click', () => {
+      editorState.rotation = 0;
+      redrawEditorCanvas();
+      resetCropToFull(); updateCropBox();
+    });
+
+    // Corner-drag → resize crop. Pointer events handle mouse + touch.
+    edCrop.querySelectorAll('.crop-handle').forEach(h => {
+      h.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        h.setPointerCapture(e.pointerId);
+        const corner = h.dataset.corner;
+        const startX = e.clientX, startY = e.clientY;
+        const startCrop = { ...editorState.crop };
+        function onMove(ev) {
+          const rect = edCanvas.getBoundingClientRect();
+          const sx = edCanvas.width / rect.width;
+          const sy = edCanvas.height / rect.height;
+          const dxC = (ev.clientX - startX) * sx;
+          const dyC = (ev.clientY - startY) * sy;
+          let { x, y, w, height: _, ...rest } = startCrop; // use w + h keys
+          x = startCrop.x; y = startCrop.y; w = startCrop.w; const hh = startCrop.h;
+          let nx = x, ny = y, nw = w, nh = hh;
+          if (corner.includes('l')) { nx = x + dxC; nw = w - dxC; }
+          if (corner.includes('r')) { nw = w + dxC; }
+          if (corner.includes('t')) { ny = y + dyC; nh = hh - dyC; }
+          if (corner.includes('b')) { nh = hh + dyC; }
+          // Clamp inside canvas + enforce min size
+          const MIN = 30;
+          if (nx < 0) { nw += nx; nx = 0; }
+          if (ny < 0) { nh += ny; ny = 0; }
+          if (nx + nw > edCanvas.width)  nw = edCanvas.width  - nx;
+          if (ny + nh > edCanvas.height) nh = edCanvas.height - ny;
+          if (nw < MIN) nw = MIN;
+          if (nh < MIN) nh = MIN;
+          editorState.crop = { x: nx, y: ny, w: nw, h: nh };
+          updateCropBox();
+        }
+        function onUp() {
+          try { h.releasePointerCapture(e.pointerId); } catch (_) {}
+          h.removeEventListener('pointermove', onMove);
+          h.removeEventListener('pointerup', onUp);
+          h.removeEventListener('pointercancel', onUp);
+        }
+        h.addEventListener('pointermove', onMove);
+        h.addEventListener('pointerup', onUp);
+        h.addEventListener('pointercancel', onUp);
+      });
+    });
+
+    window.addEventListener('resize', () => { if (edModal.classList.contains('active')) updateCropBox(); });
+
+    document.getElementById('edSave').addEventListener('click', () => {
+      const idx = editorState.index;
+      if (idx < 0 || !images[idx]) { closeEditor(); return; }
+      const cr = editorState.crop;
+      // Crop the rotated canvas to the selected region.
+      const out = document.createElement('canvas');
+      out.width = Math.max(1, Math.round(cr.w));
+      out.height = Math.max(1, Math.round(cr.h));
+      out.getContext('2d').drawImage(
+        edCanvas,
+        Math.round(cr.x), Math.round(cr.y), out.width, out.height,
+        0, 0, out.width, out.height
+      );
+      const newUrl = out.toDataURL('image/jpeg', 0.92);
+      images[idx].dataUrl = newUrl;
+      // Replace the underlying file with a same-name blob so the embed path
+      // uses the edited bytes even on the direct-embed fast path.
+      const byteString = atob(newUrl.split(',')[1]);
+      const buf = new Uint8Array(byteString.length);
+      for (let i = 0; i < byteString.length; i++) buf[i] = byteString.charCodeAt(i);
+      const origName = images[idx].file && images[idx].file.name ? images[idx].file.name.replace(/\.[^.]+$/, '') : 'edited';
+      images[idx].file = new File([buf], origName + '.jpg', { type: 'image/jpeg' });
+      render();
+      closeEditor();
+    });
 
     bindDropzone(dz, fi, async (fs) => {
       for (const f of fs) {
