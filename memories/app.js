@@ -1060,6 +1060,63 @@ function clearCanvas(ctx, w, h, fill = '#000') {
   ctx.fillRect(0, 0, w, h);
 }
 
+// Pre-bake a blurred zoom-fill copy of the source image per (asset, output
+// dims) — ctx.filter blur applied per frame is too expensive at 30 fps for
+// even a few photos in flight. Cached on the asset record.
+function getBlurredFill(asset, canvasW, canvasH) {
+  const key = `${canvasW}x${canvasH}`;
+  if (asset.blurredKey === key && asset.blurred) return asset.blurred;
+  const c = document.createElement('canvas');
+  c.width = canvasW;
+  c.height = canvasH;
+  const cx = c.getContext('2d');
+  const bgZoom = 1.10;
+  const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
+  const bgScale = Math.max(canvasW / srcW, canvasH / srcH) * bgZoom;
+  const bgW = srcW * bgScale, bgH = srcH * bgScale;
+  cx.filter = 'blur(36px) brightness(0.55) saturate(1.15)';
+  cx.drawImage(asset.bitmap, (canvasW - bgW) / 2, (canvasH - bgH) / 2, bgW, bgH);
+  // Add a faint dark vignette so the foreground reads more strongly
+  cx.filter = 'none';
+  const vignette = cx.createRadialGradient(
+    canvasW / 2, canvasH / 2, Math.min(canvasW, canvasH) * 0.35,
+    canvasW / 2, canvasH / 2, Math.max(canvasW, canvasH) * 0.75);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.45)');
+  cx.fillStyle = vignette;
+  cx.fillRect(0, 0, canvasW, canvasH);
+  asset.blurred = c;
+  asset.blurredKey = key;
+  return c;
+}
+
+function drawBlurFill(ctx, canvasW, canvasH, asset, t, kb) {
+  const tEased = easeInOut(t);
+
+  // Background — pre-baked
+  const bg = getBlurredFill(asset, canvasW, canvasH);
+  // Slow drift of the background to add motion without re-blurring
+  const drift = 0.04 * tEased;
+  const driftX = kb.panAxis === 'x' ? kb.panSign * drift * canvasW : 0;
+  const driftY = kb.panAxis === 'y' ? kb.panSign * drift * canvasH : 0;
+  ctx.drawImage(bg, driftX, driftY);
+
+  // Foreground — scale-to-fit with subtle Ken-Burns zoom-pan
+  const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
+  const fgZoom = kb.startZoom + (kb.endZoom - kb.startZoom) * tEased;
+  const fgScale = Math.min(canvasW / srcW, canvasH / srcH) * fgZoom;
+  const fgW = srcW * fgScale, fgH = srcH * fgScale;
+  let dx = (canvasW - fgW) / 2;
+  let dy = (canvasH - fgH) / 2;
+  // Pan the foreground only along the axis that has slack so it stays inside
+  const slackX = Math.max(0, fgW - canvasW);
+  const slackY = Math.max(0, fgH - canvasH);
+  const pan = kb.panSign * kb.panAmount * tEased;
+  if (kb.panAxis === 'x' && slackX > 0) dx += slackX * pan;
+  else if (kb.panAxis === 'y' && slackY > 0) dy += slackY * pan;
+  ctx.drawImage(asset.bitmap, dx, dy, fgW, fgH);
+}
+
 function drawCoverKenburns(ctx, canvasW, canvasH, source, srcW, srcH, t, kb) {
   const tEased = easeInOut(t);
   const zoom = kb.startZoom + (kb.endZoom - kb.startZoom) * tEased;
@@ -1203,8 +1260,12 @@ class Renderer {
     }
     if (asset.kind === 'photo') {
       const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
-      drawCoverKenburns(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height,
-                        t, clip.kenburns || makeKenburnsParams(0));
+      const kb = clip.kenburns || makeKenburnsParams(0);
+      if (clip.layout === 'blur-fill') {
+        drawBlurFill(ctx, w, h, asset, t, kb);
+      } else {
+        drawCoverKenburns(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height, t, kb);
+      }
     }
   }
 
