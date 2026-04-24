@@ -729,38 +729,67 @@ function resolveLandmark(cluster) {
   return best;
 }
 
+// Allow Japanese (kana/kanji/CJK punctuation) + ASCII Latin. Anything else
+// (Hangul, Thai, Arabic, Cyrillic, …) gets rejected so the title stays in
+// the script the user can read.
+const JA_LATIN_RE = /^[ -~　-〿぀-ゟ゠-ヿ一-鿿㐀-䶿＀-￯\s·・「」『』〜～\-—–'']+$/;
+function isJaOrLatin(s) {
+  if (!s) return false;
+  return JA_LATIN_RE.test(s);
+}
+
 // Soft fallback when a cluster doesn't match any curated landmark. Throttled
 // to one request per ~1.1s as Nominatim's usage policy requires; failures are
-// silent (network down, CORS blocked, rate-limited — we just skip).
+// silent. Tries `ja` first; if any field comes back in a non-ja/latin script,
+// re-queries with `en` and merges (preferring ja when both are usable).
+async function tryFetchNominatim(lat, lng, lang) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=14&accept-language=${lang}`;
+    const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data.address || {};
+    const nameCandidates = [
+      a.tourism, a.attraction, a.amusement_park,
+      a.suburb, a.neighbourhood,
+      a.city_district, a.town, a.village, a.city,
+      a.county,
+    ].filter(Boolean);
+    return {
+      name: nameCandidates[0] || data.display_name || null,
+      country: a.country || null,
+      countryCode: a.country_code || null,
+      state: stripPrefectureSuffix(a.state || a.province || null),
+    };
+  } catch (_) { return null; }
+}
+
+function allFieldsJaOrLatin(r) {
+  if (!r) return false;
+  return [r.name, r.country, r.state].filter(Boolean).every(isJaOrLatin);
+}
+function mergePreferJa(ja, en) {
+  if (!ja) return en || null;
+  if (!en) return ja;
+  return {
+    name: isJaOrLatin(ja.name) ? ja.name : en.name,
+    country: isJaOrLatin(ja.country) ? ja.country : en.country,
+    countryCode: ja.countryCode || en.countryCode,
+    state: isJaOrLatin(ja.state) ? ja.state : en.state,
+  };
+}
+
 let nominatimQueue = Promise.resolve();
 function reverseGeocodeNominatim(lat, lng) {
   const job = nominatimQueue.then(async () => {
-    try {
-      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=14&accept-language=ja`;
-      const res = await fetch(url, {
-        headers: { 'Accept': 'application/json' },
-        // The Referer header that the browser sends is what Nominatim's
-        // anti-abuse filter uses to identify our app.
-      });
-      if (!res.ok) return null;
-      const data = await res.json();
-      const a = data.address || {};
-      const nameCandidates = [
-        a.tourism, a.attraction, a.amusement_park,
-        a.suburb, a.neighbourhood,
-        a.city_district, a.town, a.village, a.city,
-        a.county,
-      ].filter(Boolean);
-      return {
-        name: nameCandidates[0] || data.display_name || null,
-        country: a.country || null,
-        countryCode: a.country_code || null,
-        state: stripPrefectureSuffix(a.state || a.province || null),
-      };
-    } catch (_) { return null; }
+    const ja = await tryFetchNominatim(lat, lng, 'ja');
+    if (allFieldsJaOrLatin(ja)) return ja;
+    // ja result has Hangul/Thai/etc. → also fetch en and merge
+    const en = await tryFetchNominatim(lat, lng, 'en');
+    return mergePreferJa(ja, en);
   });
-  // Pace subsequent requests regardless of success/failure.
-  nominatimQueue = job.then(() => new Promise(r => setTimeout(r, 1100)));
+  // 2.2s spacing covers the ja+en pair within Nominatim's 1 req/sec rule.
+  nominatimQueue = job.then(() => new Promise(r => setTimeout(r, 2200)));
   return job;
 }
 
@@ -1661,6 +1690,58 @@ function titleFontStack() {
   return '"Playfair Display", "Shippori Mincho", "Hiragino Mincho ProN", "Noto Serif JP", serif';
 }
 
+// Iteratively shrink a single-line title until it fits within `maxW`. If
+// even at `minSize` the text won't fit, splits at the best CJK/space
+// separator near the middle for two-line layout.
+function fitOrWrapTitle(ctx, text, weight, stack, maxW, idealSize, minSize) {
+  if (!text) return { lines: [''], size: idealSize };
+  let size = idealSize;
+  const setFont = (s) => { ctx.font = `${weight} ${s}px ${stack}`; };
+  setFont(size);
+  let textW = ctx.measureText(text).width;
+  while (textW > maxW && size > minSize) {
+    size = Math.max(minSize, Math.floor(size * 0.93));
+    setFont(size);
+    textW = ctx.measureText(text).width;
+  }
+  if (textW <= maxW) return { lines: [text], size };
+  // Still too wide at minSize — split into two lines.
+  const split = bestSplit(text);
+  // Reset to ideal size for two-line layout (each line shorter)
+  size = idealSize;
+  setFont(size);
+  let maxLineW = Math.max(...split.map(l => ctx.measureText(l).width));
+  while (maxLineW > maxW && size > minSize) {
+    size = Math.max(minSize, Math.floor(size * 0.93));
+    setFont(size);
+    maxLineW = Math.max(...split.map(l => ctx.measureText(l).width));
+  }
+  return { lines: split, size };
+}
+
+function bestSplit(text) {
+  // Prefer splitting at composite separators near the middle. Fall back to
+  // any whitespace, then to a hard mid-string break for unspaced text.
+  const seps = [' · ', ' · ', '・', ' & ', ' – ', ' - ', ' '];
+  const mid = text.length / 2;
+  let bestIdx = -1, bestSep = '', bestDist = Infinity;
+  for (const sep of seps) {
+    let from = 0;
+    while (from < text.length) {
+      const i = text.indexOf(sep, from);
+      if (i < 0) break;
+      const d = Math.abs(i - mid);
+      if (d < bestDist) { bestDist = d; bestIdx = i; bestSep = sep; }
+      from = i + sep.length;
+    }
+  }
+  if (bestIdx < 0) {
+    const m = Math.floor(text.length / 2);
+    return [text.slice(0, m).trim(), text.slice(m).trim()];
+  }
+  return [text.slice(0, bestIdx).trim(), text.slice(bestIdx + bestSep.length).trim()];
+}
+
 function drawTitleCard(ctx, w, h, clip, localT) {
   drawCardBackground(ctx, w, h);
   // Internal fade in/out — multiplied with whatever globalAlpha the renderer
@@ -1676,14 +1757,24 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   ctx.globalAlpha *= Math.max(0, Math.min(1, alpha));
   ctx.textAlign = 'center';
   ctx.fillStyle = '#fff';
-  // Slight glow for that opening-title-of-a-movie feel
   ctx.shadowColor = 'rgba(255,255,255,0.18)';
   ctx.shadowBlur = Math.round(h * 0.012);
-  // Bigger + serif display font
-  const titleSize = Math.max(48, Math.round(h * 0.078));
-  ctx.font = `800 ${titleSize}px ${titleFontStack()}`;
-  ctx.textBaseline = 'bottom';
-  ctx.fillText(clip.title || '', w / 2, h * 0.50 - h * 0.012);
+  // Auto-fit title — shrink, then fall through to 2-line wrap for very long
+  // titles. maxW reserves ~7% margin on each side so the text doesn't kiss
+  // the canvas edge.
+  const idealSize = Math.max(48, Math.round(h * 0.078));
+  const minSize   = Math.max(28, Math.round(h * 0.044));
+  const maxW = w * 0.86;
+  const fit = fitOrWrapTitle(ctx, clip.title || '', '800', titleFontStack(), maxW, idealSize, minSize);
+  ctx.font = `800 ${fit.size}px ${titleFontStack()}`;
+  ctx.textBaseline = 'middle';
+  const lineH = fit.size * 1.15;
+  // Bottom of the title block sits just above the accent rule (at h*0.50).
+  const blockBottom = h * 0.50 - h * 0.005;
+  for (let i = 0; i < fit.lines.length; i++) {
+    const ly = blockBottom - (fit.lines.length - 1 - i) * lineH - lineH * 0.5;
+    ctx.fillText(fit.lines[i], w / 2, ly);
+  }
   ctx.shadowColor = 'transparent';
   ctx.shadowBlur = 0;
   // Hairline accent under the title
