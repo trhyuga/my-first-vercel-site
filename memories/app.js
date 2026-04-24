@@ -1911,10 +1911,18 @@ function bindSettings() {
   // populate catalog
   const catalog = (window.MUSIC_CATALOG || []);
   dom.catalogSelect.innerHTML = '';
+  if (catalog.length) {
+    const auto = document.createElement('option');
+    auto.value = '__auto__';
+    auto.textContent = '🪄 自動選曲 (枚数とムードから最適化)';
+    auto.selected = true;
+    dom.catalogSelect.appendChild(auto);
+  }
   for (const track of catalog) {
     const opt = document.createElement('option');
     opt.value = track.id;
-    opt.textContent = `${track.title} — ${track.artist}`;
+    const lenStr = track.durationSec ? ` · ${Math.round(track.durationSec)}s` : '';
+    opt.textContent = `${track.title} — ${track.artist}${lenStr}`;
     dom.catalogSelect.appendChild(opt);
   }
   const catalogRadio = document.getElementById('bgmCatalogRadio');
@@ -1924,7 +1932,7 @@ function bindSettings() {
     if (label) label.style.opacity = '0.5';
     dom.catalogHint.textContent = '推奨曲リストは現在空です (music.js に追加で有効化)。手持ちのBGMをアップロードしてください。';
   } else {
-    dom.catalogHint.textContent = `${catalog.length}曲の中から、写真の雰囲気に合いそうなものを自動選曲します。`;
+    dom.catalogHint.textContent = `${catalog.length}曲のなかから、長さ・ムードに合うものを自動で選びます。短めの曲は枚数が少ないとき優先。`;
   }
 
   dom.previewBtn.addEventListener('click', onPreview);
@@ -1942,6 +1950,9 @@ function getSelectedCatalogTrack() {
   if (!radio || radio.value !== 'catalog') return null;
   const sel = document.getElementById('catalogSelect');
   if (!sel || !sel.value) return null;
+  if (sel.value === '__auto__') {
+    return autoPickBgmTrack(estimateTargetSec(), 'auto', window.MUSIC_CATALOG || []);
+  }
   return (window.MUSIC_CATALOG || []).find(t => t.id === sel.value) || null;
 }
 
@@ -1951,6 +1962,51 @@ function bgmTempoFromTags(tags) {
   if (/(uplifting|happy|energetic|joyful|fast|upbeat|cheerful|dance|pop)/.test(j)) return 'fast';
   if (/(calm|memorial|emotional|piano|warm|slow|nostalgic|melancholy|reflective|tender|ambient)/.test(j)) return 'slow';
   return 'medium';
+}
+
+// Best-fit track selection. Considers rough target length (photos × default
+// per-photo + intro/outro), preferred mood, and the track's endCueSec for
+// clean endings. Short tracks are kept eligible for low-photo-count cases.
+function autoPickBgmTrack(targetSec, preferredMood, catalog) {
+  if (!catalog || !catalog.length) return null;
+  let best = null, bestScore = -Infinity;
+  for (const t of catalog) {
+    if (!t.durationSec) continue;
+    const tempo = bgmTempoFromTags(t.tags);
+    let score = 0;
+    // Length fit
+    const overhead = t.durationSec - targetSec;
+    if (overhead < -15) score -= 12;            // way too short, would loop
+    else if (overhead < -5) score -= 6;         // somewhat short, awkward
+    else if (overhead <= 0) score += 2;         // slightly short — fades nicely
+    else if (overhead <= 30) score += 4;        // ideal
+    else score -= overhead * 0.05;              // too long
+    // End cue near target → clean musical ending
+    if (t.endCueSec && Math.abs(t.endCueSec - targetSec) < 4) score += 3;
+    // Mood preference
+    if (preferredMood && preferredMood !== 'auto' && tempo === preferredMood) score += 1.5;
+    // For low-photo-count target (< 35s) prefer short tracks
+    if (targetSec < 35 && t.durationSec < 90) score += 1.5;
+    if (score > bestScore) { bestScore = score; best = t; }
+  }
+  return best;
+}
+
+// Quick target-length estimate without rebuilding the timeline. Used by the
+// auto-pick to choose a sensibly-sized track before the plan is computed.
+function estimateTargetSec() {
+  if (!state.groups || !state.groups.length) return 30;
+  const usable = state.groups
+    .map(g => pickBestOfGroup(g, getOutputOrientation()))
+    .filter(p => !p.bad).length;
+  // Mirror the density curve in planPerPhotoSec so the estimate matches
+  // what the timeline would actually produce.
+  let per = PHOTO_DEFAULT_SEC;
+  if (usable <= 6) per = 4.5;
+  else if (usable <= 15) per = 3.5;
+  else if (usable <= 30) per = 3.0;
+  else per = 2.5;
+  return TITLE_CARD_SEC + per * usable + CLOSER_CARD_SEC;
 }
 
 function readPlanOpts() {
@@ -2029,12 +2085,16 @@ function renderPlanSummary(plan) {
 
   const wrap = document.createElement('div');
   wrap.className = 'alert success';
+  const track = getSelectedCatalogTrack();
   const lines = [
     `🎬 構成完了 — 全 ${totalSec.toFixed(1)} 秒 / 1枚あたり ${perPhotoSec.toFixed(2)} 秒`,
     `タイトル: ${timeline[0].title}${timeline[0].subtitle ? ' / ' + timeline[0].subtitle : ''}`,
     `章 (日付/場所の切替): ${days.length}日 × ${clusters.length || 'GPSなし'}場所`,
     `内訳: 写真 ${photoCount} / 動画 ${videoCount}`,
   ];
+  if (track) {
+    lines.push(`🎵 BGM: ${track.title} — ${track.artist} (${Math.round(track.durationSec)}秒)`);
+  }
   if (clusters.length) {
     const labels = clusters.map(c => c.label).filter(Boolean);
     if (labels.length) lines.push('場所: ' + labels.join(' → '));
