@@ -24,6 +24,16 @@
 
     <div class="controls" id="controls" style="display:none;">
       <div class="field">
+        <label style="display:flex;align-items:center;gap:0.55rem;cursor:pointer;font-weight:600;">
+          <input type="checkbox" id="autoRectify" style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
+          <span>📐 ドキュメント自動整形 (歪み補正・背景除去)</span>
+        </label>
+        <div class="info-hint" style="margin:0.2rem 0 0 1.5rem;">
+          紙資料を撮った写真の四隅を検出して真っ直ぐに伸ばし、机や床などの周りを切り捨てて整形PDFを作ります。<br>
+          初回のみ画像処理エンジン (約9MB) のダウンロードあり。端末内処理。
+        </div>
+      </div>
+      <div class="field">
         <label>ページサイズ</label>
         <select id="pageSize">
           <option value="fit">画像サイズに合わせる</option>
@@ -116,6 +126,85 @@
       return new Uint8Array(await file.arrayBuffer());
     }
 
+    // ---- Document auto-rectify (OpenCV.js + jscanify) ----
+    // Both libraries are loaded only when the user enables the toggle, since
+    // OpenCV.js is ~9 MB.
+    let cvReady = null;
+    function loadScript(src) {
+      return new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = res; s.onerror = () => rej(new Error('script load failed: ' + src));
+        document.head.appendChild(s);
+      });
+    }
+    async function ensureCv() {
+      if (cvReady) return cvReady;
+      cvReady = (async () => {
+        await loadScript('https://docs.opencv.org/4.5.0/opencv.js');
+        // OpenCV.js may expose `cv` as a Promise-like that resolves on init,
+        // or already-initialized. Wait for cv.Mat to be available either way.
+        await new Promise((res) => {
+          if (typeof cv !== 'undefined' && cv.Mat) return res();
+          if (typeof cv !== 'undefined' && typeof cv.then === 'function') {
+            cv.then(res); return;
+          }
+          if (typeof cv !== 'undefined') {
+            cv['onRuntimeInitialized'] = res;
+            return;
+          }
+          // Last resort: poll
+          const t = setInterval(() => {
+            if (typeof cv !== 'undefined' && cv.Mat) { clearInterval(t); res(); }
+          }, 80);
+        });
+        if (typeof jscanify === 'undefined') {
+          await loadScript('https://cdn.jsdelivr.net/npm/jscanify@1.2.0/dist/jscanify.min.js');
+        }
+      })();
+      return cvReady;
+    }
+
+    // Run jscanify against an image element. Returns a rectified canvas, or
+    // null when the corner detector couldn't find a 4-sided contour (e.g.
+    // photos that aren't of a document at all). Output canvas size targets
+    // A4 portrait at ~150 DPI but uses the detected quad's aspect ratio so
+    // a Letter page or a notebook spread isn't squashed to A4.
+    function rectifyWithJscanify(imgEl) {
+      try {
+        const scanner = new jscanify();
+        const corners = scanner.getCornerPoints && scanner.getCornerPoints(imgEl);
+        if (!corners) return null;
+        const tl = corners.topLeftCorner, tr = corners.topRightCorner;
+        const bl = corners.bottomLeftCorner, br = corners.bottomRightCorner;
+        if (!tl || !tr || !bl || !br) return null;
+        const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+        const wTop = dist(tl, tr), wBot = dist(bl, br);
+        const hLft = dist(tl, bl), hRgt = dist(tr, br);
+        const w = Math.max(wTop, wBot), h = Math.max(hLft, hRgt);
+        if (!isFinite(w) || !isFinite(h) || w < 50 || h < 50) return null;
+        // Scale up to ~150 DPI A4-equivalent on the longer side, preserving
+        // the detected aspect ratio.
+        const targetLong = 1754;
+        const scale = targetLong / Math.max(w, h);
+        const outW = Math.round(w * scale);
+        const outH = Math.round(h * scale);
+        const result = scanner.extractPaper(imgEl, outW, outH);
+        return result || null;
+      } catch (e) { return null; }
+    }
+
+    // Returns a Promise<HTMLCanvasElement | null>. Loads jscanify lazily.
+    async function rectifyImageEntry(im) {
+      await ensureCv();
+      const img = await new Promise((r, rej) => {
+        const x = new Image();
+        x.onload = () => r(x); x.onerror = rej;
+        x.src = im.dataUrl;
+      });
+      return rectifyWithJscanify(img);
+    }
+
     document.getElementById('run').addEventListener('click', async () => {
       if (!images.length) { showError(msg, '画像を1枚以上選んでください'); return; }
       const runBtn = document.getElementById('run');
@@ -127,6 +216,7 @@
         const sizeKey = document.getElementById('pageSize').value;
         const marginMm = parseFloat(document.getElementById('margin').value);
         const marginPt = marginMm / 25.4 * 72;
+        const autoRectify = document.getElementById('autoRectify').checked;
 
         // Re-encode via canvas for cases where pdf-lib can't embed the raw
         // bytes (interlaced PNG, 16-bit PNG, WebP, HEIC, etc.).
@@ -139,23 +229,50 @@
           const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95));
           return await doc.embedJpg(new Uint8Array(await blob.arrayBuffer()));
         }
+        async function rectifiedToJpg(canvas) {
+          const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+          return await doc.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+        }
+        let rectifiedCount = 0;
+        let rectifySkipped = 0;
+        if (autoRectify) {
+          runBtn.textContent = '画像処理エンジンを準備中...';
+          try { await ensureCv(); }
+          catch (e) {
+            showError(msg, '整形エンジンの読み込みに失敗: ' + (e.message || e) + ' (整形なしで続行します)');
+          }
+          runBtn.textContent = '処理中...';
+        }
         for (const im of images) {
           const bytes = await fileToBytes(im.file);
           let embed;
-          try {
-            if (im.file.type === 'image/png' || /\.png$/i.test(im.file.name)) {
-              embed = await doc.embedPng(bytes);
-            } else if (im.file.type === 'image/jpeg' || /\.jpe?g$/i.test(im.file.name)) {
-              embed = await doc.embedJpg(bytes);
+          if (autoRectify) {
+            const rectified = await rectifyImageEntry(im).catch(() => null);
+            if (rectified) {
+              embed = await rectifiedToJpg(rectified);
+              rectifiedCount++;
+              // Update the UI thumbnail too so the user can see what landed
+              // in the PDF after rectification.
+              try { im.dataUrl = rectified.toDataURL('image/jpeg', 0.85); render(); } catch (e) {}
             } else {
-              embed = await reencodeAsJpg(im);
+              rectifySkipped++;
+              try {
+                if (im.file.type === 'image/png' || /\.png$/i.test(im.file.name)) {
+                  embed = await doc.embedPng(bytes);
+                } else if (im.file.type === 'image/jpeg' || /\.jpe?g$/i.test(im.file.name)) {
+                  embed = await doc.embedJpg(bytes);
+                } else { embed = await reencodeAsJpg(im); }
+              } catch (e) { embed = await reencodeAsJpg(im); }
             }
-          } catch (e) {
-            // pdf-lib only supports a subset of PNG/JPEG. Fall back to a
-            // canvas-encoded JPEG so weird-but-valid images still embed.
-            embed = await reencodeAsJpg(im);
+          } else {
+            try {
+              if (im.file.type === 'image/png' || /\.png$/i.test(im.file.name)) {
+                embed = await doc.embedPng(bytes);
+              } else if (im.file.type === 'image/jpeg' || /\.jpe?g$/i.test(im.file.name)) {
+                embed = await doc.embedJpg(bytes);
+              } else { embed = await reencodeAsJpg(im); }
+            } catch (e) { embed = await reencodeAsJpg(im); }
           }
-
           let pageW, pageH;
           if (sizeKey === 'fit') {
             pageW = embed.width; pageH = embed.height;
@@ -175,6 +292,12 @@
           }
         }
         download(new Blob([await doc.save()], { type: 'application/pdf' }), safeFilename(fname.value, 'images') + '.pdf');
+        if (autoRectify) {
+          const note = document.createElement('div');
+          note.className = 'success';
+          note.textContent = `📐 整形: ${rectifiedCount}件 / 自動検出できず原画像のまま: ${rectifySkipped}件`;
+          msg.appendChild(note);
+        }
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {
