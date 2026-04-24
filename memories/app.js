@@ -368,46 +368,6 @@ function extractVideoFrameAt(url, atSec, durationSec) {
   });
 }
 
-// Audio-RMS-based highlight detection — finds the second-long window with the
-// highest energy (laughter, cheering, big swells in the soundtrack). Falls
-// back gracefully when the video has no audio or fails to decode.
-async function detectVideoHighlight(file, durationSec) {
-  if (!durationSec || durationSec < 1.5) return null;
-  if (durationSec > 600) return null; // skip overly long inputs to save RAM
-  const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC) return null;
-  const ctx = new AC();
-  let buf;
-  try {
-    buf = await ctx.decodeAudioData(await file.slice().arrayBuffer());
-  } catch (_) {
-    if (ctx.close) ctx.close();
-    return null;
-  }
-  if (ctx.close) ctx.close();
-  if (!buf.numberOfChannels) return null;
-  const ch = buf.getChannelData(0);
-  const sr = buf.sampleRate;
-  const winSamples = Math.floor(sr * 1.0);
-  const hopSamples = Math.floor(sr * 0.25);
-  if (ch.length < winSamples) return null;
-  let best = 0, bestPos = 0;
-  for (let i = 0; i + winSamples <= ch.length; i += hopSamples) {
-    let s = 0;
-    for (let j = 0; j < winSamples; j++) {
-      const v = ch[i + j];
-      s += v * v;
-    }
-    const rms = Math.sqrt(s / winSamples);
-    if (rms > best) { best = rms; bestPos = i; }
-  }
-  // Centre the highlight slightly before the peak so the climax lands inside
-  // the clip rather than at the very beginning.
-  const peakSec = bestPos / sr;
-  const startSec = Math.max(0, peakSec - 0.3);
-  return { highlightStartSec: startSec, peakRms: best };
-}
-
 // -----------------------------------------------------------------------------
 // Per-file processing — routes to image or video pipeline.
 // -----------------------------------------------------------------------------
@@ -468,18 +428,14 @@ async function processVideo(file) {
   const meta = await loadVideoMetadata(url);
   const dur = meta.durationSec || 0.001;
 
-  // Audio-based highlight detection (best effort)
-  let highlightStartSec = dur * 0.30; // fallback: 30% in
-  let highlightSource = 'fallback';
-  try {
-    const hl = await detectVideoHighlight(file, dur);
-    if (hl && hl.peakRms > 0.005) {
-      highlightStartSec = hl.highlightStartSec;
-      highlightSource = 'audio-peak';
-    }
-  } catch (_) { /* keep fallback */ }
+  // Simple heuristic: skip the (often unsteady) intro and treat ~30% in as
+  // the highlight start. Audio-RMS analysis and face-api.js were dropped
+  // here because they made long-video ingest unbearably slow for marginal
+  // benefit; videos already always live in their own solo group.
+  const highlightStartSec = dur * 0.30;
 
-  // Sample a frame near (but inside) the highlight for review/blur scoring.
+  // Sample a single frame just inside the highlight for the thumbnail and
+  // blur check. No face scoring on videos.
   const frameAt = Math.max(0, Math.min(dur - 0.1, highlightStartSec + 0.4));
   const img = await extractVideoFrameAt(url, frameAt, dur);
 
@@ -487,17 +443,10 @@ async function processVideo(file) {
   const analysisCanvas = downscaleToCanvas(img, 256);
   const blurScore = laplacianVariance(analysisCanvas);
 
-  const faceCanvas = downscaleToCanvas(img, 512);
-  const face = await scoreFacesIn(faceCanvas);
-
   const w = meta.width || img.naturalWidth;
   const h = meta.height || img.naturalHeight;
   const orientation = w === h ? 'square' : (w > h ? 'landscape' : 'portrait');
-
-  // No EXIF on video files — fall back to mtime. (MP4 moov.creation_time
-  // would be more accurate, parsable later via mp4box if precision matters.)
   const ts = file.lastModified || Date.now();
-
   const bad = blurScore < BLUR_REJECT_THRESHOLD;
 
   return {
@@ -516,16 +465,16 @@ async function processVideo(file) {
     tsSource: 'mtime',
     gps: null,
     blurScore,
-    dHash: null, // videos don't dedup against photos by visual hash
-    hasFaces: face.hasFaces,
-    faceCount: face.faceCount,
-    faceScore: face.faceScore,
+    dHash: null,
+    hasFaces: false,
+    faceCount: 0,
+    faceScore: 0,
     bad,
     badReason: bad ? `ブレ (鮮明度 ${blurScore.toFixed(0)})` : null,
     // video-specific
     durationSec: dur,
     highlightStartSec,
-    highlightSource,
+    highlightSource: 'heuristic',
   };
 }
 
