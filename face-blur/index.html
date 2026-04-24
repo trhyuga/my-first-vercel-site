@@ -371,7 +371,6 @@
           <div class="mode-row">
             <div class="mode-chip active" data-shape="blur">💧 ぼかし</div>
             <div class="mode-chip" data-shape="pixel">🟪 モザイク</div>
-            <div class="mode-chip" data-shape="fill">⬛ 黒塗り</div>
           </div>
         </div>
       </div>
@@ -726,7 +725,7 @@
 
     // ---- Mode / shape / strength ----
     let blurMode = 'selected';  // 'selected' | 'others' | 'all'
-    let blurShape = 'blur';     // 'blur' | 'pixel' | 'fill'
+    let blurShape = 'blur';     // 'blur' | 'pixel'
     const blurRange = document.getElementById('blurRange');
     const blurVal = document.getElementById('blurVal');
     blurRange.addEventListener('input', () => { blurVal.textContent = blurRange.value + ' px'; });
@@ -873,15 +872,9 @@
       const ph = Math.min(srcCanvas.height - py, h + pad * 2);
       const strength = parseFloat(blurRange.value) || 40;
 
-      // Build the patch first (black-fill / blur / mosaic) using pooled canvases.
-      let patch, patchIsPooled = true;
-      if (blurShape === 'fill') {
-        patch = rentCanvas(pw, ph);
-        const pctx = patch.getContext('2d');
-        pctx.clearRect(0, 0, patch.width, patch.height);
-        pctx.fillStyle = '#000';
-        pctx.fillRect(0, 0, pw, ph);
-      } else if (blurShape === 'pixel') {
+      // Build the patch (blur / mosaic) using pooled canvases.
+      let patch;
+      if (blurShape === 'pixel') {
         const cellSize = Math.max(6, Math.round(strength * 0.8));
         const tinyW = Math.max(2, Math.round(pw / cellSize));
         const tinyH = Math.max(2, Math.round(ph / cellSize));
