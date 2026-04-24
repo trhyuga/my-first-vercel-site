@@ -184,18 +184,121 @@
       }
     }
 
-    async function recognizeOnce(canvas, lang, psm, onProgress) {
-      // Tesseract.js v5: Tesseract.recognize accepts a HTMLCanvasElement.
-      const result = await Tesseract.recognize(canvas, lang, {
-        logger: (m) => {
-          if (m.status && typeof m.progress === 'number') {
-            onProgress && onProgress(m.status, m.progress);
+    // Crop a sub-region of a source canvas at 2x scale — used for re-OCR of
+    // low-confidence words. Higher resolution + tight crop usually unsticks
+    // characters that the page-wide pass misread.
+    function cropAtHighRes(srcCanvas, x0, y0, x1, y1, padPx) {
+      const sw = srcCanvas.width, sh = srcCanvas.height;
+      const sx = Math.max(0, Math.floor(x0 - padPx));
+      const sy = Math.max(0, Math.floor(y0 - padPx));
+      const ex = Math.min(sw, Math.ceil(x1 + padPx));
+      const ey = Math.min(sh, Math.ceil(y1 + padPx));
+      const cropW = ex - sx, cropH = ey - sy;
+      if (cropW <= 1 || cropH <= 1) return null;
+      const out = document.createElement('canvas');
+      out.width = cropW * 2;
+      out.height = cropH * 2;
+      const ctx = out.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(srcCanvas, sx, sy, cropW, cropH, 0, 0, out.width, out.height);
+      return out;
+    }
+
+    // Replace the first occurrence of `from` (after `startIdx`) in `text` with
+    // `to`. Returns { text, nextIdx } so subsequent replacements skip past it
+    // and don't double-substitute the same span.
+    function replaceFirstFrom(text, from, to, startIdx) {
+      const i = text.indexOf(from, startIdx);
+      if (i < 0) return { text, nextIdx: startIdx };
+      return {
+        text: text.slice(0, i) + to + text.slice(i + from.length),
+        nextIdx: i + to.length,
+      };
+    }
+
+    // Whitespace cleanup tuned for Japanese+English OCR output:
+    //   1. Strip control chars and zero-width codepoints Tesseract sometimes
+    //      emits.
+    //   2. Kill the stray ASCII space Tesseract likes to insert BETWEEN two
+    //      adjacent CJK characters ("こ ん に ち は" → "こんにちは"). Same
+    //      for spaces between CJK and full-width punctuation.
+    //   3. Collapse runs of ideographic (full-width) spaces → single 　.
+    //   4. Collapse runs of ASCII spaces/tabs → single space, strip leading/
+    //      trailing whitespace on each line, and cap blank-line runs at one.
+    function cleanupOcrText(s) {
+      const CJK = '[\\u3000-\\u303f\\u3040-\\u309f\\u30a0-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uff00-\\uffef]';
+      let out = s
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+        .replace(/[​-‍﻿]/g, '');
+      // Drop an ASCII space between two CJK characters. Lookahead so
+      // overlapping runs (ascii-space-separated CJK strings) collapse in
+      // a single pass.
+      out = out.replace(new RegExp('(' + CJK + ')[ \\t]+(?=' + CJK + ')', 'g'), '$1');
+      out = out
+        .replace(/　{2,}/g, '　')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n[ \t]+/g, '\n')
+        .replace(/\n{3,}/g, '\n\n');
+      return out.trim();
+    }
+
+    // Run OCR on a canvas and then verify low-confidence words by re-OCRing
+    // them on a 2x crop. If the second pass is meaningfully more confident,
+    // we substitute it into the page text. Returns { text, corrections }.
+    async function recognizeAndVerify(worker, canvas, psm, onProgress) {
+      onProgress && onProgress('initial', 0);
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      const initial = await worker.recognize(canvas);
+      const data = (initial && initial.data) || {};
+      let text = data.text || '';
+      const words = (data.words || []).filter(w => w && w.text && w.text.trim());
+
+      // Pick low-confidence, non-trivial words. Cap at MAX_VERIFY so a noisy
+      // scan doesn't trigger hundreds of re-OCR calls.
+      const LOW_CONF = 65;        // Tesseract returns 0..100
+      const MIN_GAIN = 8;         // require at least this much confidence gain to swap
+      const MAX_VERIFY = 40;
+      const targets = words
+        .filter(w => w.confidence < LOW_CONF && w.text.length >= 1)
+        .sort((a, b) => a.confidence - b.confidence)
+        .slice(0, MAX_VERIFY);
+
+      // Re-OCR each candidate region at 2x with PSM 7 (single line).
+      let corrections = 0;
+      let cursor = 0; // search position in `text` so we don't re-replace earlier hits
+      for (let i = 0; i < targets.length; i++) {
+        const w = targets[i];
+        onProgress && onProgress('verify', (i + 1) / targets.length);
+        const bb = w.bbox || w.box || null;
+        if (!bb) continue;
+        const x0 = bb.x0 ?? bb.x; const y0 = bb.y0 ?? bb.y;
+        const x1 = bb.x1 ?? (bb.x + (bb.w || bb.width || 0));
+        const y1 = bb.y1 ?? (bb.y + (bb.h || bb.height || 0));
+        const crop = cropAtHighRes(canvas, x0, y0, x1, y1, 6);
+        if (!crop) continue;
+        try {
+          await worker.setParameters({ tessedit_pageseg_mode: '7' });
+          const re = await worker.recognize(crop);
+          const reText = ((re && re.data && re.data.text) || '').replace(/\n+/g, ' ').trim();
+          const reConf = (re && re.data && re.data.confidence) || 0;
+          if (reText && reText !== w.text && reConf >= w.confidence + MIN_GAIN) {
+            const r = replaceFirstFrom(text, w.text, reText, cursor);
+            if (r.text !== text) {
+              text = r.text;
+              cursor = r.nextIdx;
+              corrections++;
+            }
           }
-        },
-        // PSM 6 = single uniform block, 3 = auto, 11 = sparse text
-        tessedit_pageseg_mode: psm,
-      });
-      return (result && result.data && result.data.text) || '';
+        } catch (e) { /* skip this word on error */ }
+      }
+      // Restore the user-requested PSM for the next page
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+
+      return { text: cleanupOcrText(text), corrections };
     }
 
     document.getElementById('run').addEventListener('click', async () => {
@@ -238,34 +341,51 @@
           canvases = [await imageFileToCanvas(currentFile)];
         }
 
-        // OCR each canvas in turn.
+        // Spin a single Tesseract worker so re-OCR of low-confidence words
+        // doesn't pay the engine init cost per call.
+        setProgress(20, 'OCRエンジンを起動中…');
+        const worker = await Tesseract.createWorker(lang, 1, {
+          logger: (m) => {
+            if (!m.status) return;
+            const t = m.status;
+            if (t === 'loading language traineddata' || t === 'initializing api' ||
+                t === 'loading tesseract core' || t === 'initializing tesseract') {
+              const p = typeof m.progress === 'number' ? Math.round(m.progress * 100) : 0;
+              setProgress(20, `言語データ/エンジン読込中… ${p}%`);
+            }
+          },
+        });
+
+        let totalCorrections = 0;
         const total = canvases.length;
         const parts = [];
-        for (let i = 0; i < total; i++) {
-          const pageBase = 20 + (i / total) * 78;
-          const text = await recognizeOnce(canvases[i], lang, psm, (status, p) => {
-            const offset = (1 / total) * 78 * p;
-            const niceStatus = (status === 'recognizing text')
-              ? `文字を解析中`
-              : (status === 'loading tesseract core' || status === 'initializing tesseract')
-                ? 'OCRエンジン初期化中'
-                : (status === 'loading language traineddata' || status === 'initializing api')
-                  ? '言語データを読込中'
-                  : status;
-            const label = total > 1
-              ? `${niceStatus}… ${i + 1}/${total} ページ`
-              : `${niceStatus}…`;
-            setProgress(pageBase + offset, label);
-          });
-          parts.push(total > 1 ? `--- ページ ${i + 1} ---\n${text.trim()}\n` : text);
+        try {
+          for (let i = 0; i < total; i++) {
+            const pageStart = 25 + (i / total) * 70;
+            const pageInitial = pageStart + (0.7 / total) * 70 * 0;
+            const onProg = (stage, p) => {
+              const label = total > 1
+                ? `${stage === 'verify' ? '低信頼度の語を再検査中' : '文字を解析中'}… ${i + 1}/${total} ページ`
+                : (stage === 'verify' ? '低信頼度の語を再検査中…' : '文字を解析中…');
+              const stageBase = stage === 'verify' ? 0.7 : 0;
+              const stageWeight = stage === 'verify' ? 0.3 : 0.7;
+              setProgress(pageStart + (stageBase + stageWeight * p) * (70 / total), label);
+            };
+            const { text, corrections } = await recognizeAndVerify(worker, canvases[i], psm, onProg);
+            totalCorrections += corrections;
+            parts.push(total > 1 ? `--- ページ ${i + 1} ---\n${text.trim()}\n` : text);
+          }
+        } finally {
+          try { await worker.terminate(); } catch (e) {}
         }
 
-        const combined = parts.join('\n').trim();
+        const combined = cleanupOcrText(parts.join('\n'));
         setProgress(100, '✅ 抽出完了');
         ocrText.value = combined;
         const charCount = combined.length;
         const lineCount = combined ? combined.split(/\n/).length : 0;
-        stats.textContent = `(${charCount.toLocaleString()}文字 / ${lineCount}行)`;
+        const corrTag = totalCorrections > 0 ? ` ・🔁 自動修正 ${totalCorrections}箇所` : '';
+        stats.textContent = `(${charCount.toLocaleString()}文字 / ${lineCount}行${corrTag})`;
         resultArea.style.display = 'block';
         if (!combined) {
           showError(msg, '文字を検出できませんでした。解像度の高い画像で再度お試しください。');
