@@ -1538,10 +1538,12 @@ function drawSmartCrop(ctx, canvasW, canvasH, source, srcW, srcH, focalPoint, t,
   ctx.drawImage(source, dx, dy, drawW, drawH);
 }
 
-// Mirror-extend: scenic landscape in portrait output. Draws the photo
-// fitted to canvas width, then mirrored copies above and below to fill the
-// vertical gaps. A subtle dark gradient at the top/bottom keeps the
-// reflection from competing with the main subject.
+// Mirror-extend: scenic landscape in portrait output. The seam direction
+// matters — a real water reflection has the *closest* edges meeting at the
+// seam (top of photo touches top of upper reflection, bottom of photo
+// touches bottom of lower reflection). Achieved by translating the canvas
+// to the seam line first, scaling y by -1, then drawing the image at its
+// natural offset *as if the seam were the original anchor*.
 function drawMirrorExtend(ctx, canvasW, canvasH, asset, t, kb) {
   const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
   const tEased = easeInOut(t);
@@ -1551,11 +1553,15 @@ function drawMirrorExtend(ctx, canvasW, canvasH, asset, t, kb) {
   const drawH = srcH * scale;
   const dx = (canvasW - drawW) / 2;
   const dy = (canvasH - drawH) / 2;
-  // Slight vertical drift on the whole stack
   const driftY = (kb && kb.panSign ? kb.panSign : 1) * (canvasH * 0.02) * tEased;
   ctx.save();
   ctx.translate(0, driftY);
-  // Top reflection (mirrored above the main image)
+  // Top reflection — mirror around the line y=dy (the original's top edge).
+  // After translate(dx, dy) + scale(1,-1), drawing at (0, 0, drawW, drawH)
+  // places the image flipped, covering y ∈ [dy − drawH, dy]. The pixel at
+  // local source y=0 (top of photo) lands at canvas y=dy (touching the
+  // original's top), and source y=drawH (bottom) lands at canvas y=dy−drawH.
+  // That's exactly what we want: the seam reads "top edge mirrored to top".
   if (dy > 0) {
     ctx.save();
     ctx.translate(dx, dy);
@@ -1565,12 +1571,15 @@ function drawMirrorExtend(ctx, canvasW, canvasH, asset, t, kb) {
   }
   // Original
   ctx.drawImage(asset.bitmap, dx, dy, drawW, drawH);
-  // Bottom reflection
+  // Bottom reflection — mirror around the line y=dy+drawH (original's bottom
+  // edge). translate(dx, dy+drawH) puts origin at the seam; scale(1,-1)
+  // flips. drawImage with negative y (-drawH..0) so source y=drawH (bottom
+  // of photo) sits at the seam after the flip.
   if (dy + drawH < canvasH) {
     ctx.save();
-    ctx.translate(dx, dy + drawH * 2);
+    ctx.translate(dx, dy + drawH);
     ctx.scale(1, -1);
-    ctx.drawImage(asset.bitmap, 0, 0, drawW, drawH);
+    ctx.drawImage(asset.bitmap, 0, -drawH, drawW, drawH);
     ctx.restore();
   }
   ctx.restore();
