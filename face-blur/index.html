@@ -507,7 +507,7 @@
 
     bindDropzone(dz, fi, (files) => loadMedia(files[0]));
 
-    document.getElementById('resetBtn').addEventListener('click', () => {
+    document.getElementById('resetBtn').addEventListener('click', async () => {
       srcVideo.pause();
       srcVideo.removeAttribute('src'); srcVideo.load();
       srcImage.removeAttribute('src');
@@ -521,6 +521,13 @@
       processStatus.innerHTML = '';
       detectStatus.innerHTML = '';
       window._blurredBlob = null;
+      if (window._opfsName) {
+        try {
+          const root = await navigator.storage.getDirectory();
+          await root.removeEntry(window._opfsName);
+        } catch (e) {}
+        window._opfsName = null;
+      }
     });
 
     // ---- Face detection ----
@@ -961,11 +968,29 @@
         out.width = vw; out.height = vh;
         const outCtx = out.getContext('2d', { willReadFrequently: true });
 
+        // Try to open an OPFS (Origin Private File System) writer so that
+        // MediaRecorder chunks go to disk instead of piling up in RAM. If it
+        // works we can keep 60 fps + higher bitrate on iOS Safari without
+        // tripping the tab memory ceiling. If not, we fall back to an
+        // in-RAM chunks array with a conservative bitrate.
+        let opfsWritable = null;
+        let opfsFileHandle = null;
+        let opfsName = null;
+        try {
+          if (navigator.storage && navigator.storage.getDirectory) {
+            const root = await navigator.storage.getDirectory();
+            opfsName = 'fb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+            opfsFileHandle = await root.getFileHandle(opfsName, { create: true });
+            opfsWritable = await opfsFileHandle.createWritable();
+          }
+        } catch (e) { opfsWritable = null; }
+        const useOpfs = !!opfsWritable;
+
         // Build output stream: processed canvas video + original audio track.
-        // Stick with 30 fps to keep MediaRecorder buffers small enough that
-        // long videos don't push iOS Safari over its tab memory ceiling
-        // mid-processing. (60 fps doubles the buffered data.)
-        const canvasStream = out.captureStream(30);
+        // With OPFS backing we can safely run 60 fps; otherwise stick to 30 fps
+        // to keep the in-memory chunk buffer small.
+        const captureFps = useOpfs ? 60 : 30;
+        const canvasStream = out.captureStream(captureFps);
         try {
           if (typeof srcVideo.captureStream === 'function') {
             const s = srcVideo.captureStream();
@@ -976,15 +1001,15 @@
         const mime = pickSupportedMime();
         const srcDurSec = srcVideo.duration || 10;
         const srcBps = Math.round((originalSize * 8) / Math.max(srcDurSec, 1));
-        // Memory budget: encoded chunks live in RAM until we Blob() them at the
-        // end. iOS Safari reloads the tab somewhere around ~250-400 MB of
-        // encoded video, so we target a bitrate that keeps the entire output
-        // under ~150 MB by default — even for longer clips.
-        const memBudgetBytes = 150 * 1024 * 1024;
+        // With OPFS streaming the encoded data goes to disk, so we can budget
+        // ~1 GB of final output without touching RAM for more than one chunk
+        // at a time. Without OPFS we keep the 150 MB in-RAM ceiling.
+        const memBudgetBytes = (useOpfs ? 1024 : 150) * 1024 * 1024;
         const memBpsCap = Math.round((memBudgetBytes * 8) / Math.max(srcDurSec, 5));
-        const resolutionFloor = Math.round(vw * vh * 30 * 0.10);
-        const desiredBps = Math.max(8_000_000, resolutionFloor, Math.round(srcBps * 1.05));
-        const cappedBps = Math.max(4_000_000, Math.min(desiredBps, memBpsCap, 18_000_000));
+        const resolutionFloor = Math.round(vw * vh * captureFps * 0.12);
+        const desiredBps = Math.max(8_000_000, resolutionFloor, Math.round(srcBps * 1.1));
+        const hardCap = useOpfs ? 40_000_000 : 18_000_000;
+        const cappedBps = Math.max(4_000_000, Math.min(desiredBps, memBpsCap, hardCap));
 
         // MediaRecorder can throw on some browsers when the bitrate/mime
         // combination isn't supported; retry with a lower bitrate, then with
@@ -1006,7 +1031,17 @@
         if (!recorder) throw new Error('MediaRecorder を初期化できませんでした: ' + (lastRecErr && lastRecErr.message || lastRecErr));
 
         const chunks = [];
-        recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+        // Serialize async OPFS writes so no chunk is lost even if events fire
+        // faster than the filesystem can consume them.
+        let writeChain = Promise.resolve();
+        recorder.ondataavailable = (e) => {
+          if (!e.data || !e.data.size) return;
+          if (useOpfs) {
+            writeChain = writeChain.then(() => opfsWritable.write(e.data)).catch(() => {});
+          } else {
+            chunks.push(e.data);
+          }
+        };
         const stopped = new Promise(res => { recorder.onstop = res; });
 
         // Always SSD during video — good recall for profiles / small faces.
@@ -1258,10 +1293,24 @@
         await new Promise(r => setTimeout(r, 150));
         try { recorder.stop(); } catch (e) {}
         await stopped;
+        if (useOpfs) await writeChain;
 
         faceLayer.style.display = '';
         const type = mime || 'video/webm';
-        processedBlob = new Blob(chunks, { type });
+        if (useOpfs) {
+          try { await opfsWritable.close(); } catch (e) {}
+          try {
+            const f = await opfsFileHandle.getFile();
+            // Cast to typed Blob so the app's mime metadata is preserved for
+            // Web Share / downloads.
+            processedBlob = new Blob([f], { type });
+          } catch (e) {
+            processedBlob = new Blob(chunks, { type });
+          }
+          window._opfsName = opfsName;
+        } else {
+          processedBlob = new Blob(chunks, { type });
+        }
         const ext = type.includes('mp4') ? 'mp4' : 'webm';
 
         // Memory cleanup — iOS Safari will silently reload the tab if it
@@ -1437,9 +1486,16 @@
         const res = await saveToFiles(window._blurredBlob, base + '.' + ext);
         showResult(res);
       });
-      document.getElementById('redoBtn').addEventListener('click', () => {
+      document.getElementById('redoBtn').addEventListener('click', async () => {
         processStatus.innerHTML = '';
         window._blurredBlob = null;
+        if (window._opfsName) {
+          try {
+            const root = await navigator.storage.getDirectory();
+            await root.removeEntry(window._opfsName);
+          } catch (e) {}
+          window._opfsName = null;
+        }
       });
       const showPreviewBtn = document.getElementById('showPreviewBtn');
       if (showPreviewBtn) {
