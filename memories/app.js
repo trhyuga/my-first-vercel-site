@@ -1047,13 +1047,47 @@ async function buildPlan(opts) {
   const selected = selectByMode(reps, opts.mode, opts);
   const ordered = orderForTimeline(selected, clusters);
   const built = buildTimeline(ordered, clusters, opts);
-  // Post-process passes: merge consecutive landscape photos into stack-pair
-  // clips when output is portrait. Re-time cumulative startSec + totalSec
-  // afterwards because durations may change.
-  const mergedTimeline = mergeStackPairs(built.timeline, opts);
+  // Post-process passes (run order matters):
+  //   1. mergeStackPairs — pair consecutive landscape photos in portrait out
+  //   2. mergeVideoBands — wrap landscape videos with photo borders in
+  //      portrait out, sourcing borders from photos already in the timeline
+  // Re-time cumulative startSec + totalSec afterwards because durations may
+  // change.
+  let merged = mergeStackPairs(built.timeline, opts);
+  merged = mergeVideoBands(merged, opts);
   let t = 0;
-  for (const c of mergedTimeline) { c.startSec = t; t += c.durationSec; }
-  return { ordered, ...built, timeline: mergedTimeline, totalSec: t };
+  for (const c of merged) { c.startSec = t; t += c.durationSec; }
+  return { ordered, ...built, timeline: merged, totalSec: t };
+}
+
+// In portrait output, wrap landscape video clips with two still photo
+// borders top/bottom. Borders are pulled from any photos already in the
+// timeline (the same photo may appear as a main clip elsewhere — that's
+// stylistically fine for memory videos and avoids dropping content).
+function mergeVideoBands(timeline, opts) {
+  if (opts.orientation !== 'portrait') return timeline;
+  const photoPool = [];
+  for (const c of timeline) {
+    if (c.kind !== 'photo') continue;
+    if (c.refs) photoPool.push(...c.refs);
+    else if (c.ref) photoPool.push(c.ref);
+  }
+  if (photoPool.length < 2) return timeline;
+
+  let pi = 0;
+  return timeline.map(clip => {
+    if (clip.kind !== 'video' || !clip.ref) return clip;
+    const ar = clip.ref.width / Math.max(1, clip.ref.height);
+    if (ar < 1.3) return clip; // not strongly landscape — keep smart-crop
+    const a = photoPool[pi % photoPool.length];
+    const b = photoPool[(pi + 1) % photoPool.length];
+    pi += 2;
+    return {
+      ...clip,
+      layout: 'video-band',
+      borderRefs: [a, b],
+    };
+  });
 }
 
 // Merge two consecutive landscape-photo clips (both with mismatched aspect
@@ -1156,17 +1190,25 @@ async function preloadAssets(plan, onProgress) {
           v.addEventListener('loadedmetadata', res, { once: true });
           v.addEventListener('error', () => rej(new Error('video load')), { once: true });
         }), 10000, 'preload ' + clip.ref.sourceName);
-        // Pre-seek to the highlight start so the very first frame after
-        // activation is the right one.
         try {
           await withTimeout(new Promise((res) => {
             v.addEventListener('seeked', res, { once: true });
             v.currentTime = clip.ref.highlightStartSec || 0;
           }), 4000, 'preseek ' + clip.ref.sourceName);
         } catch (_) { /* non-fatal */ }
+        // For video-band, also decode the two border photos.
+        let borderBitmaps = null;
+        if (clip.layout === 'video-band' && clip.borderRefs && clip.borderRefs.length >= 2) {
+          try {
+            borderBitmaps = await Promise.all(clip.borderRefs.slice(0, 2).map(r =>
+              withTimeout(createImageBitmap(r.decodedBlob || r.file), 8000, r.sourceName)
+            ));
+          } catch (_) { borderBitmaps = null; }
+        }
         assets.set(clip.photoId, {
           kind: 'video', element: v, playing: false,
           startSec: clip.ref.highlightStartSec || 0,
+          borderBitmaps,
         });
       } catch (e) {
         console.warn('video preload failed', clip.ref.sourceName, e);
@@ -1266,6 +1308,63 @@ function drawSmartCrop(ctx, canvasW, canvasH, source, srcW, srcH, focalPoint, t,
   dx = Math.min(0, Math.max(canvasW - drawW, dx));
   dy = Math.min(0, Math.max(canvasH - drawH, dy));
   ctx.drawImage(source, dx, dy, drawW, drawH);
+}
+
+// Generic "scale-to-cover and pan inside a sub-rect of the canvas" helper.
+// Used by stack-pair and video-band layouts. Source can be ImageBitmap or
+// HTMLVideoElement (drawImage handles either).
+function drawCoverIntoSlot(ctx, x, y, slotW, slotH, source, srcW, srcH, t, kb) {
+  if (!srcW) srcW = source.width || source.naturalWidth || source.videoWidth || 0;
+  if (!srcH) srcH = source.height || source.naturalHeight || source.videoHeight || 0;
+  if (!srcW || !srcH) return;
+  const tEased = easeInOut(t);
+  const startZoom = (kb && kb.startZoom) || 1.00;
+  const endZoom   = (kb && kb.endZoom)   || 1.06;
+  const zoom = startZoom + (endZoom - startZoom) * tEased;
+  const baseScale = Math.max(slotW / srcW, slotH / srcH);
+  const scale = baseScale * zoom;
+  const drawW = srcW * scale, drawH = srcH * scale;
+  let dx = x + (slotW - drawW) / 2;
+  let dy = y + (slotH - drawH) / 2;
+  const slackX = drawW - slotW, slackY = drawH - slotH;
+  const pan = (kb && kb.panSign ? kb.panSign : 1) * (kb && kb.panAmount ? kb.panAmount : 0.04) * tEased;
+  if (kb && kb.panAxis === 'x' && slackX > 0) dx += slackX * pan;
+  else if (slackY > 0)                         dy += slackY * pan;
+  dx = Math.min(x, Math.max(x + slotW - drawW, dx));
+  dy = Math.min(y, Math.max(y + slotH - drawH, dy));
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, slotW, slotH);
+  ctx.clip();
+  ctx.drawImage(source, dx, dy, drawW, drawH);
+  ctx.restore();
+}
+
+// Landscape video centred in a 50%-tall band, with two still photos as
+// frame-decoration top and bottom. Borders pan slowly so they don't feel
+// frozen against the moving centre.
+function drawVideoBand(ctx, canvasW, canvasH, videoEl, srcW, srcH, borderBitmaps, t, kb) {
+  const gap = Math.max(2, Math.round(canvasH * 0.008));
+  const bandH = Math.round(canvasH * 0.50);
+  const borderH = Math.floor((canvasH - bandH - gap * 2) / 2);
+  // Black gaps as separators
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvasW, canvasH);
+  // Top border
+  if (borderBitmaps && borderBitmaps[0]) {
+    drawCoverIntoSlot(ctx, 0, 0, canvasW, borderH,
+      borderBitmaps[0], borderBitmaps[0].width, borderBitmaps[0].height,
+      t, makeKenburnsParams(0));
+  }
+  // Bottom border
+  if (borderBitmaps && borderBitmaps[1]) {
+    drawCoverIntoSlot(ctx, 0, canvasH - borderH, canvasW, borderH,
+      borderBitmaps[1], borderBitmaps[1].width, borderBitmaps[1].height,
+      t, makeKenburnsParams(1));
+  }
+  // Middle: video band
+  const bandY = borderH + gap;
+  drawCoverIntoSlot(ctx, 0, bandY, canvasW, bandH, videoEl, srcW, srcH, t, kb);
 }
 
 // Two photos stacked top/bottom (each in half the canvas height with a
@@ -1562,7 +1661,9 @@ class Renderer {
     } else if (asset.kind === 'video') {
       const v = asset.element;
       const srcW = v.videoWidth || 1, srcH = v.videoHeight || 1;
-      if (clip.layout === 'smart-crop') {
+      if (clip.layout === 'video-band' && asset.borderBitmaps) {
+        drawVideoBand(ctx, w, h, v, srcW, srcH, asset.borderBitmaps, t, kb);
+      } else if (clip.layout === 'smart-crop') {
         drawSmartCrop(ctx, w, h, v, srcW, srcH, clip.ref.focalPoint, t, kb);
       } else {
         drawCoverKenburns(ctx, w, h, v, srcW, srcH, t, kb);
@@ -1627,9 +1728,18 @@ class Renderer {
             }
           }
         }
-        if (a.kind === 'video' && a.element) {
-          try { a.element.pause(); } catch (_) {}
-          try { a.element.removeAttribute('src'); a.element.load(); } catch (_) {}
+        if (a.kind === 'video') {
+          if (a.element) {
+            try { a.element.pause(); } catch (_) {}
+            try { a.element.removeAttribute('src'); a.element.load(); } catch (_) {}
+          }
+          if (a.borderBitmaps) {
+            for (const bm of a.borderBitmaps) {
+              if (bm && typeof bm.close === 'function') {
+                try { bm.close(); } catch (_) {}
+              }
+            }
+          }
         }
       }
     }
