@@ -1231,7 +1231,20 @@
         srcVideo.muted = false;
         srcVideo.playbackRate = 1;
         srcVideo.pause();
-        srcVideo.currentTime = 0;
+
+        // Seek to t=0 and WAIT for the seek to finalize so the decoded frame
+        // in the element really is the first frame. Without this, priming
+        // detection could still read whatever frame the user left the video
+        // at when they tapped 「処理を開始」.
+        if (srcVideo.currentTime !== 0 || srcVideo.readyState < 2) {
+          await new Promise((res) => {
+            const done = () => { srcVideo.removeEventListener('seeked', done); res(); };
+            srcVideo.addEventListener('seeked', done, { once: true });
+            try { srcVideo.currentTime = 0; } catch (e) { res(); }
+            // Safety: don't wait forever if the seeked event never fires.
+            setTimeout(done, 1500);
+          });
+        }
 
         clearFaces();
         faceLayer.style.display = 'none';
@@ -1411,6 +1424,16 @@
           if (haveRVFC) srcVideo.requestVideoFrameCallback(processFrame);
           else requestAnimationFrame(processFrame);
         };
+
+        // Prime tracks on frame 0 BEFORE we start recording so the very first
+        // recorded frame already has its blur. Without this the parallel
+        // detection path only finishes after a few frames have been drawn
+        // with an empty tracks[] list, leaving the target briefly exposed.
+        // Also bump lastDetectAtMs so the draw-loop scheduler doesn't fire
+        // a second detection on the same frame as soon as playback starts.
+        processProgress(9, '最初のフレームを検出中…');
+        try { await runDetection(); } catch (e) { /* best effort */ }
+        lastDetectAtMs = performance.now();
 
         try { recorder.start(800); } catch (e) { try { recorder.start(); } catch (_) { throw new Error('録画を開始できませんでした: ' + (e.message || e)); } }
 
