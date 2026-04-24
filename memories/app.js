@@ -433,6 +433,34 @@ function extractVideoFrameAt(url, atSec, durationSec) {
   }), 12000, 'video frame extract');
 }
 
+// Read the video's true creation_time via mp4box (mvhd box). Falls back to
+// null when the lib isn't loaded, the file isn't an MP4 container, or the
+// embedded date is the Apple zero-epoch (1904-01-01) which means "unset".
+// Significantly more accurate than file.lastModified for clips that have
+// been forwarded through messaging apps.
+async function tryParseMp4Creation(file) {
+  if (typeof MP4Box === 'undefined') return null;
+  if (!file || !/(mp4|mov|m4v)$/i.test(file.name)) return null;
+  try {
+    return await withTimeout(new Promise((resolve) => {
+      const mp4 = MP4Box.createFile();
+      mp4.onReady = (info) => {
+        if (info && info.created instanceof Date) {
+          const ms = info.created.getTime();
+          // Filter Apple zero-epoch (~1904) and other obviously bogus values.
+          if (ms > 631152000000) resolve(ms); else resolve(null);
+        } else resolve(null);
+      };
+      mp4.onError = () => resolve(null);
+      file.arrayBuffer().then((ab) => {
+        ab.fileStart = 0;
+        mp4.appendBuffer(ab);
+        mp4.flush();
+      }).catch(() => resolve(null));
+    }), 8000, 'mp4 metadata');
+  } catch (_) { return null; }
+}
+
 // -----------------------------------------------------------------------------
 // Per-file processing — routes to image or video pipeline.
 // -----------------------------------------------------------------------------
@@ -530,7 +558,11 @@ async function processVideo(file) {
   }
 
   const orientation = w === h ? 'square' : (w > h ? 'landscape' : 'portrait');
-  const ts = file.lastModified || Date.now();
+  // Prefer mp4box-extracted creation_time over file.lastModified when
+  // available — survives forwarding through Messages / LINE / etc.
+  const mp4Ts = await tryParseMp4Creation(file).catch(() => null);
+  const ts = mp4Ts || file.lastModified || Date.now();
+  const tsSource = mp4Ts ? 'mp4-creation' : 'mtime';
   const badReason = rejectionReason({
     blurScore, lumaMean, lumaVar,
     durationSec: dur,
@@ -551,7 +583,7 @@ async function processVideo(file) {
     height: h,
     orientation,
     ts,
-    tsSource: 'mtime',
+    tsSource,
     gps: null,
     blurScore,
     dHash: null,
@@ -713,18 +745,47 @@ function reverseGeocodeNominatim(lat, lng) {
       if (!res.ok) return null;
       const data = await res.json();
       const a = data.address || {};
-      const candidates = [
+      const nameCandidates = [
         a.tourism, a.attraction, a.amusement_park,
         a.suburb, a.neighbourhood,
         a.city_district, a.town, a.village, a.city,
-        a.county, a.state, a.country,
+        a.county,
       ].filter(Boolean);
-      return candidates[0] || data.display_name || null;
+      return {
+        name: nameCandidates[0] || data.display_name || null,
+        country: a.country || null,
+        countryCode: a.country_code || null,
+        state: stripPrefectureSuffix(a.state || a.province || null),
+      };
     } catch (_) { return null; }
   });
   // Pace subsequent requests regardless of success/failure.
   nominatimQueue = job.then(() => new Promise(r => setTimeout(r, 1100)));
   return job;
+}
+
+// Strips Japanese prefecture suffixes (府/都/県/道) and English "Prefecture"
+// from a state name so titles read cleanly: "京都府" → "京都".
+function stripPrefectureSuffix(s) {
+  if (!s) return s;
+  return s.replace(/\s*Prefecture\s*$/i, '').replace(/(府|都|県|道)$/, '');
+}
+
+// Quick country guess for clusters matched by the curated landmark dictionary
+// (which doesn't carry country info itself). Most landmarks are JP-domestic;
+// the worldwide entries we hardcoded fall in known coordinate boxes.
+function guessCountryFromCoords(lat, lng) {
+  if (lat > 23 && lat < 46 && lng > 122 && lng < 147) return { country: '日本', cc: 'jp' };
+  if (lat > 24 && lat < 49 && lng > -125 && lng < -66) return { country: 'United States', cc: 'us' };
+  if (lat > 41 && lat < 51 && lng > -5 && lng < 10) return { country: 'France', cc: 'fr' };
+  if (lat > 36 && lat < 47 && lng > 6 && lng < 19) return { country: 'Italy', cc: 'it' };
+  if (lat > 49 && lat < 60 && lng > -8 && lng < 2) return { country: 'United Kingdom', cc: 'gb' };
+  if (lat > 21 && lat < 23 && lng > 113 && lng < 115) return { country: '香港', cc: 'hk' };
+  if (lat > 30 && lat < 32 && lng > 121 && lng < 122) return { country: '中国', cc: 'cn' };
+  if (lat > 21 && lat < 26 && lng > 119 && lng < 122) return { country: '台湾', cc: 'tw' };
+  if (lat < -10 && lng > 110 && lng < 155) return { country: 'Australia', cc: 'au' };
+  if (lat < -3 && lat > -25 && lng > -85 && lng < -30) return { country: 'Peru', cc: 'pe' };
+  return null;
 }
 
 async function nameClusters(clusters, useNominatim = true) {
@@ -734,27 +795,94 @@ async function nameClusters(clusters, useNominatim = true) {
     if (lm) {
       c.landmark = lm;
       c.label = lm.short || lm.name;
+      const guess = guessCountryFromCoords(c.lat, c.lng);
+      if (guess) {
+        c.country = guess.country;
+        c.countryCode = guess.cc;
+      }
     }
   }
-  // Pass 2: Nominatim reverse-geocode for unmatched clusters with GPS
+  // Pass 2: Nominatim reverse-geocode for unmatched clusters with GPS, also
+  // pulls country + state for clusters that already had a landmark name.
   if (useNominatim) {
-    const pending = clusters.filter(c => c.hasGps && !c.label);
+    const pending = clusters.filter(c => c.hasGps && (!c.label || !c.country || !c.state));
     for (const c of pending) {
-      const name = await reverseGeocodeNominatim(c.lat, c.lng);
-      if (name) c.label = name;
+      const r = await reverseGeocodeNominatim(c.lat, c.lng);
+      if (!r) continue;
+      if (!c.label && r.name) c.label = r.name;
+      if (!c.country && r.country) c.country = r.country;
+      if (!c.countryCode && r.countryCode) c.countryCode = r.countryCode;
+      if (!c.state && r.state) c.state = r.state;
     }
   }
-  // Pass 3: assign generic labels to the rest (keeps GPS-less clusters
-  // distinguishable in the chapter strip without misleading names).
+  // Pass 3: generic fallback for unnamed GPS clusters
   let alpha = 0;
   for (const c of clusters) {
     if (!c.label) {
       if (c.hasGps) c.label = `エリア ${String.fromCharCode(65 + alpha)}`;
-      // For no-GPS singletons we DON'T assign a label — they don't show as
-      // a distinct chapter, just inherit context from the surrounding photos.
       alpha++;
     }
   }
+}
+
+// "2024年12月" / "2024年12月 – 2025年1月" — high-level period label for the
+// title card. More forgiving than the chapter date format which uses
+// specific days (we want the title to stay short and readable).
+function fmtTitleYearMonth(timestamps) {
+  const ymonths = [...new Set(timestamps.map(ts => {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }))].sort();
+  if (!ymonths.length) return '';
+  const fmt = (s) => {
+    const [y, m] = s.split('-');
+    return `${y}年${parseInt(m, 10)}月`;
+  };
+  if (ymonths.length === 1) return fmt(ymonths[0]);
+  return `${fmt(ymonths[0])} – ${fmt(ymonths[ymonths.length - 1])}`;
+}
+
+// Generates a list of suggested titles based on cluster country/state info
+// and the trip's date range. Used to populate the title <select>.
+function generateTitleCandidates(clusters, timestamps) {
+  const ymd = fmtTitleYearMonth(timestamps);
+  const out = new Set();
+  const withGps = (clusters || []).filter(c => c.hasGps);
+  const countries = [...new Set(withGps.map(c => c.country).filter(Boolean))];
+  const prefs = [...new Set(withGps.map(c => c.state).filter(Boolean))];
+  const isDomesticJp = countries.length === 1 && (countries[0] === '日本' || countries[0] === 'Japan');
+
+  if (isDomesticJp) {
+    if (prefs.length === 1) {
+      out.add(`${prefs[0]} ${ymd}`);
+      out.add(`${prefs[0]}旅行 ${ymd}`);
+    } else if (prefs.length >= 2 && prefs.length <= 3) {
+      out.add(`${prefs.join(' · ')} ${ymd}`);
+    } else if (prefs.length > 3) {
+      out.add(`${prefs.slice(0, 2).join(' · ')} ほか ${ymd}`);
+    }
+    const lmCluster = withGps.find(c => c.landmark);
+    if (lmCluster) out.add(`${lmCluster.landmark.short || lmCluster.landmark.name} ${ymd}`);
+  } else if (countries.length === 1) {
+    out.add(`${countries[0]} ${ymd}`);
+    if (prefs.length === 1) out.add(`${prefs[0]}, ${countries[0]} ${ymd}`);
+  } else if (countries.length > 1) {
+    out.add(`${countries.slice(0, 3).join(' · ')} ${ymd}`);
+    if (countries.length === 2) out.add(`${countries.join(' & ')} ${ymd}`);
+  }
+  // Generic fallbacks
+  out.add(`Memories ${ymd}`);
+  out.add(`思い出 ${ymd}`);
+  return [...out].filter(Boolean).slice(0, 8);
+}
+
+// Picks the "best" auto title from the candidate list (first non-generic).
+function pickAutoTitle(candidates) {
+  if (!candidates || !candidates.length) return 'Memories';
+  for (const c of candidates) {
+    if (!/^Memories /.test(c) && !/^思い出 /.test(c)) return c;
+  }
+  return candidates[0];
 }
 
 // -----------------------------------------------------------------------------
@@ -939,6 +1067,9 @@ function pickLayout(item, outputOrientation, idx) {
   if (item.hasFaces && item.faceScore > 0.15) return 'smart-crop';
   if (item.faceCount > 1) return 'smart-crop';
   if (item.orientation === 'portrait' && outputOrientation === 'landscape') return 'smart-crop';
+  // Wide panorama-ish landscape with no faces in portrait output → mirror
+  // -extend looks dramatic (sky/water/scenery), better than another blur-fill.
+  if (itemAR > 1.9 && outputOrientation === 'portrait') return 'mirror-extend';
   return 'blur-fill';
 }
 
@@ -961,16 +1092,18 @@ function buildTimeline(orderedItems, allClusters, opts) {
   const timeline = [];
 
   // --- Title card ---
-  const dateLabel = fmtTitleDateRange(orderedItems.map(p => p.ts));
   const usedClusters = [...new Set(orderedItems.map(p => p.clusterId).filter(Boolean))]
     .map(cid => allClusters.find(c => c.id === cid))
     .filter(Boolean);
   const locLabel = fmtLocationSummary(usedClusters);
+  // Subtitle = specific date range; the big title above it is filled in by
+  // resolveTitle() in buildPlan (place + 年月 / user override / custom).
+  const dateRangeLabel = fmtTitleDateRange(orderedItems.map(p => p.ts));
   timeline.push({
     kind: 'title',
     durationSec: TITLE_CARD_SEC,
-    title: dateLabel || 'Memories',
-    subtitle: locLabel || null,
+    title: 'Memories', // overwritten in buildPlan via resolveTitle()
+    subtitle: locLabel ? `${locLabel} · ${dateRangeLabel}` : dateRangeLabel,
   });
 
   // --- Body clips with day/location chapter overlays ---
@@ -1040,13 +1173,33 @@ function buildTimeline(orderedItems, allClusters, opts) {
 // final plan ready for the renderer.
 async function buildPlan(opts) {
   const prefOri = opts.orientation;
-  const reps = state.groups.map(g => pickBestOfGroup(g, prefOri));
-  const clusters = clusterByGps(reps);
-  for (const c of clusters) for (const p of c.items) p.clusterId = c.id;
-  await nameClusters(clusters, opts.useNominatim !== false);
+  // Cache cluster naming across previews (Nominatim is rate-limited so
+  // re-running it on every Preview click is wasteful) — keyed on
+  // orientation since rep selection depends on it.
+  let reps, clusters;
+  if (state.namedClusters && state.cachedReps && state.cachedOri === prefOri) {
+    reps = state.cachedReps;
+    clusters = state.namedClusters;
+  } else {
+    reps = state.groups.map(g => pickBestOfGroup(g, prefOri));
+    clusters = clusterByGps(reps);
+    for (const c of clusters) for (const p of c.items) p.clusterId = c.id;
+    await nameClusters(clusters, opts.useNominatim !== false);
+    state.cachedReps = reps;
+    state.namedClusters = clusters;
+    state.cachedOri = prefOri;
+    state.titleCandidates = generateTitleCandidates(clusters, reps.map(p => p.ts));
+    populateTitleSelect();
+  }
   const selected = selectByMode(reps, opts.mode, opts);
   const ordered = orderForTimeline(selected, clusters);
   const built = buildTimeline(ordered, clusters, opts);
+  // Apply title override (custom or picked candidate). Title-card subtitle
+  // remains the auto-built location summary so the user's title stays clean.
+  const titleStr = resolveTitle(opts);
+  if (titleStr && built.timeline[0] && built.timeline[0].kind === 'title') {
+    built.timeline[0].title = titleStr;
+  }
   // Post-process passes (run order matters):
   //   1. mergeStackPairs — pair consecutive landscape photos in portrait out
   //   2. mergeVideoBands — wrap landscape videos with photo borders in
@@ -1332,6 +1485,52 @@ function drawSmartCrop(ctx, canvasW, canvasH, source, srcW, srcH, focalPoint, t,
   ctx.drawImage(source, dx, dy, drawW, drawH);
 }
 
+// Mirror-extend: scenic landscape in portrait output. Draws the photo
+// fitted to canvas width, then mirrored copies above and below to fill the
+// vertical gaps. A subtle dark gradient at the top/bottom keeps the
+// reflection from competing with the main subject.
+function drawMirrorExtend(ctx, canvasW, canvasH, asset, t, kb) {
+  const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
+  const tEased = easeInOut(t);
+  const zoom = 1.0 + 0.05 * tEased;
+  const scale = (canvasW / srcW) * zoom;
+  const drawW = srcW * scale;
+  const drawH = srcH * scale;
+  const dx = (canvasW - drawW) / 2;
+  const dy = (canvasH - drawH) / 2;
+  // Slight vertical drift on the whole stack
+  const driftY = (kb && kb.panSign ? kb.panSign : 1) * (canvasH * 0.02) * tEased;
+  ctx.save();
+  ctx.translate(0, driftY);
+  // Top reflection (mirrored above the main image)
+  if (dy > 0) {
+    ctx.save();
+    ctx.translate(dx, dy);
+    ctx.scale(1, -1);
+    ctx.drawImage(asset.bitmap, 0, 0, drawW, drawH);
+    ctx.restore();
+  }
+  // Original
+  ctx.drawImage(asset.bitmap, dx, dy, drawW, drawH);
+  // Bottom reflection
+  if (dy + drawH < canvasH) {
+    ctx.save();
+    ctx.translate(dx, dy + drawH * 2);
+    ctx.scale(1, -1);
+    ctx.drawImage(asset.bitmap, 0, 0, drawW, drawH);
+    ctx.restore();
+  }
+  ctx.restore();
+  // Vignette to fade reflections at the very edges
+  const grad = ctx.createLinearGradient(0, 0, 0, canvasH);
+  grad.addColorStop(0,    'rgba(0,0,0,0.55)');
+  grad.addColorStop(0.18, 'rgba(0,0,0,0)');
+  grad.addColorStop(0.82, 'rgba(0,0,0,0)');
+  grad.addColorStop(1,    'rgba(0,0,0,0.55)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvasW, canvasH);
+}
+
 // Generic "scale-to-cover and pan inside a sub-rect of the canvas" helper.
 // Used by stack-pair and video-band layouts. Source can be ImageBitmap or
 // HTMLVideoElement (drawImage handles either).
@@ -1455,6 +1654,12 @@ function drawCardBackground(ctx, w, h) {
 function fontStack() {
   return '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", Arial, sans-serif';
 }
+// Title-card display font — serif for that "memorial film" look. Browsers
+// fall back per-character so Latin renders as Playfair Display and Japanese
+// as Shippori Mincho.
+function titleFontStack() {
+  return '"Playfair Display", "Shippori Mincho", "Hiragino Mincho ProN", "Noto Serif JP", serif';
+}
 
 function drawTitleCard(ctx, w, h, clip, localT) {
   drawCardBackground(ctx, w, h);
@@ -1471,16 +1676,26 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   ctx.globalAlpha *= Math.max(0, Math.min(1, alpha));
   ctx.textAlign = 'center';
   ctx.fillStyle = '#fff';
-  const titleSize = Math.max(40, Math.round(h * 0.06));
-  ctx.font = `700 ${titleSize}px ${fontStack()}`;
+  // Slight glow for that opening-title-of-a-movie feel
+  ctx.shadowColor = 'rgba(255,255,255,0.18)';
+  ctx.shadowBlur = Math.round(h * 0.012);
+  // Bigger + serif display font
+  const titleSize = Math.max(48, Math.round(h * 0.078));
+  ctx.font = `800 ${titleSize}px ${titleFontStack()}`;
   ctx.textBaseline = 'bottom';
-  ctx.fillText(clip.title || '', w / 2, h * 0.5 - h * 0.005);
+  ctx.fillText(clip.title || '', w / 2, h * 0.50 - h * 0.012);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+  // Hairline accent under the title
+  const accentW = Math.round(h * 0.05);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillRect(w / 2 - accentW / 2, h * 0.50 + h * 0.002, accentW, Math.max(1, Math.round(h * 0.0015)));
   if (clip.subtitle) {
-    const subSize = Math.max(20, Math.round(h * 0.028));
+    const subSize = Math.max(20, Math.round(h * 0.026));
     ctx.font = `400 ${subSize}px ${fontStack()}`;
     ctx.fillStyle = '#cbd5e1';
     ctx.textBaseline = 'top';
-    ctx.fillText(clip.subtitle, w / 2, h * 0.5 + h * 0.015);
+    ctx.fillText(clip.subtitle, w / 2, h * 0.50 + h * 0.018);
   }
   ctx.restore();
 }
@@ -1590,9 +1805,12 @@ class Renderer {
   }
 
   async preload(onProgress) {
+    // Wait for the display-font CSS to finish loading so the title card
+    // doesn't briefly render in a fallback font.
+    if (document.fonts && document.fonts.ready) {
+      try { await withTimeout(document.fonts.ready, 4000, 'fonts'); } catch (_) {}
+    }
     this.assets = await preloadAssets(this.plan, onProgress);
-    // Attach video audio routes once assets are decoded so MediaElementSource
-    // is created synchronously after the user-gesture context spawn.
     if (this.mixer) {
       for (const clip of this.plan.timeline) {
         if (clip.kind !== 'video') continue;
@@ -1689,6 +1907,8 @@ class Renderer {
       } else if (clip.layout === 'smart-crop') {
         drawSmartCrop(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height,
                       clip.ref.focalPoint, t, kb);
+      } else if (clip.layout === 'mirror-extend') {
+        drawMirrorExtend(ctx, w, h, asset, t, kb);
       } else {
         drawCoverKenburns(ctx, w, h, asset.bitmap, asset.bitmap.width, asset.bitmap.height, t, kb);
       }
@@ -1923,6 +2143,10 @@ function setSettingsBusy(busy) {
 
 async function ingestFiles(files) {
   if (state.loading) return;
+  // New batch invalidates cached cluster naming + title candidates.
+  state.namedClusters = null;
+  state.cachedReps = null;
+  state.titleCandidates = [];
   const accepted = files.filter(f =>
     (f.type && f.type.startsWith('image/')) || isHeic(f) || isVideo(f)
   );
@@ -2058,8 +2282,19 @@ function bindSettings() {
     dom.uploadField.style.display = (bgm === 'upload') ? '' : 'none';
   });
   document.getElementById('orientation').addEventListener('change', () => {
+    // Cluster naming depends on rep choice which depends on orientation,
+    // so invalidate the cache so titles regenerate on the next preview.
+    state.namedClusters = null;
+    state.cachedReps = null;
     if (state.groups && state.groups.length) renderReview();
   });
+  const titleSel = document.getElementById('titleSelect');
+  const titleCustom = document.getElementById('titleCustom');
+  if (titleSel) {
+    titleSel.addEventListener('change', () => {
+      titleCustom.style.display = titleSel.value === '__custom__' ? '' : 'none';
+    });
+  }
   // populate catalog
   const catalog = (window.MUSIC_CATALOG || []);
   dom.catalogSelect.innerHTML = '';
@@ -2161,6 +2396,8 @@ function estimateTargetSec() {
 
 function readPlanOpts() {
   const track = getSelectedCatalogTrack();
+  const titleSel = document.getElementById('titleSelect');
+  const titleCustomInput = document.getElementById('titleCustom');
   return {
     orientation: getOutputOrientation(),
     resolution: document.getElementById('resolution').value,
@@ -2170,8 +2407,49 @@ function readPlanOpts() {
     bgmDurationSec: track ? track.durationSec : null,
     bgmTempo: track ? bgmTempoFromTags(track.tags) : 'medium',
     subtitlesOn: document.getElementById('subtitles').value !== 'off',
+    titleMode: titleSel ? titleSel.value : '__auto__',
+    titleCustom: titleCustomInput ? (titleCustomInput.value || '').trim() : '',
     useNominatim: true,
   };
+}
+
+function resolveTitle(opts) {
+  if (opts.titleMode === '__custom__' && opts.titleCustom) return opts.titleCustom;
+  if (opts.titleMode === '__auto__' || !opts.titleMode) {
+    return pickAutoTitle(state.titleCandidates || []);
+  }
+  // Otherwise titleMode is the candidate string itself
+  return opts.titleMode;
+}
+
+function populateTitleSelect() {
+  const sel = document.getElementById('titleSelect');
+  if (!sel) return;
+  const cands = state.titleCandidates || [];
+  const prevValue = sel.value;
+  // Reset options
+  sel.innerHTML = '';
+  const optAuto = document.createElement('option');
+  optAuto.value = '__auto__';
+  const auto = pickAutoTitle(cands);
+  optAuto.textContent = auto ? `🪄 お任せ (${auto})` : '🪄 お任せ';
+  sel.appendChild(optAuto);
+  for (const c of cands) {
+    const o = document.createElement('option');
+    o.value = c;
+    o.textContent = c;
+    sel.appendChild(o);
+  }
+  const optCustom = document.createElement('option');
+  optCustom.value = '__custom__';
+  optCustom.textContent = '✏️ カスタム入力';
+  sel.appendChild(optCustom);
+  // Restore previous selection if still valid
+  if (prevValue && [...sel.options].some(o => o.value === prevValue)) {
+    sel.value = prevValue;
+  } else {
+    sel.value = '__auto__';
+  }
 }
 
 // Resolve the BGM source to a Blob/URL to feed AudioMixer.setupBgm. Returns

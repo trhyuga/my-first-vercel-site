@@ -98,6 +98,15 @@
       </div>
 
       <div class="field">
+        <label for="titleSelect">タイトル</label>
+        <select id="titleSelect">
+          <option value="__auto__" selected>🪄 お任せ (自動生成)</option>
+          <option value="__custom__">✏️ カスタム入力</option>
+        </select>
+        <input type="text" id="titleCustom" placeholder="例: 京都 2024年12月" style="display:none; margin-top:0.4rem;" />
+      </div>
+
+      <div class="field">
         <label>BGM</label>
         <div class="radio-group" id="bgmGroup">
           <label><input type="radio" name="bgm" value="catalog" id="bgmCatalogRadio"><span>🎵 推奨曲から自動選曲</span></label>
