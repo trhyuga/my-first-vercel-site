@@ -499,7 +499,8 @@
       await teardownAudioRouting();
       srcImage.style.display = 'none';
       srcVideo.style.display = '';
-      srcVideo.src = URL.createObjectURL(file);
+      revokeObjectUrls();
+      srcVideo.src = trackObjectUrl(URL.createObjectURL(file));
       dz.classList.add('hidden');
       workArea.classList.remove('hidden');
       await new Promise(res => { srcVideo.onloadedmetadata = res; });
@@ -525,7 +526,8 @@
       srcVideo.pause();
       srcVideo.style.display = 'none';
       srcImage.style.display = '';
-      srcImage.src = URL.createObjectURL(file);
+      revokeObjectUrls();
+      srcImage.src = trackObjectUrl(URL.createObjectURL(file));
       dz.classList.add('hidden');
       workArea.classList.remove('hidden');
       await new Promise((res, rej) => {
@@ -561,15 +563,9 @@
       updateSelBtn();
       processStatus.innerHTML = '';
       detectStatus.innerHTML = '';
-      window._blurredBlob = null;
+      revokeObjectUrls();
       await teardownAudioRouting();
-      if (window._opfsName) {
-        try {
-          const root = await navigator.storage.getDirectory();
-          await root.removeEntry(window._opfsName);
-        } catch (e) {}
-        window._opfsName = null;
-      }
+      await clearBlurResult();
     });
 
     // ---- Face detection ----
@@ -785,6 +781,31 @@
     // ---- Full-video processing ----
     let processedBlob = null;
 
+    // Result of the most recent processing run — one lookup surface instead of
+    // a pile of window._* globals.
+    const blurResult = { blob: null, ext: null, opfsName: null };
+
+    // Track every URL we hand to <video>/<img> so we can revoke them on
+    // teardown instead of leaking a blob URL per uploaded file.
+    const objectUrls = [];
+    function trackObjectUrl(url) { objectUrls.push(url); return url; }
+    function revokeObjectUrls() {
+      for (const u of objectUrls) { try { URL.revokeObjectURL(u); } catch (e) {} }
+      objectUrls.length = 0;
+    }
+
+    async function clearBlurResult() {
+      blurResult.blob = null;
+      blurResult.ext = null;
+      if (blurResult.opfsName) {
+        try {
+          const root = await navigator.storage.getDirectory();
+          await root.removeEntry(blurResult.opfsName);
+        } catch (e) {}
+        blurResult.opfsName = null;
+      }
+    }
+
     function euclidean(a, b) {
       let s = 0;
       for (let i = 0; i < a.length; i++) { const d = a[i] - b[i]; s += d * d; }
@@ -986,8 +1007,8 @@
       const q = isPng ? undefined : 0.92;
       const blob = await new Promise(r => out.toBlob(r, mime, q));
       processProgress(100, '✅ 完了');
-      window._blurredExt = ext;
-      window._blurredBlob = blob;
+      blurResult.ext = ext;
+      blurResult.blob = blob;
       processStatus.insertAdjacentHTML('beforeend', `
         <div class="alert success" style="margin-top:0.5rem;">
           ${toBlur.length}箇所をぼかしました・${ext.toUpperCase()}<br>
@@ -1430,7 +1451,7 @@
           } catch (e) {
             processedBlob = new Blob(chunks, { type });
           }
-          window._opfsName = opfsName;
+          blurResult.opfsName = opfsName;
         } else {
           processedBlob = new Blob(chunks, { type });
         }
@@ -1456,8 +1477,8 @@
           </div>
           <div class="btn-row" id="postActions"></div>
         `);
-        window._blurredExt = ext;
-        window._blurredBlob = processedBlob;
+        blurResult.ext = ext;
+        blurResult.blob = processedBlob;
         // Save buttons are wired in Step 5
         renderSaveButtons();
       } catch (e) {
@@ -1552,9 +1573,9 @@
     function renderSaveButtons() {
       const actions = document.getElementById('postActions');
       if (!actions) return;
-      const ext = window._blurredExt || 'webm';
-      const blob = window._blurredBlob;
-      const previewUrl = blob ? URL.createObjectURL(blob) : '';
+      const ext = blurResult.ext || 'webm';
+      const blob = blurResult.blob;
+      const previewUrl = blob ? trackObjectUrl(URL.createObjectURL(blob)) : '';
       // Video preview: preload="none" + lazy-load on user tap. Decoding a just-
       // finished 100MB+ blob into a <video> immediately after encoding often
       // pushes iOS Safari over its memory ceiling and the tab silently
@@ -1598,27 +1619,21 @@
       };
 
       document.getElementById('savePhotosBtn').addEventListener('click', async () => {
-        if (!window._blurredBlob) return;
+        if (!blurResult.blob) return;
         const base = safeFilename(nameInput.value, 'blurred');
-        const res = await sharePhotos(window._blurredBlob, base + '.' + ext);
+        const res = await sharePhotos(blurResult.blob, base + '.' + ext);
         showResult(res);
       });
       document.getElementById('saveFilesBtn').addEventListener('click', async () => {
-        if (!window._blurredBlob) return;
+        if (!blurResult.blob) return;
         const base = safeFilename(nameInput.value, 'blurred');
-        const res = await saveToFiles(window._blurredBlob, base + '.' + ext);
+        const res = await saveToFiles(blurResult.blob, base + '.' + ext);
         showResult(res);
       });
       document.getElementById('redoBtn').addEventListener('click', async () => {
         processStatus.innerHTML = '';
-        window._blurredBlob = null;
-        if (window._opfsName) {
-          try {
-            const root = await navigator.storage.getDirectory();
-            await root.removeEntry(window._opfsName);
-          } catch (e) {}
-          window._opfsName = null;
-        }
+        revokeObjectUrls();
+        await clearBlurResult();
       });
       const showPreviewBtn = document.getElementById('showPreviewBtn');
       if (showPreviewBtn) {
