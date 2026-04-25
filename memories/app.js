@@ -2953,6 +2953,10 @@ async function onExport() {
     dom.previewBtn.disabled = false;
     dom.exportBtn.textContent = orig;
     if (mixerToDispose) mixerToDispose.destroy();
+    if (activeRenderer) {
+      try { activeRenderer.dispose(); } catch (_) {}
+      activeRenderer = null;
+    }
   }
 }
 
@@ -3000,6 +3004,10 @@ async function onPreview() {
     dom.previewBtn.disabled = false;
     dom.previewBtn.textContent = orig;
     if (mixerToDispose) mixerToDispose.destroy();
+    if (activeRenderer) {
+      try { activeRenderer.dispose(); } catch (_) {}
+      activeRenderer = null;
+    }
   }
 }
 
