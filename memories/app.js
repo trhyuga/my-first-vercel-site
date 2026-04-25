@@ -72,13 +72,6 @@ const dom = {
   renderProgBar: document.getElementById('renderProgBar'),
   output: document.getElementById('output'),
   quickEdit: document.getElementById('quickEdit'),
-  quickTitle: document.getElementById('quickTitle'),
-  quickSubtitle: document.getElementById('quickSubtitle'),
-  quickCloserMain: document.getElementById('quickCloserMain'),
-  quickCloserCaption: document.getElementById('quickCloserCaption'),
-  quickBgm: document.getElementById('quickBgm'),
-  quickAudition: document.getElementById('quickAudition'),
-  quickExport: document.getElementById('quickExport'),
   quickApply: document.getElementById('quickApply'),
 };
 
@@ -1286,46 +1279,28 @@ async function buildPlan(opts) {
   const selected = selectByMode(reps, opts.mode, opts);
   const ordered = orderForTimeline(selected, clusters);
   const built = buildTimeline(ordered, clusters, opts);
-  // Apply title override (custom or picked candidate). Title-card subtitle
-  // remains the auto-built location summary so the user's title stays clean.
-  // The closer card mirrors the resolved title as its subtitle so the video
-  // ends with the same name it opened with.
-  // Quick-edit override beats every other source. Title customs come from
-  // the settings panel (titleCustom / titleSubtitleCustom etc.) AND from
-  // the inline preview-time editor (state.overrides), with the inline
-  // editor winning when both are set.
-  const ovTitle    = state.overrides && state.overrides.title;
-  const ovSub      = state.overrides && state.overrides.subtitle;
-  const ovCloser   = state.overrides && state.overrides.closerTitle;
-  const ovCloserSub = state.overrides && state.overrides.closerSubtitle;
-
-  // Title card
-  const titleStr = ovTitle != null ? ovTitle : resolveTitle(opts);
+  // Title card — uses the settings-panel title state. resolveTitle() returns
+  // the user's __custom__ string when chosen, else the auto-generated one.
+  const titleStr = resolveTitle(opts);
   if (built.timeline[0] && built.timeline[0].kind === 'title') {
     if (titleStr) built.timeline[0].title = titleStr;
-    if (ovSub != null) built.timeline[0].subtitle = ovSub;
-    else if (opts.titleMode === '__custom__' && opts.titleSubtitleCustom) {
+    if (opts.titleMode === '__custom__' && opts.titleSubtitleCustom) {
       built.timeline[0].subtitle = opts.titleSubtitleCustom;
     }
   }
 
   // Closer card — closerCustom is the BIG line ("Memories"-slot),
-  // closerSubtitleCustom is the small caption above it.
+  // closerSubtitleCustom is the small caption above it. In __auto__ the
+  // big line mirrors the resolved title.
   const lastClip = built.timeline[built.timeline.length - 1];
   if (lastClip && lastClip.kind === 'closer') {
-    let closerMain = null;     // big line
-    let closerCaption = null;  // small caption
+    let closerMain = null, closerCaption = null;
     if (opts.closerMode === '__custom__') {
       if (opts.closerCustom) closerMain = opts.closerCustom;
       if (opts.closerSubtitleCustom) closerCaption = opts.closerSubtitleCustom;
-    } else {
-      // Auto: mirror the resolved title in the big line so the video closes
-      // on the same name it opened with.
-      if (titleStr) closerMain = titleStr;
+    } else if (titleStr) {
+      closerMain = titleStr;
     }
-    // Inline editor wins
-    if (ovCloser != null) closerMain = ovCloser;
-    if (ovCloserSub != null) closerCaption = ovCloserSub;
     if (closerMain != null) lastClip.subtitle = closerMain;
     if (closerCaption != null) lastClip.title = closerCaption;
   }
@@ -1425,22 +1400,16 @@ function mergeStackPairs(timeline, opts) {
 // =============================================================================
 
 function canvasDimsFor(orientation, resolutionShortSide, mode) {
-  let r;
   if (mode === 'preview') {
-    // Preview canvas internal size matches the bitmap budget (720 long side)
-    // so single-photo cover-kenburns / smart-crop don't suffer upscale-blur.
-    // The on-screen <canvas> CSS-fits the .stage-wrap regardless.
-    r = orientation === 'landscape' ? 405 : 720; // logic below picks short side
-  } else {
-    r = parseInt(resolutionShortSide, 10) || 720;
+    // Internal canvas is small (long side 480) — bitmaps cap below this in
+    // most cases, the on-screen <canvas> CSS-stretches to fit the stage.
+    // Keeps the per-frame rasteriser cheap on iOS Safari.
+    if (orientation === 'square') return [480, 480];
+    if (orientation === 'landscape') return [480, 270];
+    return [270, 480]; // portrait
   }
-  if (mode === 'preview' && orientation === 'square') return [720, 720];
+  const r = parseInt(resolutionShortSide, 10) || 720;
   if (orientation === 'square') return [r, r];
-  if (mode === 'preview') {
-    // For preview we always want long-side = 720, short = 405.
-    if (orientation === 'landscape') return [720, 405];
-    return [405, 720]; // portrait
-  }
   const long = Math.round(r * 16 / 9);
   if (orientation === 'landscape') return [long, r];
   return [r, long];
@@ -1499,28 +1468,28 @@ async function decodeBitmapForRender(ref, maxDim = 1600) {
   return await createImageBitmap(src);
 }
 
-// Different working-set bitmap budget for preview vs export. Preview also
-// scales DOWN further as the photo+video count grows so iOS Safari can
-// still hold the working set even with 50+ items.
+// Different working-set bitmap budget for preview vs export. Preview is
+// aggressive — iOS Safari has ~250MB usable RAM and the whole timeline's
+// bitmaps live in memory at once.
 function getRenderBitmapMaxDim(opts, mode, itemCount) {
   const res = parseInt(opts && opts.resolution, 10) || 720;
   const canvasLong = Math.round(res * 16 / 9);
   if (mode === 'export') {
-    // Slightly above the canvas long side for ken-burns headroom, capped
-    // at 2400 to keep export RAM bounded too.
     return Math.min(2400, Math.round(canvasLong * 1.4));
   }
-  // Preview budget: scaled by item count to bound memory.
+  // Preview: drops fast as the upload grows. Each bitmap is ~ (dim/1000)^2 ×
+  // 4MB raw, so a 50-item set at 320 long side is ~16 MB total — comfortably
+  // inside iOS Safari's ceiling.
   const n = itemCount || 0;
-  if (n <= 15) return 720;
-  if (n <= 30) return 600;
-  if (n <= 60) return 480;
-  return 400;
+  if (n <= 8)  return 540;
+  if (n <= 20) return 432;
+  if (n <= 40) return 360;
+  if (n <= 80) return 300;
+  return 260;
 }
 
-// Did we drop below 720 to fit memory? Used to surface the disclaimer.
 function previewQualityReduced(opts, itemCount) {
-  return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 720;
+  return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 540;
 }
 
 async function preloadAssets(plan, opts, mode, onProgress) {
@@ -2766,10 +2735,21 @@ function releaseStatePhotoUrls() {
 
 async function ingestFiles(files) {
   if (state.loading) return;
-  // New batch invalidates cached cluster naming + title candidates.
+  // New batch invalidates cached cluster naming + title candidates, and
+  // resets title/closer dropdowns to __auto__ so the next preview rebuilds
+  // them from the freshly-analysed clusters instead of carrying a stale
+  // custom string from the previous upload.
   state.namedClusters = null;
   state.cachedReps = null;
   state.titleCandidates = [];
+  for (const sel of ['titleSelect', 'closerSelect']) {
+    const el = document.getElementById(sel);
+    if (el) el.value = '__auto__';
+  }
+  for (const id of ['titleCustom', 'titleSubtitleCustom', 'closerCustom', 'closerSubtitleCustom']) {
+    const el = document.getElementById(id);
+    if (el) { el.value = ''; el.style.display = 'none'; }
+  }
   const accepted = files.filter(f =>
     (f.type && f.type.startsWith('image/')) || isHeic(f) || isVideo(f)
   );
@@ -2976,15 +2956,6 @@ function bindSettings() {
 // without actually rendering yet. Replaced by the real preview in Step 5.
 // -----------------------------------------------------------------------------
 function getSelectedCatalogTrack() {
-  // Quick-edit override (preview-time UI) wins over the settings panel.
-  const ov = state.overrides && state.overrides.bgmId;
-  if (ov && ov !== '__inherit__') {
-    if (ov === '__none__') return null;
-    if (ov === '__auto__') {
-      return autoPickBgmTrack(estimateTargetSec(), 'auto', window.MUSIC_CATALOG || []);
-    }
-    return (window.MUSIC_CATALOG || []).find(t => t.id === ov) || null;
-  }
   const radio = document.querySelector('input[name="bgm"]:checked');
   if (!radio || radio.value !== 'catalog') return null;
   const sel = document.getElementById('catalogSelect');
@@ -3165,18 +3136,6 @@ function populateTitleSelect() {
 // (must be CORS-enabled) — the catalog ships empty so this only runs once
 // real entries are populated.
 async function resolveBgmSource() {
-  // Quick-edit override path: '__none__' / '__auto__' / track.id (catalog).
-  // Upload-from-quick-edit isn't a thing — user keeps that on the settings
-  // panel; quick-edit only switches between the catalog tracks.
-  const ov = state.overrides && state.overrides.bgmId;
-  if (ov && ov !== '__inherit__') {
-    if (ov === '__none__') return null;
-    const track = getSelectedCatalogTrack();
-    if (!track) return null;
-    if (track.kind === 'synth') return { kind: 'synth', preset: track.preset };
-    if (track.url) return track.url;
-    return null;
-  }
   const radio = document.querySelector('input[name="bgm"]:checked');
   if (!radio || radio.value === 'none') return null;
   if (radio.value === 'upload') {
@@ -3445,6 +3404,9 @@ async function onPreview() {
     dom.stagePanel.style.display = 'flex';
     dom.stageStatus.textContent = '🖼 アセット読み込み中…';
     dom.stageOverlay.classList.remove('hidden');
+    // Bring the preview into view — the stage is now above settings, so
+    // smooth-scroll to it and the user sees what's happening.
+    try { dom.stagePanel.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {}
     // Preview-quality disclaimer if memory budget kicked in.
     const itemCount = plan.timeline.filter(c => c.kind === 'photo' || c.kind === 'video').length;
     const note = document.getElementById('previewQualityNote');
@@ -3487,101 +3449,42 @@ function showError(msg) {
   dom.output.appendChild(div);
 }
 
-// Quick-edit panel (under the preview canvas) — exposes title / subtitle
-// / BGM as live inputs so the user can tweak and re-render without
-// scrolling back to the settings panel.
-function populateQuickEdit(plan, currentTrack) {
-  if (!dom.quickEdit) return;
-  dom.quickEdit.style.display = 'flex';
+// After every preview, copy the resolved title / subtitle / closer texts
+// into the settings panel and flip the title/closer mode to '__custom__'
+// so the user can edit them in place and re-preview. The settings panel
+// is the *only* edit surface — there is no separate quick-edit panel.
+function populateSettingsFromPlan(plan) {
   const titleClip = plan.timeline[0];
   const closerClip = plan.timeline[plan.timeline.length - 1];
-  dom.quickTitle.value = titleClip ? (titleClip.title || '') : '';
-  dom.quickSubtitle.value = titleClip ? (titleClip.subtitle || '') : '';
-  if (dom.quickCloserMain) {
-    dom.quickCloserMain.value = closerClip && closerClip.kind === 'closer'
-      ? (closerClip.subtitle || '') : '';
-  }
-  if (dom.quickCloserCaption) {
-    dom.quickCloserCaption.value = closerClip && closerClip.kind === 'closer'
-      ? (closerClip.title || '') : '';
-  }
-  // Rebuild dropdown each time so newly-added catalog tracks show up too.
-  dom.quickBgm.innerHTML = '';
-  const noOpt = document.createElement('option');
-  noOpt.value = '__none__'; noOpt.textContent = '🔇 BGMなし';
-  dom.quickBgm.appendChild(noOpt);
-  const autoOpt = document.createElement('option');
-  autoOpt.value = '__auto__'; autoOpt.textContent = '🪄 自動選曲';
-  dom.quickBgm.appendChild(autoOpt);
-  for (const t of (window.MUSIC_CATALOG || [])) {
-    const o = document.createElement('option');
-    o.value = t.id;
-    o.textContent = `${t.title} (${Math.round(t.durationSec)}s)`;
-    dom.quickBgm.appendChild(o);
-  }
-  // Default: whatever the last preview actually used.
-  const ov = state.overrides && state.overrides.bgmId;
-  if (ov && ov !== '__inherit__') {
-    dom.quickBgm.value = ov;
-  } else if (currentTrack && currentTrack.id) {
-    dom.quickBgm.value = currentTrack.id;
-  } else {
-    dom.quickBgm.value = '__auto__';
-  }
-}
 
-function readQuickEditOverrides() {
-  state.overrides = state.overrides || {};
-  state.overrides.title          = (dom.quickTitle.value || '').trim() || null;
-  state.overrides.subtitle       = (dom.quickSubtitle.value || '').trim() || null;
-  state.overrides.closerTitle    = dom.quickCloserMain
-    ? ((dom.quickCloserMain.value || '').trim() || null) : null;
-  state.overrides.closerSubtitle = dom.quickCloserCaption
-    ? ((dom.quickCloserCaption.value || '').trim() || null) : null;
-  state.overrides.bgmId          = dom.quickBgm ? (dom.quickBgm.value || null) : null;
-}
+  const titleSel = document.getElementById('titleSelect');
+  const titleCustom = document.getElementById('titleCustom');
+  const titleSubtitleCustom = document.getElementById('titleSubtitleCustom');
+  if (titleSel && titleClip) {
+    titleSel.value = '__custom__';
+    if (titleCustom) {
+      titleCustom.value = titleClip.title || '';
+      titleCustom.style.display = '';
+    }
+    if (titleSubtitleCustom) {
+      titleSubtitleCustom.value = titleClip.subtitle || '';
+      titleSubtitleCustom.style.display = '';
+    }
+  }
 
-function bindQuickEdit() {
-  if (dom.quickApply) {
-    dom.quickApply.addEventListener('click', () => {
-      readQuickEditOverrides();
-      onPreview();
-    });
-  }
-  if (dom.quickExport) {
-    dom.quickExport.addEventListener('click', () => {
-      readQuickEditOverrides();
-      onExport();
-    });
-  }
-  // Audition button right next to the BGM dropdown — same logic as the
-  // settings-panel one but operates on the quickBgm select.
-  if (dom.quickAudition) {
-    dom.quickAudition.addEventListener('click', () => {
-      if (auditionAudio) { stopAudition(); return; }
-      unlockHtmlAudioPlayback();
-      stopAudition();
-      const id = dom.quickBgm.value;
-      let track = null;
-      if (id && id !== '__none__' && id !== '__auto__' && id !== '__inherit__') {
-        track = (window.MUSIC_CATALOG || []).find(t => t.id === id);
-      }
-      if (!track) {
-        track = autoPickBgmTrack(estimateTargetSec(), 'auto', window.MUSIC_CATALOG || [])
-             || (window.MUSIC_CATALOG || [])[0];
-      }
-      if (!track || !track.url) { alert('再生できる曲がありません'); return; }
-      const a = new Audio();
-      a.src = track.url;
-      a.preload = 'auto';
-      a.addEventListener('ended', stopAudition, { once: true });
-      a.addEventListener('error', () => { stopAudition(); alert('再生エラー'); }, { once: true });
-      a.play().then(() => {
-        dom.quickAudition.textContent = '⏸';
-        auditionAudio = a;
-      }).catch(() => stopAudition());
-    });
-    if (dom.quickBgm) dom.quickBgm.addEventListener('change', stopAudition);
+  const closerSel = document.getElementById('closerSelect');
+  const closerCustom = document.getElementById('closerCustom');
+  const closerSubtitleCustom = document.getElementById('closerSubtitleCustom');
+  if (closerSel && closerClip && closerClip.kind === 'closer') {
+    closerSel.value = '__custom__';
+    if (closerCustom) {
+      closerCustom.value = closerClip.subtitle || '';
+      closerCustom.style.display = '';
+    }
+    if (closerSubtitleCustom) {
+      closerSubtitleCustom.value = closerClip.title || '';
+      closerSubtitleCustom.style.display = '';
+    }
   }
 }
 
@@ -3596,7 +3499,7 @@ function renderPlanSummary(plan) {
   wrap.className = 'alert success';
   const track = getSelectedCatalogTrack();
   state.lastUsedTrack = track;
-  populateQuickEdit(plan, track);
+  populateSettingsFromPlan(plan);
   const lines = [
     `🎬 構成完了 — 全 ${totalSec.toFixed(1)} 秒 / 1枚あたり ${perPhotoSec.toFixed(2)} 秒`,
     `タイトル: ${timeline[0].title}${timeline[0].subtitle ? ' / ' + timeline[0].subtitle : ''}`,
@@ -3641,7 +3544,6 @@ function renderPlanSummary(plan) {
 // -----------------------------------------------------------------------------
 bindDropzone();
 bindSettings();
-bindQuickEdit();
 window.addEventListener('beforeunload', () => {
   releaseStatePhotoUrls();
   if (activeRenderer) try { activeRenderer.dispose(); } catch (_) {}

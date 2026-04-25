@@ -215,6 +215,21 @@ header.site {
   background: #e0f2fe;
 }
 
+.audition-btn {
+  flex: 0 0 auto;
+  width: 38px;
+  padding: 0;
+  font-size: 0.85rem;
+  line-height: 1;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #f1f5f9;
+  color: #0f172a;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.audition-btn:active { background: #e2e8f0; }
+
 .btn-row {
   display: flex;
   gap: 0.6rem;
