@@ -140,6 +140,21 @@
           <p id="stageStatus">待機中</p>
         </div>
       </div>
+      <div id="quickEdit" style="display:none;">
+        <div class="field">
+          <label for="quickTitle">タイトル</label>
+          <input type="text" id="quickTitle" />
+        </div>
+        <div class="field">
+          <label for="quickSubtitle">サブタイトル</label>
+          <input type="text" id="quickSubtitle" />
+        </div>
+        <div class="field">
+          <label for="quickBgm">BGM</label>
+          <select id="quickBgm"></select>
+        </div>
+        <button class="btn-primary" id="quickApply">🔄 反映してプレビュー</button>
+      </div>
       <div class="progress-block" id="renderProg" style="display:none;">
         <span id="renderProgText">書き出し中…</span>
         <div class="progress-bar"><span id="renderProgBar" style="width:0%"></span></div>

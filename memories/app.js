@@ -34,6 +34,10 @@ const state = {
   photos: [],   // all decoded inputs (photos + videos), chronological
   groups: [],   // similarity groups [[photo,...], ...] (same chronology)
   loading: false,
+  // Inline preview-time overrides. quick-edit panel writes these; readPlanOpts
+  // and buildPlan honour them on the next preview/export run.
+  overrides: { title: null, subtitle: null, bgmId: null },
+  lastUsedTrack: null, // the track autoPickBgmTrack returned (for UI feedback)
 };
 
 // -----------------------------------------------------------------------------
@@ -67,6 +71,11 @@ const dom = {
   renderProgText: document.getElementById('renderProgText'),
   renderProgBar: document.getElementById('renderProgBar'),
   output: document.getElementById('output'),
+  quickEdit: document.getElementById('quickEdit'),
+  quickTitle: document.getElementById('quickTitle'),
+  quickSubtitle: document.getElementById('quickSubtitle'),
+  quickBgm: document.getElementById('quickBgm'),
+  quickApply: document.getElementById('quickApply'),
 };
 
 // -----------------------------------------------------------------------------
@@ -1274,13 +1283,18 @@ async function buildPlan(opts) {
   // remains the auto-built location summary so the user's title stays clean.
   // The closer card mirrors the resolved title as its subtitle so the video
   // ends with the same name it opened with.
-  const titleStr = resolveTitle(opts);
-  if (titleStr && built.timeline[0] && built.timeline[0].kind === 'title') {
-    built.timeline[0].title = titleStr;
+  // Quick-edit override beats every other source.
+  const ovTitle = state.overrides && state.overrides.title;
+  const ovSub   = state.overrides && state.overrides.subtitle;
+  const titleStr = ovTitle != null ? ovTitle : resolveTitle(opts);
+  if (built.timeline[0] && built.timeline[0].kind === 'title') {
+    if (titleStr) built.timeline[0].title = titleStr;
+    if (ovSub != null) built.timeline[0].subtitle = ovSub;
   }
   const lastClip = built.timeline[built.timeline.length - 1];
-  if (titleStr && lastClip && lastClip.kind === 'closer') {
-    lastClip.subtitle = titleStr;
+  if (lastClip && lastClip.kind === 'closer') {
+    if (titleStr) lastClip.subtitle = titleStr;
+    if (ovSub != null) lastClip.title = ovSub;
   }
   // Post-process passes (run order matters):
   //   1. mergeStackPairs — pair consecutive landscape photos in portrait out
@@ -2811,6 +2825,15 @@ function bindSettings() {
 // without actually rendering yet. Replaced by the real preview in Step 5.
 // -----------------------------------------------------------------------------
 function getSelectedCatalogTrack() {
+  // Quick-edit override (preview-time UI) wins over the settings panel.
+  const ov = state.overrides && state.overrides.bgmId;
+  if (ov && ov !== '__inherit__') {
+    if (ov === '__none__') return null;
+    if (ov === '__auto__') {
+      return autoPickBgmTrack(estimateTargetSec(), 'auto', window.MUSIC_CATALOG || []);
+    }
+    return (window.MUSIC_CATALOG || []).find(t => t.id === ov) || null;
+  }
   const radio = document.querySelector('input[name="bgm"]:checked');
   if (!radio || radio.value !== 'catalog') return null;
   const sel = document.getElementById('catalogSelect');
@@ -2937,6 +2960,18 @@ function populateTitleSelect() {
 // (must be CORS-enabled) — the catalog ships empty so this only runs once
 // real entries are populated.
 async function resolveBgmSource() {
+  // Quick-edit override path: '__none__' / '__auto__' / track.id (catalog).
+  // Upload-from-quick-edit isn't a thing — user keeps that on the settings
+  // panel; quick-edit only switches between the catalog tracks.
+  const ov = state.overrides && state.overrides.bgmId;
+  if (ov && ov !== '__inherit__') {
+    if (ov === '__none__') return null;
+    const track = getSelectedCatalogTrack();
+    if (!track) return null;
+    if (track.kind === 'synth') return { kind: 'synth', preset: track.preset };
+    if (track.url) return track.url;
+    return null;
+  }
   const radio = document.querySelector('input[name="bgm"]:checked');
   if (!radio || radio.value === 'none') return null;
   if (radio.value === 'upload') {
@@ -3215,6 +3250,52 @@ function showError(msg) {
   dom.output.appendChild(div);
 }
 
+// Quick-edit panel (under the preview canvas) — exposes title / subtitle
+// / BGM as live inputs so the user can tweak and re-render without
+// scrolling back to the settings panel.
+function populateQuickEdit(plan, currentTrack) {
+  if (!dom.quickEdit) return;
+  dom.quickEdit.style.display = 'flex';
+  const titleClip = plan.timeline[0];
+  dom.quickTitle.value = titleClip ? (titleClip.title || '') : '';
+  dom.quickSubtitle.value = titleClip ? (titleClip.subtitle || '') : '';
+  // Rebuild dropdown each time so newly-added catalog tracks show up too.
+  dom.quickBgm.innerHTML = '';
+  const noOpt = document.createElement('option');
+  noOpt.value = '__none__'; noOpt.textContent = '🔇 BGMなし';
+  dom.quickBgm.appendChild(noOpt);
+  const autoOpt = document.createElement('option');
+  autoOpt.value = '__auto__'; autoOpt.textContent = '🪄 自動選曲';
+  dom.quickBgm.appendChild(autoOpt);
+  for (const t of (window.MUSIC_CATALOG || [])) {
+    const o = document.createElement('option');
+    o.value = t.id;
+    o.textContent = `${t.title} (${Math.round(t.durationSec)}s)`;
+    dom.quickBgm.appendChild(o);
+  }
+  // Default: whatever the last preview actually used.
+  const ov = state.overrides && state.overrides.bgmId;
+  if (ov && ov !== '__inherit__') {
+    dom.quickBgm.value = ov;
+  } else if (currentTrack && currentTrack.id) {
+    dom.quickBgm.value = currentTrack.id;
+  } else {
+    dom.quickBgm.value = '__auto__';
+  }
+}
+
+function bindQuickEdit() {
+  if (!dom.quickApply) return;
+  dom.quickApply.addEventListener('click', () => {
+    const t = (dom.quickTitle.value || '').trim();
+    const s = (dom.quickSubtitle.value || '').trim();
+    state.overrides.title    = t || null;
+    state.overrides.subtitle = s || null;
+    state.overrides.bgmId    = dom.quickBgm.value || null;
+    onPreview();
+  });
+}
+
 function renderPlanSummary(plan) {
   dom.stagePanel.style.display = 'flex';
   dom.output.innerHTML = '';
@@ -3225,6 +3306,8 @@ function renderPlanSummary(plan) {
   const wrap = document.createElement('div');
   wrap.className = 'alert success';
   const track = getSelectedCatalogTrack();
+  state.lastUsedTrack = track;
+  populateQuickEdit(plan, track);
   const lines = [
     `🎬 構成完了 — 全 ${totalSec.toFixed(1)} 秒 / 1枚あたり ${perPhotoSec.toFixed(2)} 秒`,
     `タイトル: ${timeline[0].title}${timeline[0].subtitle ? ' / ' + timeline[0].subtitle : ''}`,
@@ -3269,6 +3352,7 @@ function renderPlanSummary(plan) {
 // -----------------------------------------------------------------------------
 bindDropzone();
 bindSettings();
+bindQuickEdit();
 window.addEventListener('beforeunload', () => {
   releaseStatePhotoUrls();
   if (activeRenderer) try { activeRenderer.dispose(); } catch (_) {}

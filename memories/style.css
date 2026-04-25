@@ -283,6 +283,19 @@ header.site {
 }
 .stage-overlay.hidden { opacity: 0; }
 
+#quickEdit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+  padding: 0.7rem;
+  background: #f1f5f9;
+  border-radius: 10px;
+}
+#quickEdit .field { gap: 0.25rem; }
+#quickEdit .field label { font-size: 0.74rem; color: #475569; }
+#quickEdit .btn-primary { min-width: 0; }
+
 #output video {
   width: 100%;
   border-radius: 12px;
