@@ -1952,10 +1952,13 @@ class Renderer {
     clearCanvas(ctx, w, h, '#000');
 
     const active = this.findActive(elapsedSec);
+    // activeIds is the *set of clip ids in the render window* (alpha > 0 OR
+    // alpha = 0 doesn't matter — being in the window means the video should
+    // be playing so audio aligns with the eventual visible frame).
     const activeIds = new Set(active.map(({ clip }) => clip.photoId));
 
-    // Lifecycle: pause videos that just left the active set + tell the mixer
-    // to fade their audio back out (which also unducks the BGM).
+    // Lifecycle: pause videos that just left the active set + tell the
+    // mixer to fade their audio back out (which also unducks the BGM).
     if (this.assets) {
       for (const [id, asset] of this.assets) {
         if (asset.kind === 'video' && asset.playing && !activeIds.has(id)) {
@@ -1966,16 +1969,21 @@ class Renderer {
       }
     }
 
+    // Activate any video clip that just entered its render window — must
+    // happen even if alpha is 0 on this exact frame (xfade-in start), so
+    // the video isn't paused for the full crossfade window.
+    for (const { clip } of active) {
+      if (clip.kind !== 'video') continue;
+      const asset = this.assets.get(clip.photoId);
+      if (!asset || asset.kind !== 'video' || asset.playing) continue;
+      asset.element.play().catch(() => {});
+      asset.playing = true;
+      if (this.mixer) this.mixer.activateVideo(clip.photoId);
+    }
+
+    // Draw all clips with positive alpha. Render order = timeline order.
     for (const { clip, alpha } of active) {
       if (alpha <= 0) continue;
-      if (clip.kind === 'video') {
-        const asset = this.assets.get(clip.photoId);
-        if (asset && asset.kind === 'video' && !asset.playing) {
-          asset.element.play().catch(() => {});
-          asset.playing = true;
-          if (this.mixer) this.mixer.activateVideo(clip.photoId);
-        }
-      }
       const localT = elapsedSec - clip.startSec;
       ctx.save();
       ctx.globalAlpha = alpha;
@@ -2330,7 +2338,8 @@ class AudioMixer {
       g.gain.cancelScheduledValues(t0);
       g.gain.linearRampToValueAtTime(1.0, t0 + 0.15);
     }
-    if (++this.activeVideoCount === 1) this.duckBgm();
+    this.activeVideoCount = Math.max(0, this.activeVideoCount) + 1;
+    if (this.activeVideoCount === 1) this.duckBgm();
   }
   deactivateVideo(clipId) {
     const g = this.videoGains.get(clipId);
@@ -2339,10 +2348,8 @@ class AudioMixer {
       g.gain.cancelScheduledValues(t0);
       g.gain.linearRampToValueAtTime(0, t0 + 0.20);
     }
-    if (--this.activeVideoCount <= 0) {
-      this.activeVideoCount = 0;
-      this.unduckBgm();
-    }
+    this.activeVideoCount = Math.max(0, this.activeVideoCount - 1);
+    if (this.activeVideoCount === 0) this.unduckBgm();
   }
   duckBgm() {
     if (!this.bgmGain) return;
