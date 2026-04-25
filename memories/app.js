@@ -424,8 +424,15 @@ function extractVideoFrameAt(url, atSec, durationSec) {
         if (!blob) return fail(new Error('フレーム書き出し失敗'));
         const imgUrl = URL.createObjectURL(blob);
         const img = new Image();
-        img.onload = () => finish(img);
-        img.onerror = () => fail(new Error('frame conversion failed'));
+        img.onload = () => {
+          // Image keeps the bitmap data; the URL itself is no longer needed.
+          try { URL.revokeObjectURL(imgUrl); } catch (_) {}
+          finish(img);
+        };
+        img.onerror = () => {
+          try { URL.revokeObjectURL(imgUrl); } catch (_) {}
+          fail(new Error('frame conversion failed'));
+        };
         img.src = imgUrl;
       }, 'image/jpeg', 0.9);
     }, { once: true });
@@ -515,6 +522,11 @@ async function processImage(file) {
 
   const badReason = rejectionReason({ blurScore, lumaMean, lumaVar });
   const bad = !!badReason;
+  // Photos that won't make the cut don't need the full-size object URL kept
+  // around for the renderer — release it immediately to free RAM.
+  if (bad) {
+    try { URL.revokeObjectURL(url); } catch (_) {}
+  }
 
   return {
     id: nextId(),
@@ -523,7 +535,7 @@ async function processImage(file) {
     mime: decoded.type || file.type,
     kind: 'photo',
     decodedBlob: decoded,
-    objectUrl: url,
+    objectUrl: bad ? null : url,
     thumbUrl: thumb,
     width: w,
     height: h,
@@ -592,6 +604,11 @@ async function processVideo(file) {
     hasVideoStream,
   });
   const bad = !!badReason;
+  // Same logic as processImage — rejected videos don't need their playable
+  // object URL kept around.
+  if (bad) {
+    try { URL.revokeObjectURL(url); } catch (_) {}
+  }
 
   return {
     id: nextId(),
@@ -600,7 +617,7 @@ async function processVideo(file) {
     mime: file.type || 'video/mp4',
     kind: 'video',
     decodedBlob: file,
-    objectUrl: url,
+    objectUrl: bad ? null : url,
     thumbUrl: thumb,
     width: w,
     height: h,
@@ -2289,11 +2306,20 @@ class AudioMixer {
     const el = new Audio();
     el.crossOrigin = 'anonymous';
     el.preload = 'auto';
-    el.src = (blobOrUrl instanceof Blob) ? URL.createObjectURL(blobOrUrl) : blobOrUrl;
-    await withTimeout(new Promise((res, rej) => {
-      el.addEventListener('canplay', res, { once: true });
-      el.addEventListener('error', () => rej(new Error('BGMの読み込みに失敗しました')), { once: true });
-    }), 15000, 'BGM load');
+    const isBlob = blobOrUrl instanceof Blob;
+    const objectUrl = isBlob ? URL.createObjectURL(blobOrUrl) : null;
+    el.src = isBlob ? objectUrl : blobOrUrl;
+    try {
+      await withTimeout(new Promise((res, rej) => {
+        el.addEventListener('canplay', res, { once: true });
+        el.addEventListener('error', () => rej(new Error('BGMの読み込みに失敗しました')), { once: true });
+      }), 15000, 'BGM load');
+    } catch (e) {
+      // canplay never fired — release the URL so we don't leak a Blob whose
+      // bgmEl reference will be GC'd before destroy() runs.
+      if (objectUrl) try { URL.revokeObjectURL(objectUrl); } catch (_) {}
+      throw e;
+    }
     const src = this.ctx.createMediaElementSource(el);
     const gain = this.ctx.createGain();
     gain.gain.value = 1.0;
@@ -2396,6 +2422,18 @@ function setSettingsBusy(busy) {
         delete b.dataset.origText;
       }
       b.disabled = false;
+    }
+  }
+}
+
+// Release every object URL we hold on to in state.photos so successive
+// ingests / page lifetimes don't accumulate leaks.
+function releaseStatePhotoUrls() {
+  if (!state.photos) return;
+  for (const p of state.photos) {
+    if (p && p.objectUrl) {
+      try { URL.revokeObjectURL(p.objectUrl); } catch (_) {}
+      p.objectUrl = null;
     }
   }
 }
@@ -3008,3 +3046,7 @@ function renderPlanSummary(plan) {
 // -----------------------------------------------------------------------------
 bindDropzone();
 bindSettings();
+window.addEventListener('beforeunload', () => {
+  releaseStatePhotoUrls();
+  if (activeRenderer) try { activeRenderer.dispose(); } catch (_) {}
+});
