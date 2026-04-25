@@ -849,8 +849,11 @@ function stripPrefectureSuffix(s) {
 function guessCountryFromCoords(lat, lng) {
   if (lat > 23 && lat < 46 && lng > 122 && lng < 147) return { country: '日本', cc: 'jp' };
   if (lat > 24 && lat < 49 && lng > -125 && lng < -66) return { country: 'United States', cc: 'us' };
-  if (lat > 41 && lat < 51 && lng > -5 && lng < 10) return { country: 'France', cc: 'fr' };
+  // Italy first — France's box would otherwise capture the Alps stretch
+  // (lat 45-47, lng 6-10) that's actually Italian territory. Italy is the
+  // tighter match by latitude; France grabs the rest west of lng 6.
   if (lat > 36 && lat < 47 && lng > 6 && lng < 19) return { country: 'Italy', cc: 'it' };
+  if (lat > 41 && lat < 51 && lng > -5 && lng < 6) return { country: 'France', cc: 'fr' };
   if (lat > 49 && lat < 60 && lng > -8 && lng < 2) return { country: 'United Kingdom', cc: 'gb' };
   if (lat > 21 && lat < 23 && lng > 113 && lng < 115) return { country: '香港', cc: 'hk' };
   if (lat > 30 && lat < 32 && lng > 121 && lng < 122) return { country: '中国', cc: 'cn' };
@@ -1121,7 +1124,7 @@ function planPerPhotoSec(itemCount, opts) {
   return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
 }
 
-function pickLayout(item, outputOrientation, idx) {
+function pickLayout(item, outputOrientation) {
   const outAR = outputOrientation === 'landscape' ? 16 / 9
               : outputOrientation === 'square'   ? 1
               : 9 / 16;
@@ -1213,7 +1216,7 @@ function buildTimeline(orderedItems, allClusters, opts) {
       photoId: item.id,
       ref: item,
       durationSec: perPhotoSec,
-      layout: pickLayout(item, opts.orientation, timeline.length),
+      layout: pickLayout(item, opts.orientation),
       kenburns: makeKenburnsParams(timeline.length),
       overlays,
     });
@@ -1269,9 +1272,15 @@ async function buildPlan(opts) {
   const built = buildTimeline(ordered, clusters, opts);
   // Apply title override (custom or picked candidate). Title-card subtitle
   // remains the auto-built location summary so the user's title stays clean.
+  // The closer card mirrors the resolved title as its subtitle so the video
+  // ends with the same name it opened with.
   const titleStr = resolveTitle(opts);
   if (titleStr && built.timeline[0] && built.timeline[0].kind === 'title') {
     built.timeline[0].title = titleStr;
+  }
+  const lastClip = built.timeline[built.timeline.length - 1];
+  if (titleStr && lastClip && lastClip.kind === 'closer') {
+    lastClip.subtitle = titleStr;
   }
   // Post-process passes (run order matters):
   //   1. mergeStackPairs — pair consecutive landscape photos in portrait out
