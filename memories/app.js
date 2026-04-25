@@ -833,11 +833,14 @@ function reverseGeocodeNominatim(lat, lng) {
   return job;
 }
 
-// Strips Japanese prefecture suffixes (府/都/県/道) and English "Prefecture"
-// from a state name so titles read cleanly: "京都府" → "京都".
+// Strips Japanese prefecture suffixes from a state name so titles read
+// cleanly: "京都府" → "京都", "東京都" → "東京", "宮城県" → "宮城".
+// 北海道 is a single irreducible name (its 道 suffix is part of the name,
+// not a removable prefecture marker like 府/都/県), so it's left alone.
 function stripPrefectureSuffix(s) {
   if (!s) return s;
-  return s.replace(/\s*Prefecture\s*$/i, '').replace(/(府|都|県|道)$/, '');
+  if (s === '北海道' || /北海道$/.test(s)) return '北海道';
+  return s.replace(/\s*Prefecture\s*$/i, '').replace(/(府|都|県)$/, '');
 }
 
 // Quick country guess for clusters matched by the curated landmark dictionary
