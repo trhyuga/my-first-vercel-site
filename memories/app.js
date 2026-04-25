@@ -2781,7 +2781,7 @@ function bindSettings() {
     // proceeds silently.
     dom.catalogHint.textContent = '推奨曲は現在準備中。選んでもBGMなしで書き出されます (手持ちBGMはアップロードを使ってください)。';
   } else {
-    dom.catalogHint.innerHTML = `${catalog.length}曲の中から長さ・ムードに合うものを自動で選びます (Web Audioで生成 — 軽め)。<br>本格的な曲を使いたい場合は <b>「📁 自分のBGMを使う」</b> で mp3/m4a をアップロードしてください。`;
+    dom.catalogHint.innerHTML = `${catalog.length}曲の中から、長さ・ムードに合うものを自動で選びます。<br>手持ちのBGMを使いたい場合は <b>「📁 自分のBGMを使う」</b> から mp3/m4a をアップロードしてください。`;
   }
 
   dom.previewBtn.addEventListener('click', onPreview);
