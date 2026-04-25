@@ -928,6 +928,12 @@ function fmtTitleYearMonth(timestamps) {
     return `${y}年${parseInt(m, 10)}月`;
   };
   if (ymonths.length === 1) return fmt(ymonths[0]);
+  // Multi-month span: omit the year on the back end when both months
+  // share a year ("2024年8月 – 9月"). Cross-year ranges keep both years
+  // ("2024年12月 – 2025年1月").
+  const [y1, m1] = ymonths[0].split('-');
+  const [y2, m2] = ymonths[ymonths.length - 1].split('-');
+  if (y1 === y2) return `${y1}年${parseInt(m1, 10)}月 – ${parseInt(m2, 10)}月`;
   return `${fmt(ymonths[0])} – ${fmt(ymonths[ymonths.length - 1])}`;
 }
 
@@ -1536,15 +1542,19 @@ async function preloadAssets(plan, opts, mode, onProgress) {
         v.playsInline = true;
         v.preload = 'auto';
         v.crossOrigin = 'anonymous';
+        // Generous timeouts on the FIRST preview after a heavy upload —
+        // iOS Safari sometimes serialises video decoder warm-ups so the
+        // first &lt;video&gt; takes a noticeable while to fire loadedmetadata
+        // even on a fast device.
         await withTimeout(new Promise((res, rej) => {
           v.addEventListener('loadedmetadata', res, { once: true });
           v.addEventListener('error', () => rej(new Error('video load')), { once: true });
-        }), 10000, 'preload ' + clip.ref.sourceName);
+        }), 25000, 'preload ' + clip.ref.sourceName);
         try {
           await withTimeout(new Promise((res) => {
             v.addEventListener('seeked', res, { once: true });
             v.currentTime = clip.ref.highlightStartSec || 0;
-          }), 4000, 'preseek ' + clip.ref.sourceName);
+          }), 8000, 'preseek ' + clip.ref.sourceName);
         } catch (_) { /* non-fatal */ }
         // For video-band, also decode the two border photos.
         let borderBitmaps = null;
@@ -1945,7 +1955,7 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   // the canvas edge.
   const idealSize = Math.max(48, Math.round(h * 0.078));
   const minSize   = Math.max(28, Math.round(h * 0.044));
-  const maxW = w * 0.86;
+  const maxW = w * 0.80;
   const fit = fitOrWrapTitle(ctx, clip.title || '', '800', titleFontStack(), maxW, idealSize, minSize);
   ctx.font = `800 ${fit.size}px ${titleFontStack()}`;
   ctx.textBaseline = 'middle';
@@ -1989,7 +1999,7 @@ function drawCloserCard(ctx, w, h, clip, localT) {
   ctx.save();
   ctx.globalAlpha *= Math.max(0, Math.min(1, alpha));
   ctx.textAlign = 'center';
-  const maxW = w * 0.86;
+  const maxW = w * 0.80;
 
   // Top line — small caption (auto-fits / wraps within frame)
   const captionIdeal = Math.max(20, Math.round(h * 0.028));
@@ -2570,7 +2580,8 @@ class AudioMixer {
       this.ownsCtx = true;
     }
     this.dest = this.ctx.createMediaStreamDestination(); // for MediaRecorder
-    this.bgmEl = null;
+    this.bgmBuffer = null;
+    this.bgmSource = null;
     this.bgmGain = null;
     this.bgmFadeOutAtSec = null;
     this.videoGains = new Map();
@@ -2581,6 +2592,15 @@ class AudioMixer {
   // URL string (external track), or an object { kind:'synth', preset } for
   // the built-in procedural BGM. Schedules a fade-out so the track ends
   // gracefully even if its endCue doesn't fall on the timeline end.
+  //
+  // For URL/Blob sources we now decode into an AudioBuffer and play via
+  // BufferSource instead of HTMLAudioElement → MediaElementSource.
+  // HTMLMediaElement audio routing on iOS Safari has a long-running quirk
+  // where another media element's playback (e.g. our video clips) can
+  // briefly suspend the BGM &lt;audio&gt;'s output channel. BufferSource is
+  // pure Web Audio so it mixes cleanly with video MediaElementSource at
+  // the destination — BGM keeps playing through every video clip without
+  // ducking or interruption.
   async setupBgm(source, totalSec, fadeOutSec = 1.5) {
     if (source && typeof source === 'object' && source.kind === 'synth') {
       this.synth = new SynthSource(this.ctx, source.preset, totalSec);
@@ -2591,30 +2611,26 @@ class AudioMixer {
       return;
     }
     const blobOrUrl = source;
-    const el = new Audio();
-    el.crossOrigin = 'anonymous';
-    el.preload = 'auto';
-    const isBlob = blobOrUrl instanceof Blob;
-    const objectUrl = isBlob ? URL.createObjectURL(blobOrUrl) : null;
-    el.src = isBlob ? objectUrl : blobOrUrl;
-    try {
-      await withTimeout(new Promise((res, rej) => {
-        el.addEventListener('canplay', res, { once: true });
-        el.addEventListener('error', () => rej(new Error('BGMの読み込みに失敗しました')), { once: true });
-      }), 15000, 'BGM load');
-    } catch (e) {
-      // canplay never fired — release the URL so we don't leak a Blob whose
-      // bgmEl reference will be GC'd before destroy() runs.
-      if (objectUrl) try { URL.revokeObjectURL(objectUrl); } catch (_) {}
-      throw e;
+    // Fetch raw bytes (Blob.arrayBuffer for uploads, fetch() for catalog URLs).
+    let arrayBuf;
+    if (blobOrUrl instanceof Blob) {
+      arrayBuf = await blobOrUrl.arrayBuffer();
+    } else {
+      const res = await withTimeout(fetch(blobOrUrl), 30000, 'BGM fetch');
+      if (!res.ok) throw new Error('BGM fetch failed: ' + res.status);
+      arrayBuf = await res.arrayBuffer();
     }
-    const src = this.ctx.createMediaElementSource(el);
+    // Decode → AudioBuffer. decodeAudioData has a one-shot promise form on
+    // modern browsers; older Safari uses the callback form so wrap both.
+    const audioBuf = await new Promise((resolve, reject) => {
+      const p = this.ctx.decodeAudioData(arrayBuf, resolve, reject);
+      if (p && typeof p.then === 'function') p.then(resolve, reject);
+    });
+    this.bgmBuffer = audioBuf;
     const gain = this.ctx.createGain();
     gain.gain.value = 1.0;
-    src.connect(gain);
     gain.connect(this.dest);
-    gain.connect(this.ctx.destination); // user hears it during preview
-    this.bgmEl = el;
+    gain.connect(this.ctx.destination);
     this.bgmGain = gain;
     this.bgmFadeOutAtSec = Math.max(0, totalSec - fadeOutSec);
   }
@@ -2643,7 +2659,13 @@ class AudioMixer {
       try { await this.ctx.resume(); } catch (_) {}
     }
     if (this.synth) this.synth.start();
-    if (this.bgmEl) this.bgmEl.play().catch(() => {});
+    if (this.bgmBuffer && this.bgmGain) {
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.bgmBuffer;
+      src.connect(this.bgmGain);
+      src.start(0);
+      this.bgmSource = src;
+    }
     if (this.bgmGain && this.bgmFadeOutAtSec != null) {
       const t0 = this.ctx.currentTime;
       this.bgmGain.gain.setValueAtTime(this.bgmGain.gain.value, t0 + this.bgmFadeOutAtSec - 0.05);
@@ -2691,12 +2713,12 @@ class AudioMixer {
     if (this.synth) {
       try { this.synth.stop(); } catch (_) {}
     }
-    if (this.bgmEl) {
-      try { this.bgmEl.pause(); } catch (_) {}
-      if (this.bgmEl.src && this.bgmEl.src.startsWith('blob:')) {
-        try { URL.revokeObjectURL(this.bgmEl.src); } catch (_) {}
-      }
+    if (this.bgmSource) {
+      try { this.bgmSource.stop(); } catch (_) {}
+      try { this.bgmSource.disconnect(); } catch (_) {}
+      this.bgmSource = null;
     }
+    this.bgmBuffer = null;
     // Only close the AudioContext when we created it ourselves. An
     // externally-passed ctx (created in the click-handler gesture stack)
     // belongs to the caller and may be reused on the next preview.
