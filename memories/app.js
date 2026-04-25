@@ -1871,16 +1871,34 @@ function drawCloserCard(ctx, w, h, clip, localT) {
   ctx.save();
   ctx.globalAlpha *= Math.max(0, Math.min(1, alpha));
   ctx.textAlign = 'center';
+  const maxW = w * 0.86;
+
+  // Top line — small caption (auto-fits / wraps within frame)
+  const captionIdeal = Math.max(20, Math.round(h * 0.028));
+  const captionMin   = Math.max(14, Math.round(h * 0.020));
+  const captionFit = fitOrWrapTitle(ctx, clip.title || '', '400', fontStack(), maxW, captionIdeal, captionMin);
+  ctx.font = `400 ${captionFit.size}px ${fontStack()}`;
   ctx.fillStyle = '#cbd5e1';
-  const subSize = Math.max(20, Math.round(h * 0.028));
-  ctx.font = `400 ${subSize}px ${fontStack()}`;
-  ctx.textBaseline = 'bottom';
-  ctx.fillText(clip.title || '', w / 2, h * 0.5 - h * 0.005);
+  ctx.textBaseline = 'middle';
+  const capLineH = captionFit.size * 1.2;
+  const capBottom = h * 0.5 - h * 0.015;
+  for (let i = 0; i < captionFit.lines.length; i++) {
+    const ly = capBottom - (captionFit.lines.length - 1 - i) * capLineH - capLineH * 0.5;
+    ctx.fillText(captionFit.lines[i], w / 2, ly);
+  }
+
+  // Bottom line — main title ("Memories" or override)
+  const titleIdeal = Math.max(36, Math.round(h * 0.05));
+  const titleMin   = Math.max(22, Math.round(h * 0.034));
+  const titleFit = fitOrWrapTitle(ctx, clip.subtitle || 'Memories', '700', titleFontStack(), maxW, titleIdeal, titleMin);
+  ctx.font = `700 ${titleFit.size}px ${titleFontStack()}`;
   ctx.fillStyle = '#fff';
-  const titleSize = Math.max(36, Math.round(h * 0.05));
-  ctx.font = `700 ${titleSize}px ${fontStack()}`;
-  ctx.textBaseline = 'top';
-  ctx.fillText(clip.subtitle || 'Memories', w / 2, h * 0.5 + h * 0.015);
+  const titleLineH = titleFit.size * 1.15;
+  const titleTop = h * 0.5 + h * 0.012;
+  for (let i = 0; i < titleFit.lines.length; i++) {
+    const ly = titleTop + (i + 0.5) * titleLineH;
+    ctx.fillText(titleFit.lines[i], w / 2, ly);
+  }
   ctx.restore();
 }
 
@@ -2187,7 +2205,7 @@ let activeRenderer = null;
 // the BGM can duck during video clips and unduck after.
 // =============================================================================
 
-const VIDEO_DUCK_LEVEL = 0.35;
+const VIDEO_DUCK_LEVEL = 0.85;     // overlay: only mild reduction so video audio sits on top
 const DUCK_RAMP_SEC = 0.30;
 const UNDUCK_RAMP_SEC = 0.40;
 
@@ -2939,17 +2957,26 @@ async function resolveBgmSource() {
 // Synchronously create + resume an AudioContext from inside a click handler
 // stack so iOS Safari accepts it. Anything async/awaited *before* this would
 // disconnect the gesture context and leave the AudioContext permanently
-// suspended (silent BGM, silent canvas-routed video audio).
+// suspended (silent BGM, silent canvas-routed video audio). Also plays a
+// 1-sample silent buffer to fully unlock the audio subsystem — iOS often
+// requires *actual playback* to have happened in the gesture stack before
+// later play() calls (synth oscillators / video <audio>) actually emit
+// sound.
 function preWarmAudioContext() {
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return null;
   try {
     const ctx = new AC();
-    // resume() returns a promise but we don't need to await it — just
-    // queueing it from the gesture stack is what Safari is checking for.
     if (ctx.state === 'suspended') {
       ctx.resume().catch(() => {});
     }
+    // Touch the destination with a 1-sample silent buffer so iOS marks
+    // the context as "user-initiated playback has occurred".
+    const buf = ctx.createBuffer(1, 1, 22050);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0);
     return ctx;
   } catch (_) { return null; }
 }
