@@ -1383,12 +1383,26 @@ function mergeStackPairs(timeline, opts) {
 // land in the next sub-steps.
 // =============================================================================
 
-function canvasDimsFor(orientation, resolutionShortSide) {
-  const r = parseInt(resolutionShortSide, 10) || 720;
+function canvasDimsFor(orientation, resolutionShortSide, mode) {
+  let r;
+  if (mode === 'preview') {
+    // Preview canvas internal size matches the bitmap budget (720 long side)
+    // so single-photo cover-kenburns / smart-crop don't suffer upscale-blur.
+    // The on-screen <canvas> CSS-fits the .stage-wrap regardless.
+    r = orientation === 'landscape' ? 405 : 720; // logic below picks short side
+  } else {
+    r = parseInt(resolutionShortSide, 10) || 720;
+  }
+  if (mode === 'preview' && orientation === 'square') return [720, 720];
   if (orientation === 'square') return [r, r];
+  if (mode === 'preview') {
+    // For preview we always want long-side = 720, short = 405.
+    if (orientation === 'landscape') return [720, 405];
+    return [405, 720]; // portrait
+  }
   const long = Math.round(r * 16 / 9);
   if (orientation === 'landscape') return [long, r];
-  return [r, long]; // portrait default
+  return [r, long];
 }
 
 function applyStageOrientation(orientation) {
@@ -1553,7 +1567,10 @@ function getBlurredFill(asset, canvasW, canvasH) {
   const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
   const bgScale = Math.max(canvasW / srcW, canvasH / srcH) * bgZoom;
   const bgW = srcW * bgScale, bgH = srcH * bgScale;
-  cx.filter = 'blur(36px) brightness(0.55) saturate(1.15)';
+  // Aggressive blur — user wanted the back side "as blurred as possible"
+  // for blur-fill / two-photo overlap layouts. brightness 0.45 darkens it
+  // so the sharp foreground reads stronger.
+  cx.filter = 'blur(54px) brightness(0.45) saturate(1.20)';
   cx.drawImage(asset.bitmap, (canvasW - bgW) / 2, (canvasH - bgH) / 2, bgW, bgH);
   // Add a faint dark vignette so the foreground reads more strongly
   cx.filter = 'none';
@@ -2041,7 +2058,7 @@ class Renderer {
   }
 
   setupCanvas() {
-    const [w, h] = canvasDimsFor(this.opts.orientation, this.opts.resolution);
+    const [w, h] = canvasDimsFor(this.opts.orientation, this.opts.resolution, this.mode);
     this.canvas.width = w;
     this.canvas.height = h;
     applyStageOrientation(this.opts.orientation);
@@ -3067,6 +3084,26 @@ function preWarmAudioContext() {
   } catch (_) { return null; }
 }
 
+// Prime HTMLAudioElement playback on iOS Safari. Even with the AudioContext
+// resumed from the gesture stack, an &lt;audio&gt; element created later (after
+// awaits) is gated separately — iOS won't autoplay it. Creating + briefly
+// playing a tiny silent WAV from the gesture stack unlocks the page's
+// HTMLMediaElement playback session for the rest of its lifetime, so the
+// BGM &lt;audio&gt; in setupBgm can play() cleanly first time round.
+function unlockHtmlAudioPlayback() {
+  try {
+    const a = new Audio();
+    a.preload = 'auto';
+    a.muted = true;
+    // Minimal valid WAV (44-byte header + 0 sample bytes) data URL.
+    a.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+    const p = a.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => { try { a.pause(); } catch (_) {} }).catch(() => {});
+    }
+  } catch (_) {}
+}
+
 async function setupRendererForPlay(opts, plan, audioCtx, mode = 'preview') {
   // The AudioContext must be created (and resumed) from the user gesture
   // stack on iOS Safari. The caller hands one in that was constructed
@@ -3192,7 +3229,11 @@ async function onExport() {
     activeRenderer.dispose();
     activeRenderer = null;
   }
-  // Sync audio-ctx warmup BEFORE any await — required for iOS Safari.
+  // Sync audio warmup BEFORE any await — required for iOS Safari to allow
+  // BGM and synth playback. preWarmAudioContext handles WebAudio;
+  // unlockHtmlAudioPlayback unlocks HTMLAudioElement playback for the
+  // BGM &lt;audio&gt; that gets created later in setupBgm.
+  unlockHtmlAudioPlayback();
   const audioCtx = preWarmAudioContext();
   dom.exportBtn.disabled = true;
   dom.previewBtn.disabled = true;
@@ -3249,7 +3290,11 @@ async function onPreview() {
     activeRenderer.dispose();
     activeRenderer = null;
   }
-  // Sync audio-ctx warmup BEFORE any await — required for iOS Safari.
+  // Sync audio warmup BEFORE any await — required for iOS Safari to allow
+  // BGM and synth playback. preWarmAudioContext handles WebAudio;
+  // unlockHtmlAudioPlayback unlocks HTMLAudioElement playback for the
+  // BGM &lt;audio&gt; that gets created later in setupBgm.
+  unlockHtmlAudioPlayback();
   const audioCtx = preWarmAudioContext();
   dom.previewBtn.disabled = true;
   const orig = dom.previewBtn.textContent;
