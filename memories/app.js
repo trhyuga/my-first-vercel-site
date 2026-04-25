@@ -2306,9 +2306,15 @@ class SynthSource {
 }
 
 class AudioMixer {
-  constructor() {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    this.ctx = new AC();
+  constructor(externalCtx) {
+    if (externalCtx) {
+      this.ctx = externalCtx;
+      this.ownsCtx = false;
+    } else {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC();
+      this.ownsCtx = true;
+    }
     this.dest = this.ctx.createMediaStreamDestination(); // for MediaRecorder
     this.bgmEl = null;
     this.bgmGain = null;
@@ -2375,7 +2381,13 @@ class AudioMixer {
     this.videoGains.set(clipId, gain);
   }
 
-  start() {
+  async start() {
+    // iOS Safari may have suspended the context — try to resume so the
+    // synth + BGM actually make it to the speakers. Belt-and-braces;
+    // we already resume in the click handler too.
+    if (this.ctx.state === 'suspended') {
+      try { await this.ctx.resume(); } catch (_) {}
+    }
     if (this.synth) this.synth.start();
     if (this.bgmEl) this.bgmEl.play().catch(() => {});
     if (this.bgmGain && this.bgmFadeOutAtSec != null) {
@@ -2428,7 +2440,10 @@ class AudioMixer {
         try { URL.revokeObjectURL(this.bgmEl.src); } catch (_) {}
       }
     }
-    if (this.ctx && this.ctx.state !== 'closed') {
+    // Only close the AudioContext when we created it ourselves. An
+    // externally-passed ctx (created in the click-handler gesture stack)
+    // belongs to the caller and may be reused on the next preview.
+    if (this.ownsCtx && this.ctx && this.ctx.state !== 'closed') {
       try { this.ctx.close(); } catch (_) {}
     }
   }
@@ -2484,6 +2499,11 @@ async function ingestFiles(files) {
   // mode/orientation/BGM while the photos analyse in the background.
   dom.settingsPanel.style.display = 'flex';
   setSettingsBusy(true);
+  // Immediate feedback so the user knows the drop registered. iOS-side
+  // HEIC→JPEG conversion + iCloud download can stall things between the
+  // file picker and the first decode tick — without this the page looks
+  // frozen.
+  setLoadProgress(0, `📥 ${accepted.length}件 受け取り — 解析準備中…`);
 
   // Kick off the face-api model load in parallel — bounded so a stalled
   // CDN request doesn't freeze the whole pipeline. If it fails we keep
@@ -2799,12 +2819,31 @@ async function resolveBgmSource() {
   return null;
 }
 
-async function setupRendererForPlay(opts, plan) {
-  // Mixer must be created from the user gesture chain (Preview/Export click)
-  // for iOS Safari to allow audio playback.
+// Synchronously create + resume an AudioContext from inside a click handler
+// stack so iOS Safari accepts it. Anything async/awaited *before* this would
+// disconnect the gesture context and leave the AudioContext permanently
+// suspended (silent BGM, silent canvas-routed video audio).
+function preWarmAudioContext() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try {
+    const ctx = new AC();
+    // resume() returns a promise but we don't need to await it — just
+    // queueing it from the gesture stack is what Safari is checking for.
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    return ctx;
+  } catch (_) { return null; }
+}
+
+async function setupRendererForPlay(opts, plan, audioCtx) {
+  // The AudioContext must be created (and resumed) from the user gesture
+  // stack on iOS Safari. The caller hands one in that was constructed
+  // synchronously inside the click handler.
   let mixer = null;
   try {
-    mixer = new AudioMixer();
+    mixer = new AudioMixer(audioCtx);
     const bgmSrc = await resolveBgmSource();
     if (bgmSrc) {
       try {
@@ -2923,6 +2962,8 @@ async function onExport() {
     activeRenderer.dispose();
     activeRenderer = null;
   }
+  // Sync audio-ctx warmup BEFORE any await — required for iOS Safari.
+  const audioCtx = preWarmAudioContext();
   dom.exportBtn.disabled = true;
   dom.previewBtn.disabled = true;
   const orig = dom.exportBtn.textContent;
@@ -2937,7 +2978,7 @@ async function onExport() {
     dom.stageStatus.textContent = '🖼 アセット読み込み中…';
     dom.stageOverlay.classList.remove('hidden');
 
-    const { renderer, mixer } = await setupRendererForPlay(opts, plan);
+    const { renderer, mixer } = await setupRendererForPlay(opts, plan, audioCtx);
     activeRenderer = renderer;
     mixerToDispose = mixer;
 
@@ -2978,6 +3019,8 @@ async function onPreview() {
     activeRenderer.dispose();
     activeRenderer = null;
   }
+  // Sync audio-ctx warmup BEFORE any await — required for iOS Safari.
+  const audioCtx = preWarmAudioContext();
   dom.previewBtn.disabled = true;
   const orig = dom.previewBtn.textContent;
   dom.previewBtn.textContent = '構成中…';
@@ -2991,7 +3034,7 @@ async function onPreview() {
     dom.stageStatus.textContent = '🖼 アセット読み込み中…';
     dom.stageOverlay.classList.remove('hidden');
 
-    const { renderer, mixer } = await setupRendererForPlay(opts, plan);
+    const { renderer, mixer } = await setupRendererForPlay(opts, plan, audioCtx);
     activeRenderer = renderer;
     mixerToDispose = mixer;
 
@@ -3002,7 +3045,7 @@ async function onPreview() {
 
     dom.stageOverlay.classList.add('hidden');
     dom.previewBtn.textContent = '▶ 再生中…';
-    if (mixer) mixer.start();
+    if (mixer) await mixer.start();
     await renderer.play();
     dom.stageOverlay.classList.remove('hidden');
     dom.stageStatus.textContent = '⏸ プレビュー終了';
