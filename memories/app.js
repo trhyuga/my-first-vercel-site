@@ -1275,18 +1275,44 @@ async function buildPlan(opts) {
   // remains the auto-built location summary so the user's title stays clean.
   // The closer card mirrors the resolved title as its subtitle so the video
   // ends with the same name it opened with.
-  // Quick-edit override beats every other source.
-  const ovTitle = state.overrides && state.overrides.title;
-  const ovSub   = state.overrides && state.overrides.subtitle;
+  // Quick-edit override beats every other source. Title customs come from
+  // the settings panel (titleCustom / titleSubtitleCustom etc.) AND from
+  // the inline preview-time editor (state.overrides), with the inline
+  // editor winning when both are set.
+  const ovTitle    = state.overrides && state.overrides.title;
+  const ovSub      = state.overrides && state.overrides.subtitle;
+  const ovCloser   = state.overrides && state.overrides.closerTitle;
+  const ovCloserSub = state.overrides && state.overrides.closerSubtitle;
+
+  // Title card
   const titleStr = ovTitle != null ? ovTitle : resolveTitle(opts);
   if (built.timeline[0] && built.timeline[0].kind === 'title') {
     if (titleStr) built.timeline[0].title = titleStr;
     if (ovSub != null) built.timeline[0].subtitle = ovSub;
+    else if (opts.titleMode === '__custom__' && opts.titleSubtitleCustom) {
+      built.timeline[0].subtitle = opts.titleSubtitleCustom;
+    }
   }
+
+  // Closer card — closerCustom is the BIG line ("Memories"-slot),
+  // closerSubtitleCustom is the small caption above it.
   const lastClip = built.timeline[built.timeline.length - 1];
   if (lastClip && lastClip.kind === 'closer') {
-    if (titleStr) lastClip.subtitle = titleStr;
-    if (ovSub != null) lastClip.title = ovSub;
+    let closerMain = null;     // big line
+    let closerCaption = null;  // small caption
+    if (opts.closerMode === '__custom__') {
+      if (opts.closerCustom) closerMain = opts.closerCustom;
+      if (opts.closerSubtitleCustom) closerCaption = opts.closerSubtitleCustom;
+    } else {
+      // Auto: mirror the resolved title in the big line so the video closes
+      // on the same name it opened with.
+      if (titleStr) closerMain = titleStr;
+    }
+    // Inline editor wins
+    if (ovCloser != null) closerMain = ovCloser;
+    if (ovCloserSub != null) closerCaption = ovCloserSub;
+    if (closerMain != null) lastClip.subtitle = closerMain;
+    if (closerCaption != null) lastClip.title = closerCaption;
   }
   // Post-process passes (run order matters):
   //   1. mergeStackPairs — pair consecutive landscape photos in portrait out
@@ -1728,27 +1754,34 @@ function drawCoverIntoSlot(ctx, x, y, slotW, slotH, source, srcW, srcH, t, kb) {
 // frame-decoration top and bottom. Borders pan slowly so they don't feel
 // frozen against the moving centre.
 function drawVideoBand(ctx, canvasW, canvasH, videoEl, srcW, srcH, borderBitmaps, t, kb) {
-  const gap = Math.max(2, Math.round(canvasH * 0.008));
+  // Video band centred at 50% of canvas height; photo borders fill the
+  // remaining top/bottom. NO gaps — borders butt up against the band so
+  // there's never a black sliver visible between sections.
   const bandH = Math.round(canvasH * 0.50);
-  const borderH = Math.floor((canvasH - bandH - gap * 2) / 2);
-  // Black gaps as separators
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, canvasW, canvasH);
-  // Top border
+  const borderH = Math.ceil((canvasH - bandH) / 2);
+  const bandY = borderH;
+  // Hairline white seams for crisp definition between sections without
+  // black gap. Drawn last over the content edges.
   if (borderBitmaps && borderBitmaps[0]) {
     drawCoverIntoSlot(ctx, 0, 0, canvasW, borderH,
       borderBitmaps[0], borderBitmaps[0].width, borderBitmaps[0].height,
       t, makeKenburnsParams(0));
   }
-  // Bottom border
   if (borderBitmaps && borderBitmaps[1]) {
     drawCoverIntoSlot(ctx, 0, canvasH - borderH, canvasW, borderH,
       borderBitmaps[1], borderBitmaps[1].width, borderBitmaps[1].height,
       t, makeKenburnsParams(1));
   }
-  // Middle: video band
-  const bandY = borderH + gap;
   drawCoverIntoSlot(ctx, 0, bandY, canvasW, bandH, videoEl, srcW, srcH, t, kb);
+  // Hairline accents along both seams (matches stack-pair style)
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = Math.max(1, Math.round(canvasH * 0.0015));
+  ctx.beginPath();
+  ctx.moveTo(0, bandY);          ctx.lineTo(canvasW, bandY);
+  ctx.moveTo(0, bandY + bandH);  ctx.lineTo(canvasW, bandY + bandH);
+  ctx.stroke();
+  ctx.restore();
 }
 
 // Two photos stacked top/bottom with a slight overlap (no black gap) and a
@@ -1932,11 +1965,17 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
   ctx.fillRect(w / 2 - accentW / 2, h * 0.50 + h * 0.002, accentW, Math.max(1, Math.round(h * 0.0015)));
   if (clip.subtitle) {
-    const subSize = Math.max(20, Math.round(h * 0.026));
-    ctx.font = `400 ${subSize}px ${fontStack()}`;
+    const subIdeal = Math.max(20, Math.round(h * 0.028));
+    const subMin   = Math.max(14, Math.round(h * 0.020));
+    const subFit = fitOrWrapTitle(ctx, clip.subtitle, '400', fontStack(), w * 0.86, subIdeal, subMin);
+    ctx.font = `400 ${subFit.size}px ${fontStack()}`;
     ctx.fillStyle = '#cbd5e1';
     ctx.textBaseline = 'top';
-    ctx.fillText(clip.subtitle, w / 2, h * 0.50 + h * 0.018);
+    const lineH = subFit.size * 1.20;
+    const top = h * 0.50 + h * 0.018;
+    for (let i = 0; i < subFit.lines.length; i++) {
+      ctx.fillText(subFit.lines[i], w / 2, top + i * lineH);
+    }
   }
   ctx.restore();
 }
@@ -2287,7 +2326,7 @@ let activeRenderer = null;
 // the BGM can duck during video clips and unduck after.
 // =============================================================================
 
-const VIDEO_DUCK_LEVEL = 0.85;     // overlay: only mild reduction so video audio sits on top
+const VIDEO_DUCK_LEVEL = 1.00;     // no ducking — BGM plays full volume even during video clips
 const DUCK_RAMP_SEC = 0.30;
 const UNDUCK_RAMP_SEC = 0.40;
 
@@ -2852,11 +2891,27 @@ function bindSettings() {
   });
   const titleSel = document.getElementById('titleSelect');
   const titleCustom = document.getElementById('titleCustom');
+  const titleSubtitleCustom = document.getElementById('titleSubtitleCustom');
   if (titleSel) {
     titleSel.addEventListener('change', () => {
-      titleCustom.style.display = titleSel.value === '__custom__' ? '' : 'none';
+      const showCustom = titleSel.value === '__custom__';
+      titleCustom.style.display = showCustom ? '' : 'none';
+      titleSubtitleCustom.style.display = showCustom ? '' : 'none';
     });
   }
+  const closerSel = document.getElementById('closerSelect');
+  const closerCustom = document.getElementById('closerCustom');
+  const closerSubtitleCustom = document.getElementById('closerSubtitleCustom');
+  if (closerSel) {
+    closerSel.addEventListener('change', () => {
+      const showCustom = closerSel.value === '__custom__';
+      closerCustom.style.display = showCustom ? '' : 'none';
+      closerSubtitleCustom.style.display = showCustom ? '' : 'none';
+    });
+  }
+  // Catalog audition button — plays/stops the currently-selected track so
+  // the user can sample BGM choices before committing.
+  bindCatalogAudition();
   // populate catalog
   const catalog = (window.MUSIC_CATALOG || []);
   dom.catalogSelect.innerHTML = '';
@@ -2967,21 +3022,59 @@ function estimateTargetSec() {
 
 function readPlanOpts() {
   const track = getSelectedCatalogTrack();
-  const titleSel = document.getElementById('titleSelect');
-  const titleCustomInput = document.getElementById('titleCustom');
+  const $ = (id) => document.getElementById(id);
+  const titleSel = $('titleSelect');
+  const closerSel = $('closerSelect');
   return {
     orientation: getOutputOrientation(),
-    resolution: document.getElementById('resolution').value,
+    resolution: $('resolution').value,
     mode: document.querySelector('input[name="mode"]:checked').value,
-    count: parseInt(document.getElementById('countInput').value, 10) || 15,
-    seconds: parseInt(document.getElementById('secondsInput').value, 10) || 30,
+    count: parseInt($('countInput').value, 10) || 15,
+    seconds: parseInt($('secondsInput').value, 10) || 30,
     bgmDurationSec: track ? track.durationSec : null,
     bgmTempo: track ? bgmTempoFromTags(track.tags) : 'medium',
-    subtitlesOn: document.getElementById('subtitles').value !== 'off',
+    subtitlesOn: $('subtitles').value !== 'off',
     titleMode: titleSel ? titleSel.value : '__auto__',
-    titleCustom: titleCustomInput ? (titleCustomInput.value || '').trim() : '',
+    titleCustom: $('titleCustom') ? ($('titleCustom').value || '').trim() : '',
+    titleSubtitleCustom: $('titleSubtitleCustom') ? ($('titleSubtitleCustom').value || '').trim() : '',
+    closerMode: closerSel ? closerSel.value : '__auto__',
+    closerCustom: $('closerCustom') ? ($('closerCustom').value || '').trim() : '',
+    closerSubtitleCustom: $('closerSubtitleCustom') ? ($('closerSubtitleCustom').value || '').trim() : '',
     useNominatim: true,
   };
+}
+
+let auditionAudio = null;
+function bindCatalogAudition() {
+  const btn = document.getElementById('catalogAudition');
+  if (!btn) return;
+  const stopAudition = () => {
+    if (auditionAudio) {
+      try { auditionAudio.pause(); } catch (_) {}
+      auditionAudio = null;
+    }
+    btn.textContent = '▶︎';
+  };
+  btn.addEventListener('click', () => {
+    if (auditionAudio) { stopAudition(); return; }
+    const track = getSelectedCatalogTrack();
+    if (!track || !track.url) {
+      alert('プレビュー再生できる曲が選ばれていません');
+      return;
+    }
+    const a = new Audio();
+    a.src = track.url;
+    a.preload = 'auto';
+    a.addEventListener('ended', stopAudition, { once: true });
+    a.addEventListener('error', () => { stopAudition(); alert('再生エラー'); }, { once: true });
+    a.play().then(() => {
+      btn.textContent = '⏸';
+      auditionAudio = a;
+    }).catch(() => stopAudition());
+  });
+  // Stop on dropdown change so we don't get audio bleed.
+  const sel = document.getElementById('catalogSelect');
+  if (sel) sel.addEventListener('change', stopAudition);
 }
 
 function resolveTitle(opts) {
