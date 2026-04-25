@@ -1404,8 +1404,8 @@ function easeInOut(t) { return t * t * (3 - 2 * t); }
 // Decode a photo ref to an ImageBitmap that's no larger than `maxDim` along
 // its long side. Without this, decoding 30+ full-resolution iPhone photos
 // (each ~24 MP) blows past mobile RAM caps and the browser tab crashes
-// during preview. 1600px is enough to look sharp at 1080p output even with
-// the kenburns 1.18× zoom.
+// during preview. Preview uses a smaller cap than export so iOS Safari
+// can hold the working set in RAM; export re-decodes at full size.
 async function decodeBitmapForRender(ref, maxDim = 1600) {
   const src = ref.decodedBlob || ref.file;
   const w = ref.width || 0, h = ref.height || 0;
@@ -1420,11 +1420,48 @@ async function decodeBitmapForRender(ref, maxDim = 1600) {
     } catch (_) {
       // Older browsers may not support resize options — fall through.
     }
+    // Fallback: Image → canvas at target size → ImageBitmap. Reliable
+    // across iOS Safari versions where createImageBitmap resize options
+    // are silently ignored.
+    const url = URL.createObjectURL(src);
+    try {
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = url;
+      await img.decode();
+      const cw = Math.max(1, Math.round(w * scale));
+      const ch = Math.max(1, Math.round(h * scale));
+      const c = document.createElement('canvas');
+      c.width = cw; c.height = ch;
+      const cx = c.getContext('2d');
+      cx.imageSmoothingQuality = 'high';
+      cx.drawImage(img, 0, 0, cw, ch);
+      return await createImageBitmap(c);
+    } finally {
+      try { URL.revokeObjectURL(url); } catch (_) {}
+    }
   }
   return await createImageBitmap(src);
 }
 
-async function preloadAssets(plan, onProgress) {
+// Different working-set bitmap budget for preview vs export.
+function getRenderBitmapMaxDim(opts, mode) {
+  const res = parseInt(opts && opts.resolution, 10) || 720;
+  const canvasLong = Math.round(res * 16 / 9);
+  if (mode === 'export') {
+    // Slightly above the canvas long side for ken-burns headroom, capped
+    // at 2400 to keep export RAM bounded too.
+    return Math.min(2400, Math.round(canvasLong * 1.4));
+  }
+  // Preview — much smaller; the on-screen canvas may be full-size but the
+  // bitmap upscales acceptably and saves significant RAM on iOS Safari.
+  return Math.max(720, Math.min(960, Math.round(canvasLong * 0.6)));
+}
+
+async function preloadAssets(plan, opts, mode, onProgress) {
+  const maxDim = getRenderBitmapMaxDim(opts, mode);
+  // Border bitmaps in video-band slots are smaller on screen — smaller cap.
+  const borderMaxDim = Math.max(480, Math.round(maxDim * 0.7));
   const assets = new Map();
   let i = 0;
   for (const clip of plan.timeline) {
@@ -1432,9 +1469,12 @@ async function preloadAssets(plan, onProgress) {
     if (clip.kind === 'photo' && clip.layout === 'stack-pair') {
       try {
         const refs = clip.refs || [clip.ref];
-        const bms = await Promise.all(refs.map(r =>
-          withTimeout(decodeBitmapForRender(r), 8000, r.sourceName)
-        ));
+        // Sequential decode (not Promise.all) so peak memory stays bounded
+        // — two big bitmaps in flight at once was tipping iOS over.
+        const bms = [];
+        for (const r of refs) {
+          bms.push(await withTimeout(decodeBitmapForRender(r, maxDim), 12000, r.sourceName));
+        }
         assets.set(clip.photoId, { kind: 'stack-pair', bitmaps: bms });
       } catch (e) {
         console.warn('stack-pair preload failed', e);
@@ -1442,7 +1482,7 @@ async function preloadAssets(plan, onProgress) {
       }
     } else if (clip.kind === 'photo') {
       try {
-        const bm = await withTimeout(decodeBitmapForRender(clip.ref), 8000, clip.ref.sourceName);
+        const bm = await withTimeout(decodeBitmapForRender(clip.ref, maxDim), 12000, clip.ref.sourceName);
         assets.set(clip.photoId, { kind: 'photo', bitmap: bm });
       } catch (e) {
         console.warn('preload failed', clip.ref.sourceName, e);
@@ -1470,9 +1510,11 @@ async function preloadAssets(plan, onProgress) {
         let borderBitmaps = null;
         if (clip.layout === 'video-band' && clip.borderRefs && clip.borderRefs.length >= 2) {
           try {
-            borderBitmaps = await Promise.all(clip.borderRefs.slice(0, 2).map(r =>
-              withTimeout(decodeBitmapForRender(r, 1200), 8000, r.sourceName)
-            ));
+            const list = [];
+            for (const r of clip.borderRefs.slice(0, 2)) {
+              list.push(await withTimeout(decodeBitmapForRender(r, borderMaxDim), 8000, r.sourceName));
+            }
+            borderBitmaps = list;
           } catch (_) { borderBitmaps = null; }
         }
         assets.set(clip.photoId, {
@@ -1983,12 +2025,13 @@ function drawOverlay(ctx, w, h, ovl, localT) {
 }
 
 class Renderer {
-  constructor(canvas, plan, opts, mixer = null) {
+  constructor(canvas, plan, opts, mixer = null, mode = 'preview') {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.plan = plan;
     this.opts = opts;
     this.mixer = mixer;
+    this.mode = mode; // 'preview' | 'export' — drives bitmap size budget
     this.assets = null;
     this.running = false;
     this.startWallTime = 0;
@@ -2008,7 +2051,7 @@ class Renderer {
     if (document.fonts && document.fonts.ready) {
       try { await withTimeout(document.fonts.ready, 4000, 'fonts'); } catch (_) {}
     }
-    this.assets = await preloadAssets(this.plan, onProgress);
+    this.assets = await preloadAssets(this.plan, this.opts, this.mode, onProgress);
     if (this.mixer) {
       for (const clip of this.plan.timeline) {
         if (clip.kind !== 'video') continue;
@@ -3022,7 +3065,7 @@ function preWarmAudioContext() {
   } catch (_) { return null; }
 }
 
-async function setupRendererForPlay(opts, plan, audioCtx) {
+async function setupRendererForPlay(opts, plan, audioCtx, mode = 'preview') {
   // The AudioContext must be created (and resumed) from the user gesture
   // stack on iOS Safari. The caller hands one in that was constructed
   // synchronously inside the click handler.
@@ -3041,7 +3084,7 @@ async function setupRendererForPlay(opts, plan, audioCtx) {
     console.warn('AudioContext unavailable', e);
     mixer = null;
   }
-  const renderer = new Renderer(dom.stage, plan, opts, mixer);
+  const renderer = new Renderer(dom.stage, plan, opts, mixer, mode);
   renderer.setupCanvas();
   return { renderer, mixer };
 }
@@ -3163,7 +3206,7 @@ async function onExport() {
     dom.stageStatus.textContent = '🖼 アセット読み込み中…';
     dom.stageOverlay.classList.remove('hidden');
 
-    const { renderer, mixer } = await setupRendererForPlay(opts, plan, audioCtx);
+    const { renderer, mixer } = await setupRendererForPlay(opts, plan, audioCtx, 'export');
     activeRenderer = renderer;
     mixerToDispose = mixer;
 
@@ -3219,7 +3262,7 @@ async function onPreview() {
     dom.stageStatus.textContent = '🖼 アセット読み込み中…';
     dom.stageOverlay.classList.remove('hidden');
 
-    const { renderer, mixer } = await setupRendererForPlay(opts, plan, audioCtx);
+    const { renderer, mixer } = await setupRendererForPlay(opts, plan, audioCtx, 'preview');
     activeRenderer = renderer;
     mixerToDispose = mixer;
 
