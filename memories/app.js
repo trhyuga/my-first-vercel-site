@@ -1139,6 +1139,9 @@ function pickLayout(item, outputOrientation) {
               : 9 / 16;
   const itemAR = item.width && item.height ? item.width / item.height : outAR;
   if (Math.abs(itemAR - outAR) / outAR < 0.15) return 'cover-kenburns';
+  // Square output never uses blur-fill / stack-pair / video-band — every
+  // mismatched item just zooms to fill (smart-crop), per user direction.
+  if (outputOrientation === 'square') return 'smart-crop';
   // Videos can't pre-bake a blurred background (frame is constantly
   // changing). For now they always smart-crop — video-band layout (video
   // centred + photo borders) lands in the next sub-step.
@@ -1296,8 +1299,10 @@ async function buildPlan(opts) {
   if (lastClip && lastClip.kind === 'closer') {
     let closerMain = null, closerCaption = null;
     if (opts.closerMode === '__custom__') {
-      if (opts.closerCustom) closerMain = opts.closerCustom;
-      if (opts.closerSubtitleCustom) closerCaption = opts.closerSubtitleCustom;
+      // Empty input reverts to the resolved-title fallback so clearing the
+      // field doesn't leave the closer card with no big line.
+      closerMain    = opts.closerCustom || titleStr || null;
+      closerCaption = opts.closerSubtitleCustom || null;
     } else if (titleStr) {
       closerMain = titleStr;
     }
@@ -2744,11 +2749,11 @@ async function ingestFiles(files) {
   state.titleCandidates = [];
   for (const sel of ['titleSelect', 'closerSelect']) {
     const el = document.getElementById(sel);
-    if (el) el.value = '__auto__';
+    if (el) { el.value = '__auto__'; el.style.display = ''; }
   }
   for (const id of ['titleCustom', 'titleSubtitleCustom', 'closerCustom', 'closerSubtitleCustom']) {
     const el = document.getElementById(id);
-    if (el) { el.value = ''; el.style.display = 'none'; }
+    if (el) { el.value = ''; el.style.display = 'none'; el.style.marginTop = '0.4rem'; }
   }
   const accepted = files.filter(f =>
     (f.type && f.type.startsWith('image/')) || isHeic(f) || isVideo(f)
@@ -3457,14 +3462,20 @@ function populateSettingsFromPlan(plan) {
   const titleClip = plan.timeline[0];
   const closerClip = plan.timeline[plan.timeline.length - 1];
 
+  // After the first preview the auto/custom selector is redundant — the
+  // input fields below are visible and editable. Hide the selects, fill
+  // the inputs with the resolved values; on next preview readPlanOpts
+  // sees titleMode='__custom__' + non-empty titleCustom and uses them.
   const titleSel = document.getElementById('titleSelect');
   const titleCustom = document.getElementById('titleCustom');
   const titleSubtitleCustom = document.getElementById('titleSubtitleCustom');
   if (titleSel && titleClip) {
     titleSel.value = '__custom__';
+    titleSel.style.display = 'none';
     if (titleCustom) {
       titleCustom.value = titleClip.title || '';
       titleCustom.style.display = '';
+      titleCustom.style.marginTop = '0';
     }
     if (titleSubtitleCustom) {
       titleSubtitleCustom.value = titleClip.subtitle || '';
@@ -3477,13 +3488,27 @@ function populateSettingsFromPlan(plan) {
   const closerSubtitleCustom = document.getElementById('closerSubtitleCustom');
   if (closerSel && closerClip && closerClip.kind === 'closer') {
     closerSel.value = '__custom__';
+    closerSel.style.display = 'none';
     if (closerCustom) {
       closerCustom.value = closerClip.subtitle || '';
       closerCustom.style.display = '';
+      closerCustom.style.marginTop = '0';
     }
     if (closerSubtitleCustom) {
       closerSubtitleCustom.value = closerClip.title || '';
       closerSubtitleCustom.style.display = '';
+    }
+  }
+
+  // BGM dropdown — if user picked '🪄 自動選曲', commit the actual chosen
+  // track to the dropdown so the next preview is deterministic and the
+  // user sees what's playing. Manual catalog picks + upload + none are
+  // left untouched.
+  const bgmRadio = document.querySelector('input[name="bgm"]:checked');
+  if (bgmRadio && bgmRadio.value === 'catalog') {
+    const sel = document.getElementById('catalogSelect');
+    if (sel && sel.value === '__auto__' && state.lastUsedTrack && state.lastUsedTrack.id) {
+      sel.value = state.lastUsedTrack.id;
     }
   }
 }
