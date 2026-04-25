@@ -74,7 +74,11 @@ const dom = {
   quickEdit: document.getElementById('quickEdit'),
   quickTitle: document.getElementById('quickTitle'),
   quickSubtitle: document.getElementById('quickSubtitle'),
+  quickCloserMain: document.getElementById('quickCloserMain'),
+  quickCloserCaption: document.getElementById('quickCloserCaption'),
   quickBgm: document.getElementById('quickBgm'),
+  quickAudition: document.getElementById('quickAudition'),
+  quickExport: document.getElementById('quickExport'),
   quickApply: document.getElementById('quickApply'),
 };
 
@@ -653,12 +657,23 @@ async function processVideo(file) {
 // Similarity grouping + best-of-group selection
 // -----------------------------------------------------------------------------
 function groupSimilarPhotos(photos) {
-  // Photos within DEDUP_TIME_WINDOW_MS AND with hamming(dHash) <=
-  // DHASH_HAMMING_THRESHOLD form a group. Videos are always solo (one group
-  // each) — they never merge with photos or with each other.
+  // Adaptive thresholds based on upload size. With few photos every shot
+  // matters, so we keep them all (no merging). With a big dump we tighten
+  // to be more aggressive about pulling near-duplicates into one rep.
+  //   ≤12 photos: no dedup at all
+  //   13-30:      hamming ≤ 12, time window 150s
+  //   31-80:      hamming ≤ 16, time window 300s
+  //   >80:        hamming ≤ 18, time window 600s
+  const total = photos.filter(p => p.kind !== 'video').length;
+  let hammingMax, timeWindow;
+  if (total <= 12)      { hammingMax = -1;  timeWindow = 0;       }
+  else if (total <= 30) { hammingMax = 12;  timeWindow = 150_000; }
+  else if (total <= 80) { hammingMax = 16;  timeWindow = 300_000; }
+  else                  { hammingMax = 18;  timeWindow = 600_000; }
+
   const groups = [];
   for (const p of photos) {
-    if (p.kind === 'video' || !p.dHash) {
+    if (p.kind === 'video' || !p.dHash || hammingMax < 0) {
       groups.push([p]);
       continue;
     }
@@ -666,9 +681,8 @@ function groupSimilarPhotos(photos) {
     for (const g of groups) {
       const head = g[0];
       if (head.kind === 'video' || !head.dHash) continue;
-      const dt = Math.abs(p.ts - head.ts);
-      if (dt > DEDUP_TIME_WINDOW_MS) continue;
-      if (hammingDistance(head.dHash, p.dHash) <= DHASH_HAMMING_THRESHOLD) {
+      if (Math.abs(p.ts - head.ts) > timeWindow) continue;
+      if (hammingDistance(head.dHash, p.dHash) <= hammingMax) {
         g.push(p);
         placed = true;
         break;
@@ -676,9 +690,7 @@ function groupSimilarPhotos(photos) {
     }
     if (!placed) groups.push([p]);
   }
-  // Sort each group oldest-first (stable for picker)
   for (const g of groups) g.sort((a, b) => a.ts - b.ts);
-  // Sort groups by their head's timestamp
   groups.sort((a, b) => a[0].ts - b[0].ts);
   return groups;
 }
@@ -1032,19 +1044,22 @@ function selectByMode(reps, mode, opts) {
 // tags) and length so the count matches the music feel.
 function recommendedCount(usableCount, opts) {
   if (!usableCount) return 0;
+  // User policy: keep at least 80% of what made it through dedup + bad
+  // filtering. We may shrink per-photo seconds (planPerPhotoSec clamps to
+  // PHOTO_MIN_SEC) but we don't drop content if we don't have to.
+  const minKeep = Math.max(4, Math.ceil(usableCount * 0.80));
   if (opts.bgmDurationSec) {
     const tempo = opts.bgmTempo || 'medium';
     const targetPer = tempo === 'fast' ? 2.2 : tempo === 'slow' ? 4.5 : 3.0;
     const body = Math.max(10, opts.bgmDurationSec - TITLE_CARD_SEC - CLOSER_CARD_SEC);
-    return Math.max(4, Math.min(usableCount, Math.round(body / targetPer)));
+    const desired = Math.round(body / targetPer);
+    // BGM-fit pacing OR 80%-floor, whichever keeps more material.
+    return Math.max(minKeep, Math.min(usableCount, desired));
   }
-  // No BGM — scale loosely with the upload size, capped so the result stays
-  // watchable. The breakpoints are tuned for "memory video" length feel
-  // (~3s/slide → 30-90s output for 10-30 photos, etc.).
-  if (usableCount <= 12) return usableCount;
-  if (usableCount <= 30) return Math.round(8 + usableCount * 0.45);
-  if (usableCount <= 100) return Math.round(20 + (usableCount - 30) * 0.18);
-  return Math.min(40, Math.round(33 + (usableCount - 100) * 0.04));
+  // No BGM — keep almost everything; 80% floor for any size, light cap so
+  // 200-photo dumps don't produce 10-minute videos.
+  if (usableCount <= 30) return usableCount;
+  return Math.max(minKeep, Math.min(usableCount, 60));
 }
 
 // -----------------------------------------------------------------------------
@@ -1484,8 +1499,10 @@ async function decodeBitmapForRender(ref, maxDim = 1600) {
   return await createImageBitmap(src);
 }
 
-// Different working-set bitmap budget for preview vs export.
-function getRenderBitmapMaxDim(opts, mode) {
+// Different working-set bitmap budget for preview vs export. Preview also
+// scales DOWN further as the photo+video count grows so iOS Safari can
+// still hold the working set even with 50+ items.
+function getRenderBitmapMaxDim(opts, mode, itemCount) {
   const res = parseInt(opts && opts.resolution, 10) || 720;
   const canvasLong = Math.round(res * 16 / 9);
   if (mode === 'export') {
@@ -1493,15 +1510,22 @@ function getRenderBitmapMaxDim(opts, mode) {
     // at 2400 to keep export RAM bounded too.
     return Math.min(2400, Math.round(canvasLong * 1.4));
   }
-  // Preview — fixed 720 long side regardless of output resolution. The
-  // on-screen canvas can be larger (the bitmap upscales with imageSmoothing
-  // active) and the RAM saving is significant on iOS Safari, where the
-  // working set was OOM-ing the tab at higher caps.
-  return 720;
+  // Preview budget: scaled by item count to bound memory.
+  const n = itemCount || 0;
+  if (n <= 15) return 720;
+  if (n <= 30) return 600;
+  if (n <= 60) return 480;
+  return 400;
+}
+
+// Did we drop below 720 to fit memory? Used to surface the disclaimer.
+function previewQualityReduced(opts, itemCount) {
+  return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 720;
 }
 
 async function preloadAssets(plan, opts, mode, onProgress) {
-  const maxDim = getRenderBitmapMaxDim(opts, mode);
+  const itemCount = plan.timeline.filter(c => c.kind === 'photo' || c.kind === 'video').length;
+  const maxDim = getRenderBitmapMaxDim(opts, mode, itemCount);
   // Border bitmaps in video-band slots are smaller on screen — smaller cap.
   const borderMaxDim = Math.max(480, Math.round(maxDim * 0.7));
   const assets = new Map();
@@ -2661,7 +2685,10 @@ class AudioMixer {
       g.gain.linearRampToValueAtTime(1.0, t0 + 0.15);
     }
     this.activeVideoCount = Math.max(0, this.activeVideoCount) + 1;
-    if (this.activeVideoCount === 1) this.duckBgm();
+    // Only touch BGM gain when ducking actually does something — at level
+    // 1.0 the cancelScheduledValues call would wipe the long-tail BGM
+    // fade-out scheduled in start() for nothing.
+    if (this.activeVideoCount === 1 && VIDEO_DUCK_LEVEL < 0.99) this.duckBgm();
   }
   deactivateVideo(clipId) {
     const g = this.videoGains.get(clipId);
@@ -2671,7 +2698,7 @@ class AudioMixer {
       g.gain.linearRampToValueAtTime(0, t0 + 0.20);
     }
     this.activeVideoCount = Math.max(0, this.activeVideoCount - 1);
-    if (this.activeVideoCount === 0) this.unduckBgm();
+    if (this.activeVideoCount === 0 && VIDEO_DUCK_LEVEL < 0.99) this.unduckBgm();
   }
   duckBgm() {
     if (!this.bgmGain) return;
@@ -2779,8 +2806,9 @@ async function ingestFiles(files) {
 
     for (let i = 0; i < queue.length; i++) {
       const f = queue[i];
+      const wasVideo = isVideo(f);
       try {
-        if (!isVideo(f)) await faceReady;
+        if (!wasVideo) await faceReady;
         // 25s hard cap per file. Photos with HEIC + face-scan take ~3-5s
         // typically; videos with frame extract ~1-2s. A file that exceeds
         // this is almost certainly stuck — skip and move on.
@@ -2790,7 +2818,7 @@ async function ingestFiles(files) {
         console.warn('skipped file', f.name, e);
       }
       setLoadProgress(((i + 1) / total) * 100,
-        `${i + 1} / ${total} 件解析中… (${i < photosOnly.length ? '写真' : '動画'})`);
+        `${i + 1} / ${total} 件解析中… (${wasVideo ? '動画' : '写真'})`);
     }
     state.photos.sort((a, b) => a.ts - b.ts);
     state.groups = groupSimilarPhotos(state.photos);
@@ -3045,21 +3073,37 @@ function readPlanOpts() {
 }
 
 let auditionAudio = null;
+function stopAudition() {
+  if (auditionAudio) {
+    try { auditionAudio.pause(); } catch (_) {}
+    try { auditionAudio.removeAttribute('src'); auditionAudio.load(); } catch (_) {}
+    auditionAudio = null;
+  }
+  for (const id of ['catalogAudition', 'quickAudition']) {
+    const btn = document.getElementById(id);
+    if (btn) btn.textContent = '▶︎';
+  }
+}
+
 function bindCatalogAudition() {
   const btn = document.getElementById('catalogAudition');
   if (!btn) return;
-  const stopAudition = () => {
-    if (auditionAudio) {
-      try { auditionAudio.pause(); } catch (_) {}
-      auditionAudio = null;
-    }
-    btn.textContent = '▶︎';
-  };
   btn.addEventListener('click', () => {
+    // Toggle: if something's playing, stop it.
     if (auditionAudio) { stopAudition(); return; }
-    const track = getSelectedCatalogTrack();
+    // Always unlock + stop any leftover playback first.
+    unlockHtmlAudioPlayback();
+    stopAudition();
+
+    // For __auto__, sample the track that auto-pick would currently choose
+    // so the user actually hears what they'd get.
+    let track = getSelectedCatalogTrack();
+    if (!track) {
+      track = autoPickBgmTrack(estimateTargetSec(), 'auto', window.MUSIC_CATALOG || [])
+           || (window.MUSIC_CATALOG || [])[0];
+    }
     if (!track || !track.url) {
-      alert('プレビュー再生できる曲が選ばれていません');
+      alert('再生できる曲がありません');
       return;
     }
     const a = new Audio();
@@ -3072,7 +3116,7 @@ function bindCatalogAudition() {
       auditionAudio = a;
     }).catch(() => stopAudition());
   });
-  // Stop on dropdown change so we don't get audio bleed.
+  // Stop on dropdown change so we don't bleed two tracks.
   const sel = document.getElementById('catalogSelect');
   if (sel) sel.addEventListener('change', stopAudition);
 }
@@ -3401,6 +3445,10 @@ async function onPreview() {
     dom.stagePanel.style.display = 'flex';
     dom.stageStatus.textContent = '🖼 アセット読み込み中…';
     dom.stageOverlay.classList.remove('hidden');
+    // Preview-quality disclaimer if memory budget kicked in.
+    const itemCount = plan.timeline.filter(c => c.kind === 'photo' || c.kind === 'video').length;
+    const note = document.getElementById('previewQualityNote');
+    if (note) note.style.display = previewQualityReduced(opts, itemCount) ? '' : 'none';
 
     const { renderer, mixer } = await setupRendererForPlay(opts, plan, audioCtx, 'preview');
     activeRenderer = renderer;
@@ -3446,8 +3494,17 @@ function populateQuickEdit(plan, currentTrack) {
   if (!dom.quickEdit) return;
   dom.quickEdit.style.display = 'flex';
   const titleClip = plan.timeline[0];
+  const closerClip = plan.timeline[plan.timeline.length - 1];
   dom.quickTitle.value = titleClip ? (titleClip.title || '') : '';
   dom.quickSubtitle.value = titleClip ? (titleClip.subtitle || '') : '';
+  if (dom.quickCloserMain) {
+    dom.quickCloserMain.value = closerClip && closerClip.kind === 'closer'
+      ? (closerClip.subtitle || '') : '';
+  }
+  if (dom.quickCloserCaption) {
+    dom.quickCloserCaption.value = closerClip && closerClip.kind === 'closer'
+      ? (closerClip.title || '') : '';
+  }
   // Rebuild dropdown each time so newly-added catalog tracks show up too.
   dom.quickBgm.innerHTML = '';
   const noOpt = document.createElement('option');
@@ -3473,16 +3530,59 @@ function populateQuickEdit(plan, currentTrack) {
   }
 }
 
+function readQuickEditOverrides() {
+  state.overrides = state.overrides || {};
+  state.overrides.title          = (dom.quickTitle.value || '').trim() || null;
+  state.overrides.subtitle       = (dom.quickSubtitle.value || '').trim() || null;
+  state.overrides.closerTitle    = dom.quickCloserMain
+    ? ((dom.quickCloserMain.value || '').trim() || null) : null;
+  state.overrides.closerSubtitle = dom.quickCloserCaption
+    ? ((dom.quickCloserCaption.value || '').trim() || null) : null;
+  state.overrides.bgmId          = dom.quickBgm ? (dom.quickBgm.value || null) : null;
+}
+
 function bindQuickEdit() {
-  if (!dom.quickApply) return;
-  dom.quickApply.addEventListener('click', () => {
-    const t = (dom.quickTitle.value || '').trim();
-    const s = (dom.quickSubtitle.value || '').trim();
-    state.overrides.title    = t || null;
-    state.overrides.subtitle = s || null;
-    state.overrides.bgmId    = dom.quickBgm.value || null;
-    onPreview();
-  });
+  if (dom.quickApply) {
+    dom.quickApply.addEventListener('click', () => {
+      readQuickEditOverrides();
+      onPreview();
+    });
+  }
+  if (dom.quickExport) {
+    dom.quickExport.addEventListener('click', () => {
+      readQuickEditOverrides();
+      onExport();
+    });
+  }
+  // Audition button right next to the BGM dropdown — same logic as the
+  // settings-panel one but operates on the quickBgm select.
+  if (dom.quickAudition) {
+    dom.quickAudition.addEventListener('click', () => {
+      if (auditionAudio) { stopAudition(); return; }
+      unlockHtmlAudioPlayback();
+      stopAudition();
+      const id = dom.quickBgm.value;
+      let track = null;
+      if (id && id !== '__none__' && id !== '__auto__' && id !== '__inherit__') {
+        track = (window.MUSIC_CATALOG || []).find(t => t.id === id);
+      }
+      if (!track) {
+        track = autoPickBgmTrack(estimateTargetSec(), 'auto', window.MUSIC_CATALOG || [])
+             || (window.MUSIC_CATALOG || [])[0];
+      }
+      if (!track || !track.url) { alert('再生できる曲がありません'); return; }
+      const a = new Audio();
+      a.src = track.url;
+      a.preload = 'auto';
+      a.addEventListener('ended', stopAudition, { once: true });
+      a.addEventListener('error', () => { stopAudition(); alert('再生エラー'); }, { once: true });
+      a.play().then(() => {
+        dom.quickAudition.textContent = '⏸';
+        auditionAudio = a;
+      }).catch(() => stopAudition());
+    });
+    if (dom.quickBgm) dom.quickBgm.addEventListener('change', stopAudition);
+  }
 }
 
 function renderPlanSummary(plan) {

@@ -120,13 +120,13 @@
       <div class="field">
         <label>BGM</label>
         <div class="radio-group" id="bgmGroup">
-          <label><input type="radio" name="bgm" value="catalog" id="bgmCatalogRadio"><span>🎵 推奨曲から自動選曲</span></label>
+          <label><input type="radio" name="bgm" value="catalog" id="bgmCatalogRadio" checked><span>🎵 推奨曲から自動選曲</span></label>
           <label><input type="radio" name="bgm" value="upload"><span>📁 自分のBGMを使う</span></label>
-          <label><input type="radio" name="bgm" value="none" checked><span>🔇 BGMなし</span></label>
+          <label><input type="radio" name="bgm" value="none"><span>🔇 BGMなし</span></label>
         </div>
       </div>
 
-      <div class="field" id="catalogField" style="display:none;">
+      <div class="field" id="catalogField">
         <label for="catalogSelect">推奨曲</label>
         <div style="display:flex; gap:0.4rem; align-items:stretch;">
           <select id="catalogSelect" style="flex:1;"></select>
@@ -154,20 +154,40 @@
           <p id="stageStatus">待機中</p>
         </div>
       </div>
+      <p class="hint" id="previewQualityNote" style="display:none; text-align:center;">⚠️ 端末メモリ節約のため <b>プレビューは画質を落としています</b>。書き出しは元解像度で出力します。</p>
       <div id="quickEdit" style="display:none;">
-        <div class="field">
-          <label for="quickTitle">タイトル</label>
-          <input type="text" id="quickTitle" />
+        <p class="hint" style="margin:0 0 0.4rem; color:#0f172a;">プレビューを見ながら微調整 → <b>「🔄 反映して再プレビュー」</b> で更新、納得したら <b>「🎬 この設定で動画書き出し」</b>。<br>(上の「設定」パネルで変えても同じですが、ここで変えた内容が優先されます)</p>
+        <div class="field-row">
+          <div class="field">
+            <label for="quickTitle">タイトル (オープニング)</label>
+            <input type="text" id="quickTitle" />
+          </div>
+          <div class="field">
+            <label for="quickSubtitle">タイトルのサブ</label>
+            <input type="text" id="quickSubtitle" />
+          </div>
         </div>
-        <div class="field">
-          <label for="quickSubtitle">サブタイトル</label>
-          <input type="text" id="quickSubtitle" />
+        <div class="field-row">
+          <div class="field">
+            <label for="quickCloserMain">エンディング (大)</label>
+            <input type="text" id="quickCloserMain" placeholder="例: Memories" />
+          </div>
+          <div class="field">
+            <label for="quickCloserCaption">エンディングのキャプション</label>
+            <input type="text" id="quickCloserCaption" placeholder="例: 京都 2024年12月" />
+          </div>
         </div>
         <div class="field">
           <label for="quickBgm">BGM</label>
-          <select id="quickBgm"></select>
+          <div style="display:flex;gap:0.4rem;align-items:stretch;">
+            <select id="quickBgm" style="flex:1;"></select>
+            <button type="button" id="quickAudition" class="btn-secondary" style="flex:0 0 auto; padding:0.5rem 0.85rem; font-size:0.95rem;">▶︎</button>
+          </div>
         </div>
-        <button class="btn-primary" id="quickApply">🔄 反映してプレビュー</button>
+        <div class="btn-row">
+          <button class="btn-secondary" id="quickApply">🔄 反映して再プレビュー</button>
+          <button class="btn-primary"   id="quickExport">🎬 この設定で動画書き出し</button>
+        </div>
       </div>
       <div class="progress-block" id="renderProg" style="display:none;">
         <span id="renderProgText">書き出し中…</span>
