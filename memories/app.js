@@ -1083,22 +1083,14 @@ function fmtLocationSummary(clusters) {
   return `${u.slice(0, 2).join(' / ')} ほか`;
 }
 
-function orderForTimeline(selected, clusters) {
-  // Keep same-cluster items contiguous, ordered by the cluster's earliest
-  // timestamp; within a cluster, oldest first. This matches the user's rule:
-  // "同じ場所だと判断できるものはなるべく固めて順に配置".
-  const cidOf = (p) => p.clusterId || 'solo';
-  const byCid = new Map();
-  for (const p of selected) {
-    const k = cidOf(p);
-    if (!byCid.has(k)) byCid.set(k, []);
-    byCid.get(k).push(p);
-  }
-  for (const list of byCid.values()) list.sort((a, b) => a.ts - b.ts);
-  const cidOrder = [...byCid.entries()]
-    .sort((a, b) => a[1][0].ts - b[1][0].ts)
-    .map(([k]) => k);
-  return cidOrder.flatMap(k => byCid.get(k));
+function orderForTimeline(selected, _clusters) {
+  // Strict chronological. The user's latest direction was 「日程や時間帯の括り
+  // の順で出してくれたらオーケー。画像と動画が順番に入り乱れても問題ない」
+  // — so videos slot in by their actual timestamp instead of getting deferred
+  // to the end of a same-location cluster's run. Cluster-change still drives
+  // the chapter-label overlays inside buildTimeline, so a revisit naturally
+  // gets a fresh "📍 location" label.
+  return selected.slice().sort((a, b) => a.ts - b.ts);
 }
 
 function distinctDays(items) {
@@ -1536,13 +1528,11 @@ function getBlurredFill(asset, canvasW, canvasH) {
 function drawBlurFill(ctx, canvasW, canvasH, asset, t, kb) {
   const tEased = easeInOut(t);
 
-  // Background — pre-baked
+  // Background — pre-baked, sized exactly to canvas. Drawn STATIC: drifting
+  // it exposed a black canvas edge on the trailing side. Motion comes from
+  // the foreground Ken-Burns instead, which is plenty.
   const bg = getBlurredFill(asset, canvasW, canvasH);
-  // Slow drift of the background to add motion without re-blurring
-  const drift = 0.04 * tEased;
-  const driftX = kb.panAxis === 'x' ? kb.panSign * drift * canvasW : 0;
-  const driftY = kb.panAxis === 'y' ? kb.panSign * drift * canvasH : 0;
-  ctx.drawImage(bg, driftX, driftY);
+  ctx.drawImage(bg, 0, 0);
 
   // Foreground — scale-to-fit with subtle Ken-Burns zoom-pan
   const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
@@ -1700,41 +1690,57 @@ function drawVideoBand(ctx, canvasW, canvasH, videoEl, srcW, srcH, borderBitmaps
   drawCoverIntoSlot(ctx, 0, bandY, canvasW, bandH, videoEl, srcW, srcH, t, kb);
 }
 
-// Two photos stacked top/bottom (each in half the canvas height with a
-// hairline gap). Each half does its own subtle zoom-pan from its kenburns
-// params so the result still feels like a moving frame.
+// Two photos stacked top/bottom with a slight overlap (no black gap) and a
+// diagonal seam between them. Each half is a clip-path polygon, with the
+// photo cover-filled into a slightly oversized slot so it covers the
+// overlap area too. Slope direction picked from the first kenburns param.
 function drawStackPair(ctx, canvasW, canvasH, bitmaps, t, kbList) {
-  const gap = Math.max(2, Math.round(canvasH * 0.012));
-  const halfH = Math.floor((canvasH - gap) / 2);
-  const tEased = easeInOut(t);
-  for (let i = 0; i < 2 && i < bitmaps.length; i++) {
-    const bm = bitmaps[i];
-    if (!bm) continue;
-    const kb = (kbList && kbList[i]) || makeKenburnsParams(i);
-    const slotY = i === 0 ? 0 : halfH + gap;
-    const zoom = kb.startZoom + (kb.endZoom - kb.startZoom) * tEased;
-    const baseScale = Math.max(canvasW / bm.width, halfH / bm.height);
-    const scale = baseScale * zoom;
-    const drawW = bm.width * scale;
-    const drawH = bm.height * scale;
-    let dx = (canvasW - drawW) / 2;
-    let dy = slotY + (halfH - drawH) / 2;
-    const slackX = drawW - canvasW;
-    const slackY = drawH - halfH;
-    const pan = kb.panSign * kb.panAmount * tEased;
-    if (kb.panAxis === 'x' && slackX > 0) dx += slackX * pan;
-    else if (kb.panAxis === 'y' && slackY > 0) dy += slackY * pan;
-    dx = Math.min(0, Math.max(canvasW - drawW, dx));
-    dy = Math.min(slotY, Math.max(slotY + halfH - drawH, dy));
+  const halfH = Math.floor(canvasH / 2);
+  const skew = Math.round(canvasH * 0.04);          // diagonal slant magnitude
+  const overlap = Math.max(skew, Math.round(canvasH * 0.030)); // safety margin
+  const slopeDir = (kbList && kbList[0] && kbList[0].panSign < 0) ? -1 : 1;
+  const seamLeft  = halfH - slopeDir * (skew / 2);
+  const seamRight = halfH + slopeDir * (skew / 2);
+
+  // --- Top photo: clip to area above the diagonal ---
+  if (bitmaps[0]) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, slotY, canvasW, halfH);
+    ctx.moveTo(0, 0);
+    ctx.lineTo(canvasW, 0);
+    ctx.lineTo(canvasW, seamRight + 1);  // +1 to avoid hairline gap from anti-alias
+    ctx.lineTo(0, seamLeft + 1);
+    ctx.closePath();
     ctx.clip();
-    ctx.drawImage(bm, dx, dy, drawW, drawH);
+    drawCoverIntoSlot(ctx, 0, 0, canvasW, halfH + overlap,
+      bitmaps[0], bitmaps[0].width, bitmaps[0].height,
+      t, kbList && kbList[0]);
     ctx.restore();
   }
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, halfH, canvasW, gap);
+  // --- Bottom photo: clip to area below the diagonal ---
+  if (bitmaps[1]) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(0, seamLeft);
+    ctx.lineTo(canvasW, seamRight);
+    ctx.lineTo(canvasW, canvasH);
+    ctx.lineTo(0, canvasH);
+    ctx.closePath();
+    ctx.clip();
+    drawCoverIntoSlot(ctx, 0, halfH - overlap, canvasW, halfH + overlap,
+      bitmaps[1], bitmaps[1].width, bitmaps[1].height,
+      t, kbList && kbList[1]);
+    ctx.restore();
+  }
+  // --- Hairline accent along the diagonal seam for crisp definition ---
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.20)';
+  ctx.lineWidth = Math.max(1, Math.round(canvasH * 0.0015));
+  ctx.beginPath();
+  ctx.moveTo(0, seamLeft);
+  ctx.lineTo(canvasW, seamRight);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawCoverKenburns(ctx, canvasW, canvasH, source, srcW, srcH, t, kb) {
