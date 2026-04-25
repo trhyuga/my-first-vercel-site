@@ -1328,7 +1328,16 @@ function mergeStackPairs(timeline, opts) {
     const eligible = (clip) =>
       clip && clip.kind === 'photo' && clip.layout !== 'cover-kenburns'
       && clip.ref && clip.ref.orientation === 'landscape';
-    if (eligible(a) && eligible(b)) {
+    // Only merge when a and b share the same chapter (cluster + day). At a
+    // chapter boundary b carries fresh date/location overlays we mustn't
+    // drop; leaving b as its own clip preserves the chapter label.
+    const sameChapter = (x, y) => {
+      if (!x || !y || !x.ref || !y.ref) return false;
+      const sameCluster = (x.ref.clusterId || null) === (y.ref.clusterId || null);
+      const sameDay = ymdString(x.ref.ts) === ymdString(y.ref.ts);
+      return sameCluster && sameDay;
+    };
+    if (eligible(a) && eligible(b) && sameChapter(a, b)) {
       out.push({
         kind: 'photo',
         photoId: a.photoId, // reuse for asset map keying
@@ -1338,9 +1347,7 @@ function mergeStackPairs(timeline, opts) {
         layout: 'stack-pair',
         kenburns: a.kenburns,
         kenburnsList: [a.kenburns, b.kenburns],
-        // Keep only the first clip's overlays so chapter labels don't appear
-        // twice; b's date/location were already the same chapter anyway
-        // since they're consecutive items in the same cluster/day.
+        // Same chapter guaranteed above, so a's overlays cover both halves.
         overlays: a.overlays || [],
       });
       i += 2;
