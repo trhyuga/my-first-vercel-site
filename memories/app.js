@@ -2191,112 +2191,229 @@ const VIDEO_DUCK_LEVEL = 0.35;
 const DUCK_RAMP_SEC = 0.30;
 const UNDUCK_RAMP_SEC = 0.40;
 
-// Procedural BGM presets — Web Audio chord-pad + arpeggio. No external CDN
-// dependency. Note frequencies are equal-tempered values for the named chord.
+// Procedural BGM presets — Web Audio chord-progression engine. Each preset
+// is a 4-chord cycle (Pachelbel / 6-4-1-5 etc.) with one chord per
+// progression slot. Note frequencies are equal-tempered values for the
+// named chord, listed bass-to-top.
 const SYNTH_PRESETS = {
   warm: {
-    pad: [261.63, 329.63, 392.00],                         // C major
-    arp: [523.25, 659.25, 783.99, 659.25],                 // C5 E5 G5 E5
-    arpRate: 0.70, cutoff: 1100,
+    // I → V → vi → IV (C → G → Am → F) — uplifting / hopeful
+    progression: [
+      [130.81, 196.00, 261.63, 329.63, 392.00], // C2-G3-C4-E4-G4
+      [196.00, 246.94, 293.66, 392.00, 493.88], // G2-B3-D4-G4-B4
+      [220.00, 261.63, 329.63, 440.00, 523.25], // A2-C4-E4-A4-C5
+      [174.61, 220.00, 261.63, 349.23, 440.00], // F2-A3-C4-F4-A4
+    ],
+    chordSec: 4.5, melodyRate: 0.5, cutoff: 1500,
   },
   memorial: {
-    pad: [261.63, 329.63, 392.00],                         // C major (cleaner)
-    arp: [523.25, 659.25, 783.99, 1046.50, 783.99, 659.25],
-    arpRate: 0.85, cutoff: 900,
+    // vi → IV → I → V (Am → F → C → G) — reflective / nostalgic resolution
+    progression: [
+      [220.00, 261.63, 329.63, 440.00, 523.25],
+      [174.61, 220.00, 261.63, 349.23, 440.00],
+      [130.81, 196.00, 261.63, 329.63, 392.00],
+      [196.00, 246.94, 293.66, 392.00, 493.88],
+    ],
+    chordSec: 5.0, melodyRate: 0.6, cutoff: 1300,
   },
   nostalgic: {
-    pad: [220.00, 277.18, 329.63],                         // A minor
-    arp: [440.00, 523.25, 659.25, 523.25],
-    arpRate: 0.75, cutoff: 800,
+    // i → VII → VI → V (Am → G → F → E) — descending / wistful
+    progression: [
+      [220.00, 261.63, 329.63, 440.00, 523.25],
+      [196.00, 246.94, 293.66, 392.00, 493.88],
+      [174.61, 220.00, 261.63, 349.23, 440.00],
+      [164.81, 207.65, 246.94, 329.63, 415.30], // E2-G#3-B3-E4-G#4
+    ],
+    chordSec: 4.5, melodyRate: 0.55, cutoff: 1200,
   },
   bright: {
-    pad: [196.00, 246.94, 293.66],                         // G major
-    arp: [392.00, 493.88, 587.33, 493.88, 587.33, 783.99],
-    arpRate: 0.55, cutoff: 1400,
+    // I → IV → vi → V (G → C → Em → D) — pop-uplifting
+    progression: [
+      [196.00, 246.94, 293.66, 392.00, 493.88],
+      [130.81, 196.00, 261.63, 329.63, 392.00],
+      [164.81, 246.94, 329.63, 415.30, 493.88], // E2-B3-E4-G#4-B4
+      [146.83, 220.00, 293.66, 369.99, 440.00], // D2-A3-D4-F#4-A4
+    ],
+    chordSec: 3.5, melodyRate: 0.4, cutoff: 1800,
   },
   gentle: {
-    pad: [261.63, 311.13, 392.00],                         // C minor
-    arp: [523.25, 622.25, 783.99, 622.25],
-    arpRate: 0.90, cutoff: 700,
+    // i → III → VII → iv (Am → C → G → Dm) — folk-style
+    progression: [
+      [220.00, 261.63, 329.63, 440.00, 523.25],
+      [130.81, 196.00, 261.63, 329.63, 392.00],
+      [196.00, 246.94, 293.66, 392.00, 493.88],
+      [146.83, 220.00, 293.66, 349.23, 440.00], // D2-A3-D4-F4-A4
+    ],
+    chordSec: 5.0, melodyRate: 0.65, cutoff: 1100,
   },
 };
 
-// Generates the BGM in real time from a SYNTH_PRESETS preset. Two layers:
-//   1. Sustained sawtooth chord pad through a low-pass filter with a slow
-//      LFO on the cutoff (gives a breathing, warm pad).
-//   2. Sine-wave arpeggio with pluck envelopes (music-box-like melody).
-// Exposes `output` so AudioMixer can treat it like the BGM gain (BGM
-// ducking during videos works for free).
+// Generates BGM in real time from a SYNTH_PRESETS preset. Pipeline:
+//   bass + pad (sawtooth+filter+LFO) + melody (detuned-piano arpeggio)
+//   → notesGain → [dry + delay-feedback reverb] → output → ducking gain
+// Output gain is what AudioMixer treats as bgmGain so video ducking just
+// works for free.
 class SynthSource {
   constructor(ctx, presetName, totalSec) {
     this.ctx = ctx;
     this.preset = SYNTH_PRESETS[presetName] || SYNTH_PRESETS.warm;
     this.totalSec = Math.max(8, totalSec);
     this.nodes = [];
+    // Master envelope target
     this.notesGain = ctx.createGain();
     this.notesGain.gain.value = 0;
+    // Output (= mixer's bgmGain)
     this.output = ctx.createGain();
     this.output.gain.value = 1.0;
-    this.notesGain.connect(this.output);
+    // Feedback-delay reverb (3-tap stereo with light feedback). Cheap,
+    // sounds way better than a dry mix on memorial-piano timbre.
+    this.delayL = ctx.createDelay(2);
+    this.delayR = ctx.createDelay(2);
+    this.delayL.delayTime.value = 0.21;
+    this.delayR.delayTime.value = 0.27;
+    this.fbL = ctx.createGain(); this.fbL.gain.value = 0.38;
+    this.fbR = ctx.createGain(); this.fbR.gain.value = 0.38;
+    this.wet = ctx.createGain(); this.wet.gain.value = 0.32;
+    const splitter = ctx.createChannelSplitter(2);
+    const merger = ctx.createChannelMerger(2);
+    this.notesGain.connect(splitter);
+    splitter.connect(this.delayL, 0);
+    splitter.connect(this.delayR, 1);
+    this.delayL.connect(this.fbL).connect(this.delayR);
+    this.delayR.connect(this.fbR).connect(this.delayL);
+    this.delayL.connect(merger, 0, 0);
+    this.delayR.connect(merger, 0, 1);
+    merger.connect(this.wet).connect(this.output);
+    this.notesGain.connect(this.output); // dry
+    this.nodes.push(splitter, merger);
   }
+
+  // Detuned-pair "piano" note. Two oscillators (triangle + sine octaved
+  // unison) with an exponential decay envelope, low-pass filtered, panned.
+  schedulePiano(t, freq, dur, gain, pan) {
+    const ctx = this.ctx;
+    const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    if (panner) panner.pan.value = pan || 0;
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(gain, t + 0.008);
+    env.gain.exponentialRampToValueAtTime(Math.max(0.0005, gain * 0.4), t + 0.08);
+    env.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 3200;
+    filter.Q.value = 0.4;
+    env.connect(filter);
+    if (panner) filter.connect(panner).connect(this.notesGain);
+    else        filter.connect(this.notesGain);
+    // Two oscillators detuned for richness
+    const types = ['triangle', 'sine'];
+    const detunes = [0, +6]; // cents
+    for (let i = 0; i < 2; i++) {
+      const osc = ctx.createOscillator();
+      osc.type = types[i];
+      osc.frequency.value = freq;
+      osc.detune.value = detunes[i];
+      const sub = ctx.createGain();
+      sub.gain.value = i === 0 ? 0.65 : 0.35;
+      osc.connect(sub).connect(env);
+      osc.start(t);
+      osc.stop(t + dur + 0.05);
+      this.nodes.push(osc, sub);
+    }
+    this.nodes.push(env, filter);
+    if (panner) this.nodes.push(panner);
+  }
+
+  // Sustained pad / bass voice. Sawtooth through a low-pass with a slow
+  // LFO on cutoff for a breathing, warm pad timbre.
+  schedulePad(t, freq, dur, gain, pan) {
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = freq;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = this.preset.cutoff;
+    filter.Q.value = 0.6;
+    const env = ctx.createGain();
+    const fadeIn = Math.min(0.6, dur * 0.25);
+    const fadeOut = Math.min(0.8, dur * 0.30);
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(gain, t + fadeIn);
+    env.gain.setValueAtTime(gain, t + dur - fadeOut);
+    env.gain.linearRampToValueAtTime(0, t + dur);
+    const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    if (panner) panner.pan.value = pan || 0;
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 0.07;
+    const lfoG = ctx.createGain();
+    lfoG.gain.value = 280;
+    lfo.connect(lfoG).connect(filter.frequency);
+    osc.connect(filter).connect(env);
+    if (panner) env.connect(panner).connect(this.notesGain);
+    else        env.connect(this.notesGain);
+    osc.start(t);
+    osc.stop(t + dur + 0.1);
+    lfo.start(t);
+    lfo.stop(t + dur + 0.1);
+    this.nodes.push(osc, filter, env, lfo, lfoG);
+    if (panner) this.nodes.push(panner);
+  }
+
   start() {
     const ctx = this.ctx;
     const t0 = ctx.currentTime;
     const dur = this.totalSec;
     const p = this.preset;
-    // Internal envelope: fade in 1.5s → sustain 0.7 → fade out 1.5s.
-    const sustainEnd = Math.max(1.5, dur - 1.5);
+    // Master ADSR
+    const sustainEnd = Math.max(2.5, dur - 1.8);
     this.notesGain.gain.setValueAtTime(0, t0);
-    this.notesGain.gain.linearRampToValueAtTime(0.7, t0 + 1.5);
-    this.notesGain.gain.setValueAtTime(0.7, t0 + sustainEnd);
+    this.notesGain.gain.linearRampToValueAtTime(0.65, t0 + 1.8);
+    this.notesGain.gain.setValueAtTime(0.65, t0 + sustainEnd);
     this.notesGain.gain.linearRampToValueAtTime(0, t0 + dur);
-    // --- Chord pad layer ---
-    for (const freq of p.pad) {
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.value = freq;
-      const filter = ctx.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.value = p.cutoff;
-      filter.Q.value = 0.7;
-      const padGain = ctx.createGain();
-      padGain.gain.value = 0.11;
-      const lfo = ctx.createOscillator();
-      lfo.frequency.value = 0.04;
-      const lfoG = ctx.createGain();
-      lfoG.gain.value = 350;
-      lfo.connect(lfoG).connect(filter.frequency);
-      osc.connect(filter).connect(padGain).connect(this.notesGain);
-      osc.start(t0);
-      osc.stop(t0 + dur + 0.1);
-      lfo.start(t0);
-      lfo.stop(t0 + dur + 0.1);
-      this.nodes.push(osc, filter, padGain, lfo, lfoG);
-    }
-    // --- Arpeggio layer ---
-    const arpMaster = ctx.createGain();
-    arpMaster.gain.value = 0.55;
-    arpMaster.connect(this.notesGain);
-    this.nodes.push(arpMaster);
-    const noteCount = Math.ceil(dur / p.arpRate);
-    for (let i = 0; i < noteCount; i++) {
-      const t = t0 + i * p.arpRate;
-      if (t >= t0 + dur - 0.3) break;
-      const freq = p.arp[i % p.arp.length];
-      const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      const env = ctx.createGain();
-      env.gain.setValueAtTime(0, t);
-      env.gain.linearRampToValueAtTime(0.18, t + 0.02);
-      env.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
-      osc.connect(env).connect(arpMaster);
-      osc.start(t);
-      osc.stop(t + 0.8);
-      this.nodes.push(osc, env);
+
+    const numChords = Math.ceil(dur / p.chordSec) + 1;
+    for (let i = 0; i < numChords; i++) {
+      const ct = t0 + i * p.chordSec;
+      if (ct >= t0 + dur) break;
+      const chord = p.progression[i % p.progression.length];
+      const chordEnd = Math.min(t0 + dur, ct + p.chordSec + 0.4);
+      const chordHold = chordEnd - ct;
+      // Bass = lowest chord tone
+      this.schedulePad(ct, chord[0], chordHold, 0.10, 0);
+      // Pad = mid voicing, two notes, panned slightly
+      if (chord.length >= 3) {
+        this.schedulePad(ct, chord[1], chordHold, 0.045, -0.25);
+        this.schedulePad(ct, chord[2], chordHold, 0.045, +0.25);
+      }
+      // Melody = detuned-piano arpeggio over chord upper voices.
+      // Pattern: 1 - 5 - 3 - 5 - 1↑ - 5 - 3 - 5 (Canon-ish)
+      const upper = chord.slice(2); // skip bass + tenor
+      if (upper.length === 0) continue;
+      const pattern = [0, 2, 1, 2, 0, 2, 1, 2];
+      let nt = ct + 0.05;
+      let k = 0;
+      while (nt < chordEnd - 0.1) {
+        const idx = pattern[k % pattern.length] % upper.length;
+        const noteFreq = upper[idx];
+        const noteDur = Math.min(p.melodyRate * 1.6, chordEnd - nt);
+        const pan = ((k % 4) / 3.5 - 0.43) * 0.5;
+        this.schedulePiano(nt, noteFreq, noteDur, 0.22, pan);
+        nt += p.melodyRate;
+        k++;
+      }
     }
   }
+
   stop() {
+    // Ramp the master to silence over 50ms so disconnect() doesn't click.
+    try {
+      const t0 = this.ctx.currentTime;
+      this.notesGain.gain.cancelScheduledValues(t0);
+      this.notesGain.gain.setValueAtTime(this.notesGain.gain.value, t0);
+      this.notesGain.gain.linearRampToValueAtTime(0, t0 + 0.05);
+    } catch (_) {}
     for (const n of this.nodes) {
       try { if (n.stop) n.stop(); } catch (_) {}
       try { n.disconnect(); } catch (_) {}
@@ -2664,7 +2781,7 @@ function bindSettings() {
     // proceeds silently.
     dom.catalogHint.textContent = '推奨曲は現在準備中。選んでもBGMなしで書き出されます (手持ちBGMはアップロードを使ってください)。';
   } else {
-    dom.catalogHint.textContent = `${catalog.length}曲のなかから、長さ・ムードに合うものを自動で選びます。短めの曲は枚数が少ないとき優先。`;
+    dom.catalogHint.innerHTML = `${catalog.length}曲の中から長さ・ムードに合うものを自動で選びます (Web Audioで生成 — 軽め)。<br>本格的な曲を使いたい場合は <b>「📁 自分のBGMを使う」</b> で mp3/m4a をアップロードしてください。`;
   }
 
   dom.previewBtn.addEventListener('click', onPreview);
