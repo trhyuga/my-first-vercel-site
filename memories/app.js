@@ -1453,9 +1453,11 @@ function getRenderBitmapMaxDim(opts, mode) {
     // at 2400 to keep export RAM bounded too.
     return Math.min(2400, Math.round(canvasLong * 1.4));
   }
-  // Preview — much smaller; the on-screen canvas may be full-size but the
-  // bitmap upscales acceptably and saves significant RAM on iOS Safari.
-  return Math.max(720, Math.min(960, Math.round(canvasLong * 0.6)));
+  // Preview — fixed 720 long side regardless of output resolution. The
+  // on-screen canvas can be larger (the bitmap upscales with imageSmoothing
+  // active) and the RAM saving is significant on iOS Safari, where the
+  // working set was OOM-ing the tab at higher caps.
+  return 720;
 }
 
 async function preloadAssets(plan, opts, mode, onProgress) {
