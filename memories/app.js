@@ -2101,12 +2101,21 @@ class Renderer {
     this.startWallTime = performance.now();
     return new Promise((resolve) => {
       const tick = () => {
-        if (!this.running) { resolve(); return; }
+        if (!this.running) {
+          // External stop — fire onProgress(1) so the export bar doesn't
+          // freeze short of 100% on early termination.
+          if (onProgress) onProgress(1);
+          resolve();
+          return;
+        }
         const elapsed = (performance.now() - this.startWallTime) / 1000;
         if (elapsed >= this.plan.totalSec) {
           this.running = false;
-          // Final black frame
-          clearCanvas(this.ctx, this.canvas.width, this.canvas.height, '#000');
+          // Render the final frame at totalSec − epsilon (the closer card's
+          // last in-window frame) instead of clearing to black, otherwise
+          // MediaRecorder captures a black tail when it picks up the last
+          // canvas update before stop().
+          this.renderFrame(Math.max(0, this.plan.totalSec - 0.001));
           if (onProgress) onProgress(1);
           resolve();
           return;
