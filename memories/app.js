@@ -1182,16 +1182,20 @@ function distinctDays(items) {
 //   3. Density curve from count  (default fallback — fewer photos = linger longer)
 function planPerPhotoSec(itemCount, opts) {
   const clamp = (s) => Math.max(PHOTO_MIN_SEC, Math.min(PHOTO_MAX_SEC, s));
-  if (opts.bgmDurationSec) {
-    const bodyTarget = Math.max(itemCount * PHOTO_MIN_SEC,
-                                opts.bgmDurationSec - TITLE_CARD_SEC - CLOSER_CARD_SEC);
-    const per = clamp(bodyTarget / itemCount);
-    return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
-  }
+  // Seconds mode is an explicit user contract about total length — it
+  // wins over BGM-fit. BGM is trimmed (or fades out early) to land at
+  // the requested totalSec instead of stretching the timeline to the
+  // BGM track's length.
   if (opts.mode === 'seconds') {
     const bodySec = Math.max(PHOTO_MIN_SEC * itemCount,
                              (opts.seconds || 30) - TITLE_CARD_SEC - CLOSER_CARD_SEC);
     const per = clamp(bodySec / itemCount);
+    return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
+  }
+  if (opts.bgmDurationSec) {
+    const bodyTarget = Math.max(itemCount * PHOTO_MIN_SEC,
+                                opts.bgmDurationSec - TITLE_CARD_SEC - CLOSER_CARD_SEC);
+    const per = clamp(bodyTarget / itemCount);
     return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
   }
   // Density curve: 1-6 photos → 4.5s, 7-15 → ~3.5s, 16-30 → 3.0s, 31+ → 2.5s.
@@ -3353,6 +3357,15 @@ function autoPickBgmTrack(targetSec, preferredMood, catalog) {
 // Quick target-length estimate without rebuilding the timeline. Used by the
 // auto-pick to choose a sensibly-sized track before the plan is computed.
 function estimateTargetSec() {
+  // Seconds-mode is an explicit user-provided length — auto-pick should
+  // target THAT, not a density-curve guess, so the chosen track is sized
+  // to the user's video length and BGM doesn't end mid-clip.
+  const modeRadio = document.querySelector('input[name="mode"]:checked');
+  if (modeRadio && modeRadio.value === 'seconds') {
+    const inp = document.getElementById('secondsInput');
+    const s = parseInt(inp && inp.value, 10);
+    if (s && s > 0) return s;
+  }
   if (!state.groups || !state.groups.length) return 30;
   const usable = state.groups
     .map(g => pickBestOfGroup(g, getOutputOrientation()))
