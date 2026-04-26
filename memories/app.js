@@ -1444,14 +1444,16 @@ function mergeStackPairs(timeline, opts) {
 // land in the next sub-steps.
 // =============================================================================
 
-function canvasDimsFor(orientation, resolutionShortSide, mode) {
+function canvasDimsFor(orientation, resolutionShortSide, mode, opts, itemCount) {
   if (mode === 'preview') {
-    // Internal canvas is small (long side 480) — bitmaps cap below this in
-    // most cases, the on-screen <canvas> CSS-stretches to fit the stage.
-    // Keeps the per-frame rasteriser cheap on iOS Safari.
-    if (orientation === 'square') return [480, 480];
-    if (orientation === 'landscape') return [480, 270];
-    return [270, 480]; // portrait
+    // Match canvas internal size to the bitmap budget so drawImage runs
+    // 1:1 (no upscale-blur). Falls from 540 → 170 long side as item count
+    // grows; on-screen <canvas> CSS-stretches to fit the stage panel.
+    const longSide = getRenderBitmapMaxDim(opts || {}, 'preview', itemCount || 0);
+    const shortSide = Math.round(longSide * 9 / 16);
+    if (orientation === 'square') return [longSide, longSide];
+    if (orientation === 'landscape') return [longSide, shortSide];
+    return [shortSide, longSide]; // portrait
   }
   const r = parseInt(resolutionShortSide, 10) || 720;
   if (orientation === 'square') return [r, r];
@@ -1535,7 +1537,10 @@ function getRenderBitmapMaxDim(opts, mode, itemCount) {
 }
 
 function previewQualityReduced(opts, itemCount) {
-  return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 540;
+  // Only flag when the cap drops far enough to be visibly chunky. Below
+  // ~360 long side the preview noticeably softens; above that it's still
+  // crisp on a phone screen and the banner just adds noise.
+  return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 360;
 }
 
 async function preloadAssets(plan, opts, mode, onProgress) {
@@ -1953,10 +1958,14 @@ function fitOrWrapTitle(ctx, text, weight, stack, maxW, idealSize, minSize) {
 
 function bestSplit(text) {
   // Prefer splitting at composite separators near the middle. Fall back to
-  // any whitespace, then to a hard mid-string break for unspaced text.
-  const seps = [' · ', ' · ', '・', ' & ', ' – ', ' - ', ' '];
+  // a Japanese-aware boundary (年/月/日, comma, etc.) before slicing
+  // mid-character.
+  const seps = [' · ', '・', ' & ', ' – ', ' - ', ' ', '、', '，', ','];
+  // After a year/month/day suffix is also a clean break.
+  const tailBreaks = ['年', '月', '日'];
   const mid = text.length / 2;
   let bestIdx = -1, bestSep = '', bestDist = Infinity;
+  // Pass 1: real separators (consumed in the split).
   for (const sep of seps) {
     let from = 0;
     while (from < text.length) {
@@ -1967,11 +1976,24 @@ function bestSplit(text) {
       from = i + sep.length;
     }
   }
-  if (bestIdx < 0) {
-    const m = Math.floor(text.length / 2);
-    return [text.slice(0, m).trim(), text.slice(m).trim()];
+  if (bestIdx >= 0) {
+    return [text.slice(0, bestIdx).trim(), text.slice(bestIdx + bestSep.length).trim()];
   }
-  return [text.slice(0, bestIdx).trim(), text.slice(bestIdx + bestSep.length).trim()];
+  // Pass 2: split AFTER a Japanese tail char (年/月/日) — produces e.g.
+  // "東京旅行 2024年" / "8月" instead of mid-character chops.
+  let bestTail = -1, bestTailDist = Infinity;
+  for (let i = 0; i < text.length - 1; i++) {
+    if (tailBreaks.includes(text[i])) {
+      const d = Math.abs((i + 1) - mid);
+      if (d < bestTailDist) { bestTailDist = d; bestTail = i + 1; }
+    }
+  }
+  if (bestTail > 0) {
+    return [text.slice(0, bestTail).trim(), text.slice(bestTail).trim()];
+  }
+  // Last resort — hard mid-character break.
+  const m = Math.floor(text.length / 2);
+  return [text.slice(0, m).trim(), text.slice(m).trim()];
 }
 
 function drawTitleCard(ctx, w, h, clip, localT) {
@@ -2146,7 +2168,10 @@ class Renderer {
   }
 
   setupCanvas() {
-    const [w, h] = canvasDimsFor(this.opts.orientation, this.opts.resolution, this.mode);
+    const itemCount = this.plan.timeline.filter(c =>
+      c.kind === 'photo' || c.kind === 'video').length;
+    const [w, h] = canvasDimsFor(
+      this.opts.orientation, this.opts.resolution, this.mode, this.opts, itemCount);
     this.canvas.width = w;
     this.canvas.height = h;
     applyStageOrientation(this.opts.orientation);
@@ -2355,6 +2380,9 @@ class Renderer {
         if (a.kind === 'photo' && a.bitmap && typeof a.bitmap.close === 'function') {
           try { a.bitmap.close(); } catch (_) {}
         }
+        // Drop the cached blurred-fill canvas too — it's full-canvas-size
+        // per photo and accumulates across previews if not freed.
+        if (a.blurred) { a.blurred = null; a.blurredKey = null; }
         if (a.kind === 'stack-pair' && a.bitmaps) {
           for (const bm of a.bitmaps) {
             if (bm && typeof bm.close === 'function') {
