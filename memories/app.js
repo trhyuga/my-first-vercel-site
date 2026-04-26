@@ -1300,7 +1300,12 @@ function buildTimeline(orderedItems, allClusters, opts) {
   });
 
   // --- Body clips with day/location chapter overlays ---
-  let lastDay = null, lastClusterId = null;
+  // Suppress the location overlay when the previous photo's cluster
+  // resolved to the SAME LABEL — e.g. a single Disneyland trip can split
+  // into two GPS clusters (entrance + inside) that both name-resolve to
+  // 'ディズニーランド', and the user doesn't want to see the label
+  // appear twice in a row.
+  let lastDay = null, lastLabel = null;
   const days = distinctDays(orderedItems);
   const showDayLabel = days.length > 1; // single-day trip → date is on the title card only
   for (const item of orderedItems) {
@@ -1308,9 +1313,10 @@ function buildTimeline(orderedItems, allClusters, opts) {
     const day = ymdString(item.ts);
     const cid = item.clusterId || null;
     const cluster = allClusters.find(c => c.id === cid);
+    const label = (cluster && cluster.label) ? cluster.label : null;
 
     const dayChanged = day !== lastDay;
-    const locChanged = cid !== lastClusterId && cluster && cluster.label;
+    const locChanged = label && label !== lastLabel;
 
     if (opts.subtitlesOn) {
       if (dayChanged && showDayLabel) {
@@ -1323,7 +1329,7 @@ function buildTimeline(orderedItems, allClusters, opts) {
       if (locChanged) {
         overlays.push({
           kind: 'location',
-          text: '📍 ' + cluster.label,
+          text: '📍 ' + label,
           enterAt: 0.45, holdUntil: perPhotoSec - 0.4, fadeMs: 400,
         });
       }
@@ -1340,7 +1346,10 @@ function buildTimeline(orderedItems, allClusters, opts) {
     });
 
     lastDay = day;
-    if (cluster && cluster.label) lastClusterId = cid;
+    // Only update lastLabel when this clip actually carries a label —
+    // a labelless (no-GPS) clip in between two same-label clips must
+    // not break the streak.
+    if (label) lastLabel = label;
   }
 
   // --- Closer --- title overwritten in buildPlan to mirror the resolved
