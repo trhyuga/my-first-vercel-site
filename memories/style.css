@@ -298,19 +298,6 @@ header.site {
 }
 .stage-overlay.hidden { opacity: 0; }
 
-#quickEdit {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-top: 0.7rem;
-  padding: 0.7rem;
-  background: #f1f5f9;
-  border-radius: 10px;
-}
-#quickEdit .field { gap: 0.25rem; }
-#quickEdit .field label { font-size: 0.74rem; color: #475569; }
-#quickEdit .btn-primary { min-width: 0; }
-
 #output video {
   width: 100%;
   border-radius: 12px;
@@ -340,8 +327,20 @@ header.site {
 
 .footer-note {
   text-align: center;
-  color: #94a3b8;
+  color: #64748b;
   font-size: 0.74rem;
   line-height: 1.6;
   padding: 0.5rem 0.5rem 0;
+}
+
+/* Keyboard focus indicators — kept off `:focus` (mouse clicks) so the ring
+   only appears when navigating via keyboard / accessibility tools. */
+button:focus-visible,
+.back-btn:focus-visible,
+.dropzone:focus-visible,
+.audition-btn:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid #0ea5e9;
+  outline-offset: 2px;
 }

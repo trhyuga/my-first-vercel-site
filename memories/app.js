@@ -1,15 +1,11 @@
 'use strict';
 
 // =============================================================================
-// Memories — photo-to-video generator.
-//
-// Builds up in phases:
-//   Step 1 (current): import → EXIF → HEIC decode → blur filter → thumbnail grid
-//   Step 2: face-api quality scoring (smile + eyes open)
-//   Step 3: dHash similarity grouping → best-of-group selection
-//   Step 4: GPS clustering + timeline build + mode selection
-//   Step 5: renderer (canvas Ken-Burns + blur-fill for aspect mismatch)
-//   Step 6: audio + MediaRecorder export
+// Memories — photo-to-video generator. End-to-end pipeline:
+//   import → EXIF/HEIC decode → blur+dark filter → face-api smile/eye scoring
+//   → dHash dedup + best-of-group → GPS clustering → timeline (Ken-Burns
+//   + blur-fill / smart-crop / video-band layouts) → audio mixer (BGM +
+//   per-clip video gain) → MediaRecorder export (MP4/WebM).
 // =============================================================================
 
 const BLUR_REJECT_THRESHOLD = 60;        // Laplacian variance below this → blurry
@@ -34,9 +30,8 @@ const state = {
   photos: [],   // all decoded inputs (photos + videos), chronological
   groups: [],   // similarity groups [[photo,...], ...] (same chronology)
   loading: false,
-  // The track that the most recent preview / autoPickBgmTrack actually
-  // played; populateSettingsFromPlan reads this to commit '__auto__' →
-  // explicit selection in the settings panel.
+  // Last track auto-pick chose at preview — surfaced in the settings panel
+  // so the user sees "🪄 お任せ" resolved to a specific song.
   lastUsedTrack: null,
 };
 
@@ -1162,7 +1157,7 @@ function fmtLocationSummary(clusters) {
   return `${u.slice(0, 2).join(' / ')} ほか`;
 }
 
-function orderForTimeline(selected, _clusters) {
+function orderForTimeline(selected) {
   // Strict chronological — videos slot in by their actual timestamp.
   //
   // Special case: a video whose ts falls clearly outside the photo time
@@ -1401,7 +1396,7 @@ async function buildPlan(opts) {
     populateTitleSelect();
   }
   const selected = selectByMode(reps, opts.mode, opts);
-  const ordered = orderForTimeline(selected, clusters);
+  const ordered = orderForTimeline(selected);
   const built = buildTimeline(ordered, clusters, opts);
   // Title card — uses the settings-panel title state. resolveTitle() returns
   // the user's __custom__ string when chosen, else the auto-generated one.
@@ -1700,10 +1695,18 @@ async function decodeClipAssets(clip, maxDim, borderMaxDim, mode) {
     v.preload = 'auto';
     v.crossOrigin = 'anonymous';
     v.src = clip.ref.objectUrl;
-    await withTimeout(new Promise((res, rej) => {
-      v.addEventListener('loadedmetadata', res, { once: true });
-      v.addEventListener('error', () => rej(new Error('video load')), { once: true });
-    }), 25000, 'preload ' + clip.ref.sourceName);
+    try {
+      await withTimeout(new Promise((res, rej) => {
+        v.addEventListener('loadedmetadata', res, { once: true });
+        v.addEventListener('error', () => rej(new Error('video load')), { once: true });
+      }), 25000, 'preload ' + clip.ref.sourceName);
+    } catch (e) {
+      // Free the iOS decoder slot — without this the orphaned <video>
+      // keeps downloading + decoding in the background and we run out of
+      // simultaneous video tracks (iOS allows ~16 per tab).
+      try { v.removeAttribute('src'); v.load(); } catch (_) {}
+      throw e;
+    }
     // Pre-seek to the highlight in BOTH modes now. Videos are primed
     // upfront so this is part of the initial preload budget; without it
     // preview / export shows ~10 black frames at clip activation while
@@ -2757,14 +2760,15 @@ class Renderer {
 let activeRenderer = null;
 
 // =============================================================================
-// Step 6 — Audio mixer (BGM + per-video element). Wraps a single AudioContext
-// created from the Preview/Export user gesture (required by iOS Safari).
-// Each video element gets its own MediaElementSource → per-clip GainNode so
-// the BGM can duck during video clips and unduck after.
+// Audio mixer (BGM + per-video element). Wraps a single AudioContext created
+// from the Preview/Export user gesture (required by iOS Safari). Each video
+// element gets its own MediaElementSource → per-clip GainNode; ducking is
+// kept off (VIDEO_DUCK_LEVEL = 1.0) so the BGM plays through video clips
+// and the higher VIDEO_CLIP_GAIN handles the loudness mix instead.
 // =============================================================================
 
-const VIDEO_DUCK_LEVEL = 1.00;     // no ducking — BGM plays at BGM_BASE_GAIN even during video clips
-const BGM_BASE_GAIN    = 0.80;     // BGM resting volume (per user — leaves headroom for video clip audio)
+const VIDEO_DUCK_LEVEL = 1.00;     // ducking disabled; BGM plays at full level over video clips
+const BGM_BASE_GAIN    = 0.80;     // BGM resting volume — leaves headroom for video clip audio
 const VIDEO_CLIP_GAIN  = 2.50;     // ~+8dB; iPhone video audio is normally quieter than music — boost so it cuts through BGM without forcing BGM down
 const DUCK_RAMP_SEC = 0.30;
 const UNDUCK_RAMP_SEC = 0.40;
@@ -3927,7 +3931,10 @@ async function exportVideo(renderer, mixer, totalSec) {
   // emits fragmented MP4 either way, but a single chunk avoids any chance
   // of mid-recording fragments being concatenated with mismatched headers.
   recorder.start();
-  if (mixer) mixer.start();
+  // mixer.start() is async (it awaits ctx.resume() on iOS) — without this
+  // await the BGM AudioBufferSource starts a few ms after the renderer's
+  // first frame, so the very start of the track is clipped.
+  if (mixer) await mixer.start();
   await renderer.play((p) => {
     showRenderProgress(p, `🎬 書き出し中… ${Math.round(p * 100)}% (${(p * totalSec).toFixed(1)} / ${totalSec.toFixed(1)}s)`);
   });
