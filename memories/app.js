@@ -2337,6 +2337,16 @@ class Renderer {
     this.opts = opts;
     this.mixer = mixer;
     this.mode = mode; // 'preview' | 'export' — drives bitmap size budget
+    // Long mobile-target exports drop bitrate to bound MediaRecorder
+    // memory; at those bitrates the per-frame Ken-Burns motion compresses
+    // poorly (visible blocking). Freeze photo motion in that regime so
+    // the bitrate goes to actual detail instead of inter-frame deltas.
+    // Title / closer / chapter overlays still animate (they're text fades).
+    this.staticPhotos = (
+      mode === 'export' &&
+      opts && opts.orientation === 'portrait' &&
+      plan && plan.totalSec > 120
+    );
     this.assets = null;
     this.running = false;
     this.startWallTime = 0;
@@ -2549,7 +2559,12 @@ class Renderer {
       }
       return;
     }
-    const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
+    // staticPhotos freezes per-clip progress at 0 → all draws use their
+    // start zoom / no pan, no per-frame motion. tEased(0) === 0 inside
+    // every drawXxx helper, so this works without changing them.
+    const t = this.staticPhotos
+      ? 0
+      : (clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0);
     const kb = clip.kenburns || makeKenburnsParams(0);
     if (asset.kind === 'stack-pair') {
       drawStackPair(ctx, w, h, asset.bitmaps, t, clip.kenburnsList);
