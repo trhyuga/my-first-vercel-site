@@ -1292,11 +1292,17 @@ function buildTimeline(orderedItems, allClusters, opts) {
   // Subtitle = specific date range; the big title above it is filled in by
   // resolveTitle() in buildPlan (place + 年月 / user override / custom).
   const dateRangeLabel = fmtTitleDateRange(orderedItems.map(p => p.ts));
+  // posterPhotoId — used by drawTitleCard to render the first body photo as
+  // the title-card backdrop so frame 0 of the video isn't a black card. iOS
+  // Photos thumbnails the first frame, so a bright photo+title here gives
+  // saved videos a real-looking poster instead of a black square.
+  const posterRef = orderedItems.find(p => p.kind !== 'video') || orderedItems[0] || null;
   timeline.push({
     kind: 'title',
     durationSec: TITLE_CARD_SEC,
     title: 'Memories', // overwritten in buildPlan via resolveTitle()
     subtitle: locLabel ? `${locLabel} · ${dateRangeLabel}` : dateRangeLabel,
+    posterPhotoId: posterRef ? posterRef.id : null,
   });
 
   // --- Body clips with day/location chapter overlays ---
@@ -2189,8 +2195,30 @@ function bestSplit(text) {
   return [text.slice(0, m).trim(), text.slice(m).trim()];
 }
 
-function drawTitleCard(ctx, w, h, clip, localT) {
-  drawCardBackground(ctx, w, h);
+function drawTitleCard(ctx, w, h, clip, localT, posterAsset = null) {
+  // Backdrop: prefer the first body photo (posterAsset). When that's
+  // unavailable (asset still pending, decode failed, etc.) fall back to
+  // the dark gradient so we never render a bare-canvas glitch.
+  let usedPhoto = false;
+  if (posterAsset && posterAsset.kind === 'photo' && posterAsset.bitmap) {
+    drawCoverKenburns(
+      ctx, w, h,
+      posterAsset.bitmap, posterAsset.bitmap.width, posterAsset.bitmap.height,
+      0, makeKenburnsParams(0)
+    );
+    // Darkening scrim so white title text stays legible over any photo.
+    ctx.save();
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0,   'rgba(15,23,42,0.30)');
+    grad.addColorStop(0.5, 'rgba(15,23,42,0.55)');
+    grad.addColorStop(1,   'rgba(15,23,42,0.30)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+    usedPhoto = true;
+  } else {
+    drawCardBackground(ctx, w, h);
+  }
   // Internal fade in/out — multiplied with whatever globalAlpha the renderer
   // already set for crossfade.
   const fadeIn = 0.5, fadeOut = 1.0;
@@ -2204,8 +2232,10 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   ctx.globalAlpha *= Math.max(0, Math.min(1, alpha));
   ctx.textAlign = 'center';
   ctx.fillStyle = '#fff';
-  ctx.shadowColor = 'rgba(255,255,255,0.18)';
-  ctx.shadowBlur = Math.round(h * 0.012);
+  // Photo backdrop wants a darker drop shadow (vs the white-glow used on
+  // the dark gradient backdrop) so text edges stay crisp on bright skies.
+  ctx.shadowColor = usedPhoto ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.18)';
+  ctx.shadowBlur = Math.round(h * (usedPhoto ? 0.020 : 0.012));
   // Auto-fit title — shrink, then fall through to 2-line wrap for very long
   // titles. maxW reserves ~7% margin on each side so the text doesn't kiss
   // the canvas edge.
@@ -2224,16 +2254,21 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   }
   ctx.shadowColor = 'transparent';
   ctx.shadowBlur = 0;
-  // Hairline accent under the title
+  // Hairline accent under the title — slightly brighter on a photo backdrop
+  // so it doesn't disappear into a busy area of the image.
   const accentW = Math.round(h * 0.05);
-  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillStyle = usedPhoto ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.55)';
   ctx.fillRect(w / 2 - accentW / 2, h * 0.50 + h * 0.002, accentW, Math.max(1, Math.round(h * 0.0015)));
   if (clip.subtitle) {
     const subIdeal = Math.max(14, Math.round(h * 0.024));
     const subMin   = Math.max(12, Math.round(h * 0.018));
     const subFit = fitOrWrapTitle(ctx, clip.subtitle, '400', fontStack(), w * 0.86, subIdeal, subMin);
     ctx.font = `400 ${subFit.size}px ${fontStack()}`;
-    ctx.fillStyle = '#cbd5e1';
+    ctx.fillStyle = usedPhoto ? '#f1f5f9' : '#cbd5e1';
+    if (usedPhoto) {
+      ctx.shadowColor = 'rgba(0,0,0,0.65)';
+      ctx.shadowBlur = Math.round(h * 0.014);
+    }
     ctx.textBaseline = 'top';
     const lineH = subFit.size * 1.20;
     const top = h * 0.50 + h * 0.018;
@@ -2560,7 +2595,12 @@ class Renderer {
     const ctx = this.ctx;
     const w = this.canvas.width, h = this.canvas.height;
     if (clip.kind === 'title') {
-      drawTitleCard(ctx, w, h, clip, localT);
+      // Pass through the first body photo's asset so drawTitleCard can use
+      // it as the backdrop — frame 0 of the recorded video is then a real
+      // photo with the title over it (iOS Photos auto-thumbnails frame 0).
+      const posterAsset = clip.posterPhotoId && this.assets
+        ? this.assets.get(clip.posterPhotoId) : null;
+      drawTitleCard(ctx, w, h, clip, localT, posterAsset);
       return;
     }
     if (clip.kind === 'closer') {
@@ -3020,11 +3060,16 @@ class AudioMixer {
     gain.connect(this.dest);
     if (!this.silentSpeakers) gain.connect(this.ctx.destination);
     this.bgmGain = gain;
-    // Fade against the SHORTER of the timeline length and the BGM track's
-    // actual duration. BufferSource doesn't loop and fading after the
-    // buffer has ended is silent — schedule the ramp before the audio
-    // actually stops so the user hears a fade-out instead of an abrupt cut.
-    const playableSec = Math.min(totalSec, audioBuf.duration);
+    // Loop the BufferSource when the track is shorter than the timeline so
+    // the BGM doesn't cut out before the closer card. We give the track a
+    // 0.5s tolerance — anything within that of totalSec is "long enough"
+    // and plays once for a clean musical ending.
+    this.bgmLoop = audioBuf.duration < (totalSec - 0.5);
+    this.bgmTotalSec = totalSec;
+    // Fade-out fires shortly before the timeline ends. With looping we can
+    // safely target totalSec; without looping we cap at the buffer's own
+    // duration so we're not ramping silence.
+    const playableSec = this.bgmLoop ? totalSec : Math.min(totalSec, audioBuf.duration);
     this.bgmFadeOutAtSec = Math.max(0, playableSec - fadeOutSec);
   }
 
@@ -3055,8 +3100,15 @@ class AudioMixer {
     if (this.bgmBuffer && this.bgmGain) {
       const src = this.ctx.createBufferSource();
       src.buffer = this.bgmBuffer;
+      if (this.bgmLoop) src.loop = true;
       src.connect(this.bgmGain);
       src.start(0);
+      // Hard-stop a hair past the timeline so a looping source doesn't
+      // keep producing audio after the recorder finalizes. Non-looping
+      // sources end on their own when the buffer runs out.
+      if (this.bgmLoop && this.bgmTotalSec) {
+        try { src.stop(this.ctx.currentTime + this.bgmTotalSec + 0.5); } catch (_) {}
+      }
       this.bgmSource = src;
     }
     if (this.bgmGain && this.bgmFadeOutAtSec != null) {
@@ -3420,18 +3472,27 @@ function autoPickBgmTrack(targetSec, preferredMood, catalog) {
     if (!t.durationSec) continue;
     const tempo = bgmTempoFromTags(t.tags);
     let score = 0;
-    // Length fit
+    // Length fit. A track longer than the timeline always beats a shorter
+    // one — short tracks are still allowed (they loop in AudioMixer.start)
+    // but only as a last resort, since the loop seam is audible.
     const overhead = t.durationSec - targetSec;
-    if (overhead < -15) score -= 12;            // way too short, would loop
-    else if (overhead < -5) score -= 6;         // somewhat short, awkward
-    else if (overhead <= 0) score += 2;         // slightly short — fades nicely
-    else if (overhead <= 30) score += 4;        // ideal
-    else score -= overhead * 0.05;              // too long
+    if (overhead < 0) {
+      // Penalty grows with shortfall but is bounded so a short-only catalog
+      // still selects something.
+      score -= 8 + Math.min(20, -overhead * 0.25);
+    } else if (overhead <= 30) {
+      score += 5;                               // ideal — slightly longer than video
+    } else if (overhead <= 90) {
+      score += 3;                               // a bit too long but still good
+    } else {
+      score += 1 - overhead * 0.02;             // very long — minor penalty
+    }
     // End cue near target → clean musical ending
     if (t.endCueSec && Math.abs(t.endCueSec - targetSec) < 4) score += 3;
     // Mood preference
     if (preferredMood && preferredMood !== 'auto' && tempo === preferredMood) score += 1.5;
-    // For low-photo-count target (< 35s) prefer short tracks
+    // For low-photo-count target (< 35s) prefer short tracks (≤90s) so the
+    // music doesn't sound like a snippet of a longer piece.
     if (targetSec < 35 && t.durationSec < 90) score += 1.5;
     if (score > bestScore) { bestScore = score; best = t; }
   }
