@@ -300,8 +300,20 @@ function hammingDistance(a, b) {
 // -----------------------------------------------------------------------------
 // face-api.js — laze-loads weights from jsDelivr GitHub mirror.
 // Score per photo is the *best* face's combined smile + eyes-open quality.
+// Models are released back to GC after ingest finishes (releaseFaceApi)
+// so they don't keep ~3MB of TF tensors resident through preview/export.
 // -----------------------------------------------------------------------------
 let faceApiPromise = null;
+function releaseFaceApi() {
+  if (typeof faceapi === 'undefined') return;
+  for (const net of ['tinyFaceDetector', 'faceLandmark68Net', 'faceExpressionNet']) {
+    try {
+      const n = faceapi.nets && faceapi.nets[net];
+      if (n && typeof n.dispose === 'function' && n.params) n.dispose();
+    } catch (_) {}
+  }
+  faceApiPromise = null;
+}
 async function ensureFaceApi() {
   if (faceApiPromise) return faceApiPromise;
   if (typeof faceapi === 'undefined') {
@@ -411,11 +423,6 @@ function exifGps(exif) {
 
 // -----------------------------------------------------------------------------
 // Thumbnail data URL (small — for UI grid only)
-// -----------------------------------------------------------------------------
-function thumbDataUrl(img, maxSide = 220) {
-  const c = downscaleToCanvas(img, maxSide);
-  return c.toDataURL('image/jpeg', 0.8);
-}
 
 // -----------------------------------------------------------------------------
 // Video helpers
@@ -571,7 +578,6 @@ async function processImage(file) {
   const { ts, source: tsSource } = exifTimestamp(exif, file);
   const gps = exifGps(exif);
 
-  const thumb = thumbDataUrl(img, 220);
   const analysisCanvas = downscaleToCanvas(img, 256);
   const blurScore = laplacianVariance(analysisCanvas);
   const { mean: lumaMean, variance: lumaVar } = frameLumaStats(analysisCanvas);
@@ -601,7 +607,6 @@ async function processImage(file) {
     kind: 'photo',
     decodedBlob: decoded,
     objectUrl: bad ? null : url,
-    thumbUrl: thumb,
     width: w,
     height: h,
     orientation,
@@ -637,13 +642,12 @@ async function processVideo(file) {
   // file can stall ingest by several seconds. Pre-fill values so the rejection
   // checks pass naturally; long clips are usually intentional event recordings.
   // For zero-content / corrupt videos, also skip.
-  let blurScore = 100, lumaMean = 128, lumaVar = 1000, thumb = '';
+  let blurScore = 100, lumaMean = 128, lumaVar = 1000;
   let analysisSkipped = false;
   if (hasVideoStream && dur > 0.2 && dur < VIDEO_LONG_THRESHOLD_SEC) {
     try {
       const frameAt = Math.max(0, Math.min(dur - 0.1, highlightStartSec + 0.4));
       const img = await extractVideoFrameAt(url, frameAt, dur);
-      thumb = thumbDataUrl(img, 220);
       const analysisCanvas = downscaleToCanvas(img, 256);
       blurScore = laplacianVariance(analysisCanvas);
       const stats = frameLumaStats(analysisCanvas);
@@ -683,7 +687,6 @@ async function processVideo(file) {
     kind: 'video',
     decodedBlob: file,
     objectUrl: bad ? null : url,
-    thumbUrl: thumb,
     width: w,
     height: h,
     orientation,
@@ -1586,88 +1589,121 @@ function previewQualityReduced(opts, itemCount) {
   return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 360;
 }
 
+// Decode one clip's render assets (photo bitmap / stack-pair bitmaps / video
+// element + optional border bitmaps). Used both by the upfront prime and by
+// the renderer's lazy sliding-window decode.
+async function decodeClipAssets(clip, maxDim, borderMaxDim, mode) {
+  if (clip.kind === 'photo' && clip.layout === 'stack-pair') {
+    const refs = clip.refs || [clip.ref];
+    const bms = [];
+    for (const r of refs) {
+      bms.push(await withTimeout(decodeBitmapForRender(r, maxDim), 12000, r.sourceName));
+    }
+    return { kind: 'stack-pair', bitmaps: bms };
+  }
+  if (clip.kind === 'photo') {
+    const bm = await withTimeout(decodeBitmapForRender(clip.ref, maxDim), 12000, clip.ref.sourceName);
+    return { kind: 'photo', bitmap: bm };
+  }
+  if (clip.kind === 'video') {
+    const v = document.createElement('video');
+    v.src = clip.ref.objectUrl;
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    v.crossOrigin = 'anonymous';
+    await withTimeout(new Promise((res, rej) => {
+      v.addEventListener('loadedmetadata', res, { once: true });
+      v.addEventListener('error', () => rej(new Error('video load')), { once: true });
+    }), 25000, 'preload ' + clip.ref.sourceName);
+    if (mode !== 'preview') {
+      try {
+        await withTimeout(new Promise((res) => {
+          v.addEventListener('seeked', res, { once: true });
+          v.currentTime = clip.ref.highlightStartSec || 0;
+        }), 8000, 'preseek ' + clip.ref.sourceName);
+      } catch (_) { /* non-fatal */ }
+    }
+    let borderBitmaps = null;
+    if (clip.layout === 'video-band' && clip.borderRefs && clip.borderRefs.length >= 2) {
+      try {
+        const list = [];
+        for (const r of clip.borderRefs.slice(0, 2)) {
+          list.push(await withTimeout(decodeBitmapForRender(r, borderMaxDim), 8000, r.sourceName));
+        }
+        borderBitmaps = list;
+      } catch (_) { borderBitmaps = null; }
+    }
+    return {
+      kind: 'video', element: v, playing: false,
+      startSec: clip.ref.highlightStartSec || 0,
+      borderBitmaps,
+    };
+  }
+  return null;
+}
+
+// Free everything a decoded asset holds — bitmaps, blurred-fill cache,
+// video element + decoder slot. Mirrors what dispose() does per asset but
+// usable mid-playback to clear the sliding window's tail.
+function freeDecodedAsset(asset) {
+  if (!asset) return;
+  if (asset.kind === 'photo' && asset.bitmap && typeof asset.bitmap.close === 'function') {
+    try { asset.bitmap.close(); } catch (_) {}
+  }
+  if (asset.blurred) { asset.blurred = null; asset.blurredKey = null; }
+  if (asset.kind === 'stack-pair' && asset.bitmaps) {
+    for (const bm of asset.bitmaps) {
+      if (bm && typeof bm.close === 'function') { try { bm.close(); } catch (_) {} }
+    }
+  }
+  if (asset.kind === 'video') {
+    if (asset.element) {
+      try { asset.element.pause(); } catch (_) {}
+      try { asset.element.removeAttribute('src'); asset.element.load(); } catch (_) {}
+    }
+    if (asset.borderBitmaps) {
+      for (const bm of asset.borderBitmaps) {
+        if (bm && typeof bm.close === 'function') { try { bm.close(); } catch (_) {} }
+      }
+    }
+  }
+}
+
+// preloadAssets: in PREVIEW mode, prime only the first PRIME_N clips and
+// mark the rest as 'pending' — the renderer's sliding window decodes them
+// just-in-time and frees them after they leave the active range, so peak
+// RAM stays bounded regardless of upload size. Export mode still primes
+// everything (we need a smooth, gap-free recording).
+const PREVIEW_PRIME_N = 4;
 async function preloadAssets(plan, opts, mode, onProgress) {
   const itemCount = plan.timeline.filter(c => c.kind === 'photo' || c.kind === 'video').length;
   const maxDim = getRenderBitmapMaxDim(opts, mode, itemCount);
-  // Border bitmaps in video-band slots are smaller on screen — smaller cap.
   const borderMaxDim = Math.max(480, Math.round(maxDim * 0.7));
   const assets = new Map();
-  let i = 0;
-  for (const clip of plan.timeline) {
-    i++;
-    if (clip.kind === 'photo' && clip.layout === 'stack-pair') {
+  const primeMax = (mode === 'preview') ? PREVIEW_PRIME_N : Infinity;
+  let primed = 0;
+  for (let i = 0; i < plan.timeline.length; i++) {
+    const clip = plan.timeline[i];
+    if (clip.kind !== 'photo' && clip.kind !== 'video') continue;
+    if (primed < primeMax) {
       try {
-        const refs = clip.refs || [clip.ref];
-        // Sequential decode (not Promise.all) so peak memory stays bounded
-        // — two big bitmaps in flight at once was tipping iOS over.
-        const bms = [];
-        for (const r of refs) {
-          bms.push(await withTimeout(decodeBitmapForRender(r, maxDim), 12000, r.sourceName));
-        }
-        assets.set(clip.photoId, { kind: 'stack-pair', bitmaps: bms });
+        const decoded = await decodeClipAssets(clip, maxDim, borderMaxDim, mode);
+        if (decoded) assets.set(clip.photoId, decoded);
       } catch (e) {
-        console.warn('stack-pair preload failed', e);
-        assets.set(clip.photoId, { kind: 'photo-failed' });
+        console.warn('preload failed', e);
+        assets.set(clip.photoId, { kind: clip.kind === 'video' ? 'video-failed' : 'photo-failed' });
       }
-    } else if (clip.kind === 'photo') {
-      try {
-        const bm = await withTimeout(decodeBitmapForRender(clip.ref, maxDim), 12000, clip.ref.sourceName);
-        assets.set(clip.photoId, { kind: 'photo', bitmap: bm });
-      } catch (e) {
-        console.warn('preload failed', clip.ref.sourceName, e);
-        assets.set(clip.photoId, { kind: 'photo-failed' });
-      }
-    } else if (clip.kind === 'video') {
-      try {
-        const v = document.createElement('video');
-        v.src = clip.ref.objectUrl;
-        v.muted = true;             // step 6 will route audio through Web Audio
-        v.playsInline = true;
-        v.preload = 'auto';
-        v.crossOrigin = 'anonymous';
-        // Generous timeouts on the FIRST preview after a heavy upload —
-        // iOS Safari sometimes serialises video decoder warm-ups so the
-        // first &lt;video&gt; takes a noticeable while to fire loadedmetadata
-        // even on a fast device.
-        await withTimeout(new Promise((res, rej) => {
-          v.addEventListener('loadedmetadata', res, { once: true });
-          v.addEventListener('error', () => rej(new Error('video load')), { once: true });
-        }), 25000, 'preload ' + clip.ref.sourceName);
-        // Skip the pre-seek warm-up entirely in preview mode — the &lt;video&gt;
-        // will seek + paint when its clip activates. A few frames of
-        // black at clip start is preferable to blocking the whole preload
-        // pipeline behind 5+ video seeks.
-        if (mode !== 'preview') {
-          try {
-            await withTimeout(new Promise((res) => {
-              v.addEventListener('seeked', res, { once: true });
-              v.currentTime = clip.ref.highlightStartSec || 0;
-            }), 8000, 'preseek ' + clip.ref.sourceName);
-          } catch (_) { /* non-fatal */ }
-        }
-        // For video-band, also decode the two border photos.
-        let borderBitmaps = null;
-        if (clip.layout === 'video-band' && clip.borderRefs && clip.borderRefs.length >= 2) {
-          try {
-            const list = [];
-            for (const r of clip.borderRefs.slice(0, 2)) {
-              list.push(await withTimeout(decodeBitmapForRender(r, borderMaxDim), 8000, r.sourceName));
-            }
-            borderBitmaps = list;
-          } catch (_) { borderBitmaps = null; }
-        }
-        assets.set(clip.photoId, {
-          kind: 'video', element: v, playing: false,
-          startSec: clip.ref.highlightStartSec || 0,
-          borderBitmaps,
-        });
-      } catch (e) {
-        console.warn('video preload failed', clip.ref.sourceName, e);
-        assets.set(clip.photoId, { kind: 'video-failed' });
-      }
+      primed++;
+    } else {
+      // Sliding-window placeholder. Renderer decodes on demand.
+      assets.set(clip.photoId, { kind: 'pending', clipKind: clip.kind });
     }
-    if (onProgress) onProgress(i / plan.timeline.length);
+    if (onProgress) onProgress((i + 1) / plan.timeline.length);
   }
+  // Stash the budget on the assets map so the Renderer can decode upcoming
+  // clips with the same caps without re-reading opts.
+  assets.__renderBudget = { maxDim, borderMaxDim, mode };
   return assets;
 }
 
@@ -2223,12 +2259,13 @@ class Renderer {
   }
 
   async preload(onProgress) {
-    // Wait for the display-font CSS to finish loading so the title card
-    // doesn't briefly render in a fallback font.
     if (document.fonts && document.fonts.ready) {
       try { await withTimeout(document.fonts.ready, 4000, 'fonts'); } catch (_) {}
     }
     this.assets = await preloadAssets(this.plan, this.opts, this.mode, onProgress);
+    // Attach mixer to whatever videos are already decoded (mostly none in
+    // preview mode after the prime). Lazy-decoded videos get attached
+    // inside ensureWindow when they finish decoding.
     if (this.mixer) {
       for (const clip of this.plan.timeline) {
         if (clip.kind !== 'video') continue;
@@ -2237,6 +2274,55 @@ class Renderer {
           this.mixer.attachVideo(clip.photoId, a.element);
         }
       }
+    }
+  }
+
+  // Sliding-window decode: ensures clips at indexes [activeMin-LB,
+  // activeMax+LA] are decoded, and frees clips outside that range so
+  // peak RAM stays bounded. Called once per renderFrame in preview mode.
+  ensureWindow(activeIdxs) {
+    if (this.mode !== 'preview' || !this.assets) return;
+    if (!activeIdxs.length) return;
+    const LOOK_AHEAD = 3, LOOK_BEHIND = 1, FREE_AFTER = 2;
+    const minA = Math.min(...activeIdxs);
+    const maxA = Math.max(...activeIdxs);
+    const keepFrom = Math.max(0, minA - LOOK_BEHIND);
+    const keepTo   = Math.min(this.plan.timeline.length - 1, maxA + LOOK_AHEAD);
+    const budget = this.assets.__renderBudget || { maxDim: 480, borderMaxDim: 360, mode: 'preview' };
+    // Decode pending clips inside the window.
+    for (let i = keepFrom; i <= keepTo; i++) {
+      const clip = this.plan.timeline[i];
+      if (!clip || (clip.kind !== 'photo' && clip.kind !== 'video')) continue;
+      const a = this.assets.get(clip.photoId);
+      if (!a || a.kind !== 'pending') continue;
+      // Mark as decoding so we don't double-fire.
+      this.assets.set(clip.photoId, { kind: 'decoding', clipKind: clip.kind });
+      decodeClipAssets(clip, budget.maxDim, budget.borderMaxDim, budget.mode)
+        .then((decoded) => {
+          if (!this.assets || !decoded) return;
+          this.assets.set(clip.photoId, decoded);
+          if (decoded.kind === 'video' && decoded.element && this.mixer) {
+            this.mixer.attachVideo(clip.photoId, decoded.element);
+          }
+        })
+        .catch((e) => {
+          console.warn('lazy decode failed', e);
+          if (this.assets) {
+            this.assets.set(clip.photoId, { kind: clip.kind === 'video' ? 'video-failed' : 'photo-failed' });
+          }
+        });
+    }
+    // Free clips outside the keep window. Replace with 'pending' so the
+    // user can scrub backwards / replay and have them re-decoded.
+    for (let i = 0; i < this.plan.timeline.length; i++) {
+      if (i >= keepFrom - FREE_AFTER && i <= keepTo + FREE_AFTER) continue;
+      const clip = this.plan.timeline[i];
+      if (!clip || (clip.kind !== 'photo' && clip.kind !== 'video')) continue;
+      const a = this.assets.get(clip.photoId);
+      if (!a || a.kind === 'pending' || a.kind === 'decoding') continue;
+      if (a.kind === 'photo-failed' || a.kind === 'video-failed') continue;
+      freeDecodedAsset(a);
+      this.assets.set(clip.photoId, { kind: 'pending', clipKind: clip.kind });
     }
   }
 
@@ -2250,6 +2336,14 @@ class Renderer {
     // alpha = 0 doesn't matter — being in the window means the video should
     // be playing so audio aligns with the eventual visible frame).
     const activeIds = new Set(active.map(({ clip }) => clip.photoId));
+
+    // Slide the decode/free window in preview mode based on which clip
+    // indexes are active. No-op in export mode (everything pre-decoded).
+    if (this.mode === 'preview') {
+      const tl = this.plan.timeline;
+      const activeIdxs = active.map(({ clip }) => tl.indexOf(clip)).filter(i => i >= 0);
+      this.ensureWindow(activeIdxs);
+    }
 
     // Lifecycle: pause videos that just left the active set + tell the
     // mixer to fade their audio back out (which also unducks the BGM).
@@ -2338,6 +2432,18 @@ class Renderer {
     }
     const asset = this.assets.get(clip.photoId);
     if (!asset) return;
+    // Sliding-window placeholder while a clip is still decoding. Show a
+    // tinted frame instead of a hard blank so the user sees we're working.
+    if (asset.kind === 'pending' || asset.kind === 'decoding') {
+      drawCardBackground(ctx, w, h);
+      ctx.save();
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = `400 ${Math.round(h * 0.025)}px ${fontStack()}`;
+      ctx.textAlign = 'center';
+      ctx.fillText('⏳ 読込中…', w / 2, h / 2);
+      ctx.restore();
+      return;
+    }
     const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
     const kb = clip.kenburns || makeKenburnsParams(0);
     if (asset.kind === 'stack-pair') {
@@ -2977,6 +3083,10 @@ async function ingestFiles(files) {
     state.groups = groupSimilarPhotos(state.photos);
     hideLoadProgress();
     renderReview();
+    // Done with face scoring — release the ~3MB of TF model tensors so
+    // they don't sit in RAM through preview/export. ensureFaceApi() will
+    // re-fetch them on demand if the user re-ingests.
+    releaseFaceApi();
   } finally {
     state.loading = false;
     setSettingsBusy(false);
