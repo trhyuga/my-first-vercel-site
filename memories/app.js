@@ -2167,8 +2167,23 @@ class Renderer {
       if (clip.kind !== 'video') continue;
       const asset = this.assets.get(clip.photoId);
       if (!asset || asset.kind !== 'video' || asset.playing) continue;
-      asset.element.play().catch(() => {});
+      // Seek to the chosen highlight BEFORE play(); preview mode skips
+      // the pre-seek warm-up to keep first-load fast, so this is where
+      // the actual seek happens. The first few frames may show t=0
+      // while the seek completes — acceptable trade for a preview that
+      // actually loads.
+      try {
+        const startSec = clip.ref.highlightStartSec || 0;
+        if (Math.abs((asset.element.currentTime || 0) - startSec) > 0.05) {
+          asset.element.currentTime = startSec;
+        }
+      } catch (_) {}
       asset.playing = true;
+      asset.element.play().catch((e) => {
+        console.warn('video play rejected', e);
+        // Allow a retry on the next render tick rather than freezing.
+        asset.playing = false;
+      });
       if (this.mixer) this.mixer.activateVideo(clip.photoId);
     }
 
@@ -2640,7 +2655,12 @@ class AudioMixer {
     gain.connect(this.dest);
     gain.connect(this.ctx.destination);
     this.bgmGain = gain;
-    this.bgmFadeOutAtSec = Math.max(0, totalSec - fadeOutSec);
+    // Fade against the SHORTER of the timeline length and the BGM track's
+    // actual duration. BufferSource doesn't loop and fading after the
+    // buffer has ended is silent — schedule the ramp before the audio
+    // actually stops so the user hears a fade-out instead of an abrupt cut.
+    const playableSec = Math.min(totalSec, audioBuf.duration);
+    this.bgmFadeOutAtSec = Math.max(0, playableSec - fadeOutSec);
   }
 
   // Connect a video element's audio through a per-clip gain. Video stays
@@ -2770,6 +2790,18 @@ function releaseStatePhotoUrls() {
 
 async function ingestFiles(files) {
   if (state.loading) return;
+  // FRESH ingest replaces the previous batch — release any object URLs
+  // we held, dispose any active renderer (so its bitmaps + video elements
+  // are freed), and clear photos/groups. Without this every drop
+  // accumulated, leaking the previous batch's RAM and mixing timelines.
+  if (activeRenderer) {
+    try { activeRenderer.dispose(); } catch (_) {}
+    activeRenderer = null;
+  }
+  releaseStatePhotoUrls();
+  state.photos = [];
+  state.groups = [];
+  if (dom.stagePanel) dom.stagePanel.style.display = 'none';
   // New batch invalidates cached cluster naming + title candidates, and
   // resets title/closer dropdowns to __auto__ so the next preview rebuilds
   // them from the freshly-analysed clusters instead of carrying a stale
@@ -3428,6 +3460,7 @@ async function onPreview() {
   unlockHtmlAudioPlayback();
   const audioCtx = preWarmAudioContext();
   dom.previewBtn.disabled = true;
+  dom.exportBtn.disabled = true;
   const orig = dom.previewBtn.textContent;
   dom.previewBtn.textContent = '構成中…';
   let mixerToDispose = null;
@@ -3467,6 +3500,7 @@ async function onPreview() {
     showError('プレビューエラー: ' + (e.message || e));
   } finally {
     dom.previewBtn.disabled = false;
+    dom.exportBtn.disabled = false;
     dom.previewBtn.textContent = orig;
     if (mixerToDispose) mixerToDispose.destroy();
     if (activeRenderer) {
