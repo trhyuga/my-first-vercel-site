@@ -2219,27 +2219,32 @@ function drawTitleCard(ctx, w, h, clip, localT, posterAsset = null) {
   } else {
     drawCardBackground(ctx, w, h);
   }
-  // Title — full opacity from t=0 (so frame 0 / the iOS Photos thumbnail
-  // already shows it), then a 1.2s fade-out at the tail. Subtitle gets a
-  // separate 0.8s fade-in below so it appears AFTER the title is on screen.
+  // Per spec: title is visible from t=0 (no fade-in). Subtitle fades in
+  // (0.8s). Both fade out together at the tail (1.2s).
+  // Alpha is baked DIRECTLY into rgba fillStyle / shadowColor here rather
+  // than going through ctx.globalAlpha. iOS Safari's canvas-captureStream
+  // path was dropping intermediate globalAlpha values, so the
+  // multiplicative approach (`globalAlpha *= ...`) ended up showing as
+  // either fully-on or fully-off in the recorded MP4. Explicit per-pixel
+  // alpha sidesteps that entirely.
   const titleFadeOut = 1.2;
+  const subFadeIn    = 0.8;
   const dur = clip.durationSec;
-  let titleAlpha = 1;
-  if (localT > dur - titleFadeOut) {
-    titleAlpha = Math.max(0, (dur - localT) / titleFadeOut);
-  }
+  const tailFade = (localT > dur - titleFadeOut)
+    ? Math.max(0, (dur - localT) / titleFadeOut)
+    : 1;
+  const subInFade = Math.max(0, Math.min(1, localT / subFadeIn));
+  const titleAlpha = tailFade;                    // full → 0 in last 1.2s
+  const subAlpha   = subInFade * tailFade;        // ramps up then fades out
 
   ctx.save();
-  ctx.globalAlpha *= titleAlpha;
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#fff';
-  // Photo backdrop wants a darker drop shadow (vs the white-glow used on
-  // the dark gradient backdrop) so text edges stay crisp on bright skies.
-  ctx.shadowColor = usedPhoto ? 'rgba(0,0,0,0.65)' : 'rgba(255,255,255,0.18)';
+  // ---- Main title ----
+  ctx.fillStyle = `rgba(255,255,255,${titleAlpha})`;
+  ctx.shadowColor = usedPhoto
+    ? `rgba(0,0,0,${0.65 * titleAlpha})`
+    : `rgba(255,255,255,${0.18 * titleAlpha})`;
   ctx.shadowBlur = Math.round(h * (usedPhoto ? 0.020 : 0.012));
-  // Auto-fit title — shrink, then fall through to 2-line wrap for very long
-  // titles. maxW reserves ~7% margin on each side so the text doesn't kiss
-  // the canvas edge.
   const idealSize = Math.max(16, Math.round(h * 0.062));
   const minSize   = Math.max(14, Math.round(h * 0.038));
   const maxW = w * 0.80;
@@ -2247,44 +2252,38 @@ function drawTitleCard(ctx, w, h, clip, localT, posterAsset = null) {
   ctx.font = `800 ${fit.size}px ${titleFontStack()}`;
   ctx.textBaseline = 'middle';
   const lineH = fit.size * 1.15;
-  // Bottom of the title block sits just above the accent rule (at h*0.50).
   const blockBottom = h * 0.50 - h * 0.005;
   for (let i = 0; i < fit.lines.length; i++) {
     const ly = blockBottom - (fit.lines.length - 1 - i) * lineH - lineH * 0.5;
     ctx.fillText(fit.lines[i], w / 2, ly);
   }
+  // ---- Accent rule (fades with title) ----
   ctx.shadowColor = 'transparent';
   ctx.shadowBlur = 0;
-  // Hairline accent under the title — slightly brighter on a photo backdrop
-  // so it doesn't disappear into a busy area of the image.
   const accentW = Math.round(h * 0.05);
-  ctx.fillStyle = usedPhoto ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.55)';
+  ctx.fillStyle = usedPhoto
+    ? `rgba(255,255,255,${0.85 * titleAlpha})`
+    : `rgba(255,255,255,${0.55 * titleAlpha})`;
   ctx.fillRect(w / 2 - accentW / 2, h * 0.50 + h * 0.002, accentW, Math.max(1, Math.round(h * 0.0015)));
+  // ---- Subtitle (fade-in × fade-out) ----
   if (clip.subtitle) {
-    // Subtitle has its own fade-in (0.8s) layered on top of the shared
-    // titleAlpha tail-fade. Combined: globalAlpha = outer × titleAlpha ×
-    // subFadeInAlpha, so the subtitle eases in over the first 0.8s and
-    // fades out together with the title in the last 1.2s.
-    const subFadeIn = 0.8;
-    const subFadeInAlpha = Math.max(0, Math.min(1, localT / subFadeIn));
-    ctx.save();
-    ctx.globalAlpha *= subFadeInAlpha;
     const subIdeal = Math.max(14, Math.round(h * 0.024));
     const subMin   = Math.max(12, Math.round(h * 0.018));
     const subFit = fitOrWrapTitle(ctx, clip.subtitle, '400', fontStack(), w * 0.86, subIdeal, subMin);
     ctx.font = `400 ${subFit.size}px ${fontStack()}`;
-    ctx.fillStyle = usedPhoto ? '#f1f5f9' : '#cbd5e1';
+    ctx.fillStyle = usedPhoto
+      ? `rgba(241,245,249,${subAlpha})`
+      : `rgba(203,213,225,${subAlpha})`;
     if (usedPhoto) {
-      ctx.shadowColor = 'rgba(0,0,0,0.65)';
+      ctx.shadowColor = `rgba(0,0,0,${0.65 * subAlpha})`;
       ctx.shadowBlur = Math.round(h * 0.014);
     }
     ctx.textBaseline = 'top';
-    const lineH = subFit.size * 1.20;
+    const subLineH = subFit.size * 1.20;
     const top = h * 0.50 + h * 0.018;
     for (let i = 0; i < subFit.lines.length; i++) {
-      ctx.fillText(subFit.lines[i], w / 2, top + i * lineH);
+      ctx.fillText(subFit.lines[i], w / 2, top + i * subLineH);
     }
-    ctx.restore();
   }
   ctx.restore();
 }
