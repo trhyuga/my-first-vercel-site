@@ -118,18 +118,60 @@ function isHeic(file) {
 }
 
 // -----------------------------------------------------------------------------
-// HEIC → JPEG (lazy — heic2any is large)
+// HEIC → JPEG (lazy — heic2any is large). Output is downscaled to bound the
+// total RAM footprint: original 12-MP HEIC decodes to ~5 MB JPEG; on a
+// 90-photo upload that's ~450 MB sitting in memory until the user finishes,
+// which OOMs iOS Safari. 1800-px long side keeps export quality fine for
+// 1080p output (~1.4× = 1512 px) at ~500 KB per photo.
 // -----------------------------------------------------------------------------
+const HEIC_OUT_MAX_DIM = 1800;
+
+async function downsampleJpegBlob(blob, maxDim, quality = 0.88) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = url;
+    await img.decode();
+    const w = img.naturalWidth, h = img.naturalHeight;
+    if (Math.max(w, h) <= maxDim) return blob;
+    const scale = maxDim / Math.max(w, h);
+    const cw = Math.max(1, Math.round(w * scale));
+    const ch = Math.max(1, Math.round(h * scale));
+    const c = document.createElement('canvas');
+    c.width = cw; c.height = ch;
+    const cx = c.getContext('2d');
+    cx.imageSmoothingQuality = 'high';
+    cx.drawImage(img, 0, 0, cw, ch);
+    return await new Promise((res, rej) => {
+      c.toBlob((b) => b ? res(b) : rej(new Error('toBlob failed')), 'image/jpeg', quality);
+    });
+  } finally {
+    try { URL.revokeObjectURL(url); } catch (_) {}
+  }
+}
+
 async function decodableBlob(file) {
   if (!isHeic(file)) return file;
   if (typeof heic2any !== 'function') {
     throw new Error('HEIC変換ライブラリが読み込めませんでした (オフライン?)');
   }
-  const result = await withTimeout(
+  const raw = await withTimeout(
     heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 }),
     20000,
     'HEIC ' + file.name);
-  return Array.isArray(result) ? result[0] : result;
+  const heicJpeg = Array.isArray(raw) ? raw[0] : raw;
+  // Downscale the heic2any output before we hand it back. Downstream code
+  // keeps the returned blob alive (state.photos[i].decodedBlob) until the
+  // user re-ingests, so this is the place to bound the memory cost.
+  try {
+    return await downsampleJpegBlob(heicJpeg, HEIC_OUT_MAX_DIM, 0.88);
+  } catch (e) {
+    // If downsample fails, fall back to the full-size blob (functional but
+    // RAM-hungry). Better to render than to crash here.
+    console.warn('HEIC downsample failed, keeping full size', e);
+    return heicJpeg;
+  }
 }
 
 // -----------------------------------------------------------------------------
