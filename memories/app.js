@@ -2480,21 +2480,24 @@ class Renderer {
       if (clip.kind !== 'video') continue;
       const asset = this.assets.get(clip.photoId);
       if (!asset || asset.kind !== 'video' || asset.playing) continue;
-      // Seek to the chosen highlight BEFORE play(); preview mode skips
-      // the pre-seek warm-up to keep first-load fast, so this is where
-      // the actual seek happens. The first few frames may show t=0
-      // while the seek completes — acceptable trade for a preview that
-      // actually loads.
-      try {
-        const startSec = clip.ref.highlightStartSec || 0;
-        if (Math.abs((asset.element.currentTime || 0) - startSec) > 0.05) {
+      // Seek to the chosen highlight ONLY on the very first activation
+      // of this asset. Subsequent activations (e.g. after a transient
+      // play() rejection that flipped asset.playing back to false) MUST
+      // NOT re-seek — that would rewind the video mid-clip and look
+      // like a loop. Once we've started, just call play() again to
+      // resume from wherever the playhead is.
+      if (!asset.everStarted) {
+        asset.everStarted = true;
+        try {
+          const startSec = clip.ref.highlightStartSec || 0;
           asset.element.currentTime = startSec;
-        }
-      } catch (_) {}
+        } catch (_) {}
+      }
       asset.playing = true;
       asset.element.play().catch((e) => {
         console.warn('video play rejected', e);
-        // Allow a retry on the next render tick rather than freezing.
+        // Allow a retry on the next render tick rather than freezing —
+        // everStarted stays true so no re-seek.
         asset.playing = false;
       });
       if (this.mixer) this.mixer.activateVideo(clip.photoId);
