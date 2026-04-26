@@ -1561,20 +1561,26 @@ async function decodeBitmapForRender(ref, maxDim = 1600) {
   return await createImageBitmap(src);
 }
 
-// Different working-set bitmap budget for preview vs export. Preview is
-// aggressive — iOS Safari has ~250MB usable RAM and the whole timeline's
-// bitmaps live in memory at once.
+// Different working-set bitmap budget for preview vs export. Both modes
+// taper as item count grows so iOS Safari can hold the working set.
 function getRenderBitmapMaxDim(opts, mode, itemCount) {
   const res = parseInt(opts && opts.resolution, 10) || 720;
   const canvasLong = Math.round(res * 16 / 9);
   if (mode === 'export') {
-    return Math.min(2400, Math.round(canvasLong * 1.4));
+    // Export aims for crisp output but a 90-item all-resident pool at 2000+
+    // px each blew past iOS RAM. Taper now that sliding-window keeps the
+    // pool bounded — quality stays high for ≤25 photo videos and gracefully
+    // degrades on extreme uploads.
+    const n = itemCount || 0;
+    if (n <=  25) return Math.min(2400, Math.round(canvasLong * 1.40));
+    if (n <=  50) return Math.min(2000, Math.round(canvasLong * 1.20));
+    if (n <=  90) return Math.min(1600, Math.round(canvasLong * 0.95));
+    if (n <= 150) return Math.min(1200, Math.round(canvasLong * 0.75));
+    return Math.min(960, Math.round(canvasLong * 0.55));
   }
-  // Preview budget. With sliding-window preload + HEIC downsample, only
-  // ~6 bitmaps live in memory at once regardless of item count, so we can
-  // afford bigger per-bitmap dims for low/medium counts. The cap still
-  // tapers at very heavy loads as a safety net (videos / mixer / mp4box
-  // also consume RAM).
+  // Preview budget — sliding-window means peak RAM is O(window size), not
+  // O(item count), so we can afford bigger per-bitmap dims for low/medium
+  // counts. Cap still tapers at very heavy loads for safety.
   const n = itemCount || 0;
   if (n <=  10) return 900;
   if (n <=  25) return 720;
@@ -1670,39 +1676,59 @@ function freeDecodedAsset(asset) {
   }
 }
 
-// preloadAssets: in PREVIEW mode, prime only the first PRIME_N clips and
-// mark the rest as 'pending' — the renderer's sliding window decodes them
-// just-in-time and frees them after they leave the active range, so peak
-// RAM stays bounded regardless of upload size. Export mode still primes
-// everything (we need a smooth, gap-free recording).
-const PREVIEW_PRIME_N = 4;
+// preloadAssets: two-phase.
+//   Phase 1 — ALL videos decoded upfront in BOTH modes. iOS serialises
+//             video decoder warm-ups and re-warming a long video on the
+//             fly during playback / export takes too long, so the video
+//             elements stay resident the whole render. Per-element decoder
+//             slot ≈ 10MB but typical clip count is small (5-10).
+//   Phase 2 — Photos are PRIMED for the first PHOTO_PRIME_N clips, the
+//             rest are 'pending'. Renderer.ensureWindow lazy-decodes
+//             upcoming clips and frees clips behind the window. Same
+//             machinery for preview AND export, just with a wider
+//             look-ahead in export so MediaRecorder never sees a
+//             "loading…" placeholder.
+const PHOTO_PRIME_PREVIEW = 4;
+const PHOTO_PRIME_EXPORT  = 8;
 async function preloadAssets(plan, opts, mode, onProgress) {
   const itemCount = plan.timeline.filter(c => c.kind === 'photo' || c.kind === 'video').length;
   const maxDim = getRenderBitmapMaxDim(opts, mode, itemCount);
   const borderMaxDim = Math.max(480, Math.round(maxDim * 0.7));
   const assets = new Map();
-  const primeMax = (mode === 'preview') ? PREVIEW_PRIME_N : Infinity;
-  let primed = 0;
-  for (let i = 0; i < plan.timeline.length; i++) {
-    const clip = plan.timeline[i];
-    if (clip.kind !== 'photo' && clip.kind !== 'video') continue;
-    if (primed < primeMax) {
+  let progressed = 0;
+  const tick = () => { if (onProgress) onProgress((++progressed) / plan.timeline.length); };
+
+  // Phase 1: decode all videos.
+  for (const clip of plan.timeline) {
+    if (clip.kind !== 'video') continue;
+    try {
+      const decoded = await decodeClipAssets(clip, maxDim, borderMaxDim, mode);
+      if (decoded) assets.set(clip.photoId, decoded);
+    } catch (e) {
+      console.warn('video preload failed', e);
+      assets.set(clip.photoId, { kind: 'video-failed' });
+    }
+    tick();
+  }
+  // Phase 2: prime first N photos; rest pending.
+  const primeMax = (mode === 'export') ? PHOTO_PRIME_EXPORT : PHOTO_PRIME_PREVIEW;
+  let primedPhotos = 0;
+  for (const clip of plan.timeline) {
+    if (clip.kind !== 'photo') continue;
+    if (primedPhotos < primeMax) {
       try {
         const decoded = await decodeClipAssets(clip, maxDim, borderMaxDim, mode);
         if (decoded) assets.set(clip.photoId, decoded);
       } catch (e) {
-        console.warn('preload failed', e);
-        assets.set(clip.photoId, { kind: clip.kind === 'video' ? 'video-failed' : 'photo-failed' });
+        console.warn('photo preload failed', e);
+        assets.set(clip.photoId, { kind: 'photo-failed' });
       }
-      primed++;
+      primedPhotos++;
     } else {
-      // Sliding-window placeholder. Renderer decodes on demand.
-      assets.set(clip.photoId, { kind: 'pending', clipKind: clip.kind });
+      assets.set(clip.photoId, { kind: 'pending', clipKind: 'photo' });
     }
-    if (onProgress) onProgress((i + 1) / plan.timeline.length);
+    tick();
   }
-  // Stash the budget on the assets map so the Renderer can decode upcoming
-  // clips with the same caps without re-reading opts.
   assets.__renderBudget = { maxDim, borderMaxDim, mode };
   return assets;
 }
@@ -2277,52 +2303,49 @@ class Renderer {
     }
   }
 
-  // Sliding-window decode: ensures clips at indexes [activeMin-LB,
-  // activeMax+LA] are decoded, and frees clips outside that range so
-  // peak RAM stays bounded. Called once per renderFrame in preview mode.
+  // Sliding-window decode: ensures pending PHOTO clips inside the window
+  // are decoded and clips outside are freed. Videos are excluded from the
+  // window logic entirely — they're primed once at preload and stay
+  // resident (re-warming on iOS is too slow). Called once per renderFrame.
   ensureWindow(activeIdxs) {
-    if (this.mode !== 'preview' || !this.assets) return;
-    if (!activeIdxs.length) return;
-    const LOOK_AHEAD = 3, LOOK_BEHIND = 1, FREE_AFTER = 2;
+    if (!this.assets || !activeIdxs.length) return;
+    const LOOK_AHEAD = (this.mode === 'export') ? 8 : 3;
+    const LOOK_BEHIND = 1, FREE_AFTER = 2;
     const minA = Math.min(...activeIdxs);
     const maxA = Math.max(...activeIdxs);
     const keepFrom = Math.max(0, minA - LOOK_BEHIND);
     const keepTo   = Math.min(this.plan.timeline.length - 1, maxA + LOOK_AHEAD);
-    const budget = this.assets.__renderBudget || { maxDim: 480, borderMaxDim: 360, mode: 'preview' };
-    // Decode pending clips inside the window.
+    const budget = this.assets.__renderBudget
+      || { maxDim: 480, borderMaxDim: 360, mode: this.mode };
+    // Decode pending photo clips inside the window.
     for (let i = keepFrom; i <= keepTo; i++) {
       const clip = this.plan.timeline[i];
-      if (!clip || (clip.kind !== 'photo' && clip.kind !== 'video')) continue;
+      if (!clip || clip.kind !== 'photo') continue;
       const a = this.assets.get(clip.photoId);
       if (!a || a.kind !== 'pending') continue;
-      // Mark as decoding so we don't double-fire.
-      this.assets.set(clip.photoId, { kind: 'decoding', clipKind: clip.kind });
+      this.assets.set(clip.photoId, { kind: 'decoding', clipKind: 'photo' });
       decodeClipAssets(clip, budget.maxDim, budget.borderMaxDim, budget.mode)
         .then((decoded) => {
           if (!this.assets || !decoded) return;
           this.assets.set(clip.photoId, decoded);
-          if (decoded.kind === 'video' && decoded.element && this.mixer) {
-            this.mixer.attachVideo(clip.photoId, decoded.element);
-          }
         })
         .catch((e) => {
           console.warn('lazy decode failed', e);
           if (this.assets) {
-            this.assets.set(clip.photoId, { kind: clip.kind === 'video' ? 'video-failed' : 'photo-failed' });
+            this.assets.set(clip.photoId, { kind: 'photo-failed' });
           }
         });
     }
-    // Free clips outside the keep window. Replace with 'pending' so the
-    // user can scrub backwards / replay and have them re-decoded.
+    // Free PHOTO clips outside the keep window. Videos always retained.
     for (let i = 0; i < this.plan.timeline.length; i++) {
       if (i >= keepFrom - FREE_AFTER && i <= keepTo + FREE_AFTER) continue;
       const clip = this.plan.timeline[i];
-      if (!clip || (clip.kind !== 'photo' && clip.kind !== 'video')) continue;
+      if (!clip || clip.kind !== 'photo') continue;
       const a = this.assets.get(clip.photoId);
       if (!a || a.kind === 'pending' || a.kind === 'decoding') continue;
-      if (a.kind === 'photo-failed' || a.kind === 'video-failed') continue;
+      if (a.kind === 'photo-failed') continue;
       freeDecodedAsset(a);
-      this.assets.set(clip.photoId, { kind: 'pending', clipKind: clip.kind });
+      this.assets.set(clip.photoId, { kind: 'pending', clipKind: 'photo' });
     }
   }
 
@@ -2337,9 +2360,10 @@ class Renderer {
     // be playing so audio aligns with the eventual visible frame).
     const activeIds = new Set(active.map(({ clip }) => clip.photoId));
 
-    // Slide the decode/free window in preview mode based on which clip
-    // indexes are active. No-op in export mode (everything pre-decoded).
-    if (this.mode === 'preview') {
+    // Slide the decode/free window for photos based on which clip indexes
+    // are active. Both preview AND export run this — export uses a wider
+    // look-ahead so MediaRecorder never sees a "loading…" frame.
+    {
       const tl = this.plan.timeline;
       const activeIdxs = active.map(({ clip }) => tl.indexOf(clip)).filter(i => i >= 0);
       this.ensureWindow(activeIdxs);
@@ -2432,16 +2456,19 @@ class Renderer {
     }
     const asset = this.assets.get(clip.photoId);
     if (!asset) return;
-    // Sliding-window placeholder while a clip is still decoding. Show a
-    // tinted frame instead of a hard blank so the user sees we're working.
+    // Sliding-window placeholder while a clip is still decoding. In
+    // export mode show only the gradient backdrop (no debug text in the
+    // recorded video); in preview show the "⏳ 読込中…" indicator.
     if (asset.kind === 'pending' || asset.kind === 'decoding') {
       drawCardBackground(ctx, w, h);
-      ctx.save();
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = `400 ${Math.round(h * 0.025)}px ${fontStack()}`;
-      ctx.textAlign = 'center';
-      ctx.fillText('⏳ 読込中…', w / 2, h / 2);
-      ctx.restore();
+      if (this.mode !== 'export') {
+        ctx.save();
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = `400 ${Math.round(h * 0.025)}px ${fontStack()}`;
+        ctx.textAlign = 'center';
+        ctx.fillText('⏳ 読込中…', w / 2, h / 2);
+        ctx.restore();
+      }
       return;
     }
     const t = clip.durationSec ? Math.min(1, localT / clip.durationSec) : 0;
