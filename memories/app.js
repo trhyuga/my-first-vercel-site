@@ -33,6 +33,10 @@ const state = {
   // Last track auto-pick chose at preview — surfaced in the settings panel
   // so the user sees "🪄 お任せ" resolved to a specific song.
   lastUsedTrack: null,
+  // Probed duration of the last user-uploaded BGM file (seconds). Read by
+  // readPlanOpts so the timeline length can match the uploaded track the
+  // same way it matches a catalog track's durationSec.
+  uploadedBgmDurationSec: null,
 };
 
 // -----------------------------------------------------------------------------
@@ -1213,9 +1217,15 @@ function planPerPhotoSec(itemCount, opts) {
   // the requested totalSec instead of stretching the timeline to the
   // BGM track's length.
   if (opts.mode === 'seconds') {
+    // 「秒数ピッタリ」 = explicit user contract about total length. Honour it
+    // even when itemCount is small enough that per-photo would otherwise hit
+    // PHOTO_MAX_SEC — capping there made the actual total much shorter than
+    // requested ("60秒指定したのに 36秒になる" type bug). PHOTO_MIN_SEC is
+    // still enforced (otherwise super-long seconds with too few photos
+    // could produce sub-frame durations).
     const bodySec = Math.max(PHOTO_MIN_SEC * itemCount,
                              (opts.seconds || 30) - TITLE_CARD_SEC - CLOSER_CARD_SEC);
-    const per = clamp(bodySec / itemCount);
+    const per = Math.max(PHOTO_MIN_SEC, bodySec / itemCount);
     return { perPhotoSec: per, totalSec: TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC };
   }
   if (opts.bgmDurationSec) {
@@ -3391,6 +3401,29 @@ function bindSettings() {
     dom.catalogField.style.display = (bgm === 'catalog') ? '' : 'none';
     dom.uploadField.style.display = (bgm === 'upload') ? '' : 'none';
   });
+  // Probe the duration of an uploaded BGM file so the timeline can size
+  // itself to the user's track (same way catalog tracks feed bgmDurationSec
+  // into planPerPhotoSec). Use a throwaway <audio> element + URL.createObjectURL
+  // so the actual playback path in AudioMixer.setupBgm is untouched.
+  if (dom.bgmFile) {
+    dom.bgmFile.addEventListener('change', () => {
+      state.uploadedBgmDurationSec = null;
+      const f = dom.bgmFile.files && dom.bgmFile.files[0];
+      if (!f) return;
+      const url = URL.createObjectURL(f);
+      const a = new Audio();
+      a.preload = 'metadata';
+      a.src = url;
+      const cleanup = () => { try { URL.revokeObjectURL(url); } catch (_) {} };
+      a.addEventListener('loadedmetadata', () => {
+        if (a.duration && isFinite(a.duration) && a.duration > 0) {
+          state.uploadedBgmDurationSec = a.duration;
+        }
+        cleanup();
+      }, { once: true });
+      a.addEventListener('error', cleanup, { once: true });
+    });
+  }
   document.getElementById('orientation').addEventListener('change', () => {
     // Cluster naming depends on rep choice which depends on orientation,
     // so invalidate the cache so titles regenerate on the next preview.
@@ -3490,9 +3523,11 @@ function autoPickBgmTrack(targetSec, preferredMood, catalog) {
     // but only as a last resort, since the loop seam is audible.
     const overhead = t.durationSec - targetSec;
     if (overhead < 0) {
-      // Penalty grows with shortfall but is bounded so a short-only catalog
-      // still selects something.
-      score -= 8 + Math.min(20, -overhead * 0.25);
+      // Penalty grows linearly with shortfall (no cap) — when targetSec
+      // exceeds every track in the catalog we still want the LONGEST
+      // available to win cleanly. A previous Math.min(20, ...) cap made
+      // very-short and somewhat-short tracks tie at the same score.
+      score -= 8 + (-overhead) * 0.25;
     } else if (overhead <= 30) {
       score += 5;                               // ideal — slightly longer than video
     } else if (overhead <= 90) {
@@ -3515,27 +3550,36 @@ function autoPickBgmTrack(targetSec, preferredMood, catalog) {
 // Quick target-length estimate without rebuilding the timeline. Used by the
 // auto-pick to choose a sensibly-sized track before the plan is computed.
 function estimateTargetSec() {
-  // Seconds-mode is an explicit user-provided length — auto-pick should
-  // target THAT, not a density-curve guess, so the chosen track is sized
-  // to the user's video length and BGM doesn't end mid-clip.
+  if (!state.groups || !state.groups.length) return 30;
   const modeRadio = document.querySelector('input[name="mode"]:checked');
-  if (modeRadio && modeRadio.value === 'seconds') {
+  const mode = modeRadio ? modeRadio.value : 'all-unique';
+  // Seconds mode is an explicit user contract about total length — auto-pick
+  // should target THAT, not a density-curve guess.
+  if (mode === 'seconds') {
     const inp = document.getElementById('secondsInput');
     const s = parseInt(inp && inp.value, 10);
     if (s && s > 0) return s;
   }
-  if (!state.groups || !state.groups.length) return 30;
   const usable = state.groups
     .map(g => pickBestOfGroup(g, getOutputOrientation()))
     .filter(p => !p.bad).length;
+  // Count mode — user picked an explicit slide count, so the timeline grows
+  // with that, not with the available pool. Use the same density curve but
+  // applied to the chosen count.
+  let itemCount = usable;
+  if (mode === 'count') {
+    const inp = document.getElementById('countInput');
+    const c = parseInt(inp && inp.value, 10);
+    if (c && c > 0) itemCount = Math.min(usable, c);
+  }
   // Mirror the density curve in planPerPhotoSec so the estimate matches
   // what the timeline would actually produce.
   let per = PHOTO_DEFAULT_SEC;
-  if (usable <= 6) per = 4.5;
-  else if (usable <= 15) per = 3.5;
-  else if (usable <= 30) per = 3.0;
+  if (itemCount <= 6) per = 4.5;
+  else if (itemCount <= 15) per = 3.5;
+  else if (itemCount <= 30) per = 3.0;
   else per = 2.5;
-  return TITLE_CARD_SEC + per * usable + CLOSER_CARD_SEC;
+  return TITLE_CARD_SEC + per * itemCount + CLOSER_CARD_SEC;
 }
 
 function readPlanOpts() {
@@ -3543,13 +3587,24 @@ function readPlanOpts() {
   const $ = (id) => document.getElementById(id);
   const titleSel = $('titleSelect');
   const closerSel = $('closerSelect');
+  // bgmDurationSec drives planPerPhotoSec so the timeline length matches
+  // the music. Catalog tracks expose it directly; uploaded files probe
+  // their duration via the bgmFile change handler and stash it in
+  // state.uploadedBgmDurationSec.
+  const bgmRadio = document.querySelector('input[name="bgm"]:checked');
+  const bgmKind = bgmRadio ? bgmRadio.value : 'none';
+  let bgmDurationSec = null;
+  if (track) bgmDurationSec = track.durationSec;
+  else if (bgmKind === 'upload' && state.uploadedBgmDurationSec) {
+    bgmDurationSec = state.uploadedBgmDurationSec;
+  }
   return {
     orientation: getOutputOrientation(),
     resolution: $('resolution').value,
     mode: document.querySelector('input[name="mode"]:checked').value,
     count: parseInt($('countInput').value, 10) || 15,
     seconds: parseInt($('secondsInput').value, 10) || 30,
-    bgmDurationSec: track ? track.durationSec : null,
+    bgmDurationSec,
     bgmTempo: track ? bgmTempoFromTags(track.tags) : 'medium',
     subtitlesOn: $('subtitles').value !== 'off',
     titleMode: titleSel ? titleSel.value : '__auto__',
@@ -3655,10 +3710,8 @@ function populateTitleSelect() {
   }
 }
 
-// Resolve the BGM source to a Blob/URL to feed AudioMixer.setupBgm. Returns
-// null when no BGM is configured. Catalog tracks are fetched via the network
-// (must be CORS-enabled) — the catalog ships empty so this only runs once
-// real entries are populated.
+// Resolve the BGM source for AudioMixer.setupBgm: a Blob (upload), a URL
+// string (catalog), or null (none / synth handled separately).
 async function resolveBgmSource() {
   const radio = document.querySelector('input[name="bgm"]:checked');
   if (!radio || radio.value === 'none') return null;
