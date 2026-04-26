@@ -1335,26 +1335,41 @@ async function buildPlan(opts) {
 // stylistically fine for memory videos and avoids dropping content).
 function mergeVideoBands(timeline, opts) {
   if (opts.orientation !== 'portrait') return timeline;
-  const photoPool = [];
+  // Borders are sourced from photo refs that share the video's chapter
+  // (same day; clusterId match preferred). Falling back to any photo in
+  // the same day. With strict-chronological ordering a global round-robin
+  // produced borders from minutes / hours away — bad chapter cohesion.
+  const photoRefs = [];
   for (const c of timeline) {
     if (c.kind !== 'photo') continue;
-    if (c.refs) photoPool.push(...c.refs);
-    else if (c.ref) photoPool.push(c.ref);
+    if (c.refs) for (const r of c.refs) photoRefs.push(r);
+    else if (c.ref) photoRefs.push(c.ref);
   }
-  if (photoPool.length < 2) return timeline;
-
-  let pi = 0;
+  if (photoRefs.length < 2) return timeline;
+  const sameDay = (a, b) => ymdString(a.ts) === ymdString(b.ts);
+  const sameCluster = (a, b) => (a.clusterId || null) === (b.clusterId || null);
+  const findBorders = (videoRef) => {
+    // Prefer same-cluster, then same-day, then anything. Pick two distinct refs.
+    const tiers = [
+      photoRefs.filter(r => sameCluster(r, videoRef)),
+      photoRefs.filter(r => sameDay(r, videoRef)),
+      photoRefs,
+    ];
+    for (const tier of tiers) {
+      if (tier.length >= 2) return [tier[0], tier[1]];
+    }
+    return null;
+  };
   return timeline.map(clip => {
     if (clip.kind !== 'video' || !clip.ref) return clip;
     const ar = clip.ref.width / Math.max(1, clip.ref.height);
     if (ar < 1.3) return clip; // not strongly landscape — keep smart-crop
-    const a = photoPool[pi % photoPool.length];
-    const b = photoPool[(pi + 1) % photoPool.length];
-    pi += 2;
+    const borders = findBorders(clip.ref);
+    if (!borders) return clip;
     return {
       ...clip,
       layout: 'video-band',
-      borderRefs: [a, b],
+      borderRefs: borders,
     };
   });
 }
@@ -3160,11 +3175,18 @@ function bindCatalogAudition() {
 }
 
 function resolveTitle(opts) {
-  if (opts.titleMode === '__custom__' && opts.titleCustom) return opts.titleCustom;
+  // __custom__ + non-empty input → use it.
+  // __custom__ + EMPTY input → fall back to auto so the user clearing
+  // the field reverts to the auto-generated title (was previously
+  // returning the literal string "__custom__").
+  if (opts.titleMode === '__custom__') {
+    if (opts.titleCustom) return opts.titleCustom;
+    return pickAutoTitle(state.titleCandidates || []);
+  }
   if (opts.titleMode === '__auto__' || !opts.titleMode) {
     return pickAutoTitle(state.titleCandidates || []);
   }
-  // Otherwise titleMode is the candidate string itself
+  // Otherwise titleMode is the candidate string itself.
   return opts.titleMode;
 }
 
@@ -3624,8 +3646,6 @@ function renderPlanSummary(plan) {
   }
   detail.appendChild(ul);
   dom.output.appendChild(detail);
-
-  dom.stageStatus.textContent = '⏸ Step 5 で実映像のプレビュー実装予定';
 }
 
 // -----------------------------------------------------------------------------
