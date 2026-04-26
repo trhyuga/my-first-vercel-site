@@ -1673,23 +1673,32 @@ async function decodeClipAssets(clip, maxDim, borderMaxDim, mode) {
   }
   if (clip.kind === 'video') {
     const v = document.createElement('video');
-    v.src = clip.ref.objectUrl;
-    v.muted = true;
+    // muted=false from creation: iOS Safari with v.preload='auto' may
+    // skip downloading the audio track if the element starts muted, and
+    // a later flip to false doesn't retroactively load it. Keeping it
+    // unmuted from the start ensures the AudioContext's MediaElementSource
+    // actually has audio to route. The audio doesn't reach speakers
+    // because attachVideo wires the source through the gain node and
+    // bypasses the element's direct output.
+    v.muted = false;
     v.playsInline = true;
     v.preload = 'auto';
     v.crossOrigin = 'anonymous';
+    v.src = clip.ref.objectUrl;
     await withTimeout(new Promise((res, rej) => {
       v.addEventListener('loadedmetadata', res, { once: true });
       v.addEventListener('error', () => rej(new Error('video load')), { once: true });
     }), 25000, 'preload ' + clip.ref.sourceName);
-    if (mode !== 'preview') {
-      try {
-        await withTimeout(new Promise((res) => {
-          v.addEventListener('seeked', res, { once: true });
-          v.currentTime = clip.ref.highlightStartSec || 0;
-        }), 8000, 'preseek ' + clip.ref.sourceName);
-      } catch (_) { /* non-fatal */ }
-    }
+    // Pre-seek to the highlight in BOTH modes now. Videos are primed
+    // upfront so this is part of the initial preload budget; without it
+    // preview / export shows ~10 black frames at clip activation while
+    // the seek catches up to highlightStartSec.
+    try {
+      await withTimeout(new Promise((res) => {
+        v.addEventListener('seeked', res, { once: true });
+        v.currentTime = clip.ref.highlightStartSec || 0;
+      }), (mode === 'preview') ? 5000 : 8000, 'preseek ' + clip.ref.sourceName);
+    } catch (_) { /* non-fatal */ }
     let borderBitmaps = null;
     if (clip.layout === 'video-band' && clip.borderRefs && clip.borderRefs.length >= 2) {
       try {
