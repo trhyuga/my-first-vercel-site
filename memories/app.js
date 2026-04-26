@@ -1163,13 +1163,49 @@ function fmtLocationSummary(clusters) {
 }
 
 function orderForTimeline(selected, _clusters) {
-  // Strict chronological. The user's latest direction was 「日程や時間帯の括り
-  // の順で出してくれたらオーケー。画像と動画が順番に入り乱れても問題ない」
-  // — so videos slot in by their actual timestamp instead of getting deferred
-  // to the end of a same-location cluster's run. Cluster-change still drives
-  // the chapter-label overlays inside buildTimeline, so a revisit naturally
-  // gets a fresh "📍 location" label.
-  return selected.slice().sort((a, b) => a.ts - b.ts);
+  // Strict chronological — videos slot in by their actual timestamp.
+  //
+  // Special case: a video whose ts came from file.lastModified (mp4 metadata
+  // parse failed / unavailable, common for HEVC iPhone clips that were
+  // forwarded) will sort to the end of the timeline because lastModified
+  // tracks the upload/copy time rather than when the clip was filmed. The
+  // user explicitly doesn't want videos clumping at the end:
+  //   「出来れば同じ場所にいる時にしたい。わからない場合は、1番最後ではなく
+  //    推測できる可能性の1番高い箇所に。最後に溜まるくらいならランダムのが
+  //    良い」
+  // We don't have GPS on videos, so the best deterministic guess is to
+  // spread them UNIFORMLY across the photo timestamp range. Reliable-ts
+  // videos (mp4 creation_time successfully parsed) keep their real ts.
+  const photos = selected.filter(p => p.kind !== 'video');
+  const unreliableVids = selected.filter(p =>
+    p.kind === 'video' && p.tsSource === 'mtime'
+  );
+  if (photos.length >= 2 && unreliableVids.length > 0) {
+    const tsList = photos.map(p => p.ts).sort((a, b) => a - b);
+    const tsMin = tsList[0];
+    const tsMax = tsList[tsList.length - 1];
+    const range = tsMax - tsMin;
+    // Only redistribute when the video's mtime falls clearly outside the
+    // photo time range (e.g. forwarded yesterday for a trip a year ago).
+    // Within-range mtime is probably accurate-enough — leave it.
+    const FAR_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+    const toSpread = unreliableVids.filter(v =>
+      v.ts > tsMax + FAR_MS || v.ts < tsMin - FAR_MS
+    );
+    if (toSpread.length > 0 && range > 0) {
+      // Sort by source name so the placement is stable across re-previews
+      // (the original ts is uninformative; sourceName is the only stable key).
+      toSpread.sort((a, b) => (a.sourceName || '').localeCompare(b.sourceName || ''));
+      toSpread.forEach((v, i) => {
+        v.adjustedTs = Math.round(tsMin + range * (i + 1) / (toSpread.length + 1));
+      });
+    }
+  }
+  return selected.slice().sort((a, b) => {
+    const ta = a.adjustedTs != null ? a.adjustedTs : a.ts;
+    const tb = b.adjustedTs != null ? b.adjustedTs : b.ts;
+    return ta - tb;
+  });
 }
 
 function distinctDays(items) {
