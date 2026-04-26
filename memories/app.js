@@ -2705,7 +2705,8 @@ let activeRenderer = null;
 // the BGM can duck during video clips and unduck after.
 // =============================================================================
 
-const VIDEO_DUCK_LEVEL = 1.00;     // no ducking — BGM plays full volume even during video clips
+const VIDEO_DUCK_LEVEL = 1.00;     // no ducking — BGM plays at BGM_BASE_GAIN even during video clips
+const BGM_BASE_GAIN    = 0.80;     // BGM resting volume (per user — leaves headroom for video clip audio)
 const VIDEO_CLIP_GAIN  = 2.50;     // ~+8dB; iPhone video audio is normally quieter than music — boost so it cuts through BGM without forcing BGM down
 const DUCK_RAMP_SEC = 0.30;
 const UNDUCK_RAMP_SEC = 0.40;
@@ -2982,6 +2983,7 @@ class AudioMixer {
     if (source && typeof source === 'object' && source.kind === 'synth') {
       this.synth = new SynthSource(this.ctx, source.preset, totalSec);
       this.bgmGain = this.synth.output;
+      this.bgmGain.gain.value = BGM_BASE_GAIN;
       this.bgmGain.connect(this.dest);
       if (!this.silentSpeakers) this.bgmGain.connect(this.ctx.destination);
       this.bgmFadeOutAtSec = null; // SynthSource handles its own envelope
@@ -3005,7 +3007,7 @@ class AudioMixer {
     });
     this.bgmBuffer = audioBuf;
     const gain = this.ctx.createGain();
-    gain.gain.value = 1.0;
+    gain.gain.value = BGM_BASE_GAIN;
     gain.connect(this.dest);
     if (!this.silentSpeakers) gain.connect(this.ctx.destination);
     this.bgmGain = gain;
