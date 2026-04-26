@@ -1811,30 +1811,35 @@ function clearCanvas(ctx, w, h, fill = '#000') {
 // dims) — ctx.filter blur applied per frame is too expensive at 30 fps for
 // even a few photos in flight. Cached on the asset record.
 function getBlurredFill(asset, canvasW, canvasH) {
-  const key = `${canvasW}x${canvasH}`;
+  // Cache the blurred bg at HALF the canvas dimensions — heavily-blurred
+  // content has no detail to lose at half resolution and the cached
+  // canvas is 1/4 the byte size (e.g. 7 cached pieces of a 720×1280
+  // canvas drop from 24 MB → 6 MB). drawImage() upscales it back to
+  // canvas size at draw time; the blur masks the upscale entirely.
+  const cacheW = Math.max(64, Math.round(canvasW / 2));
+  const cacheH = Math.max(64, Math.round(canvasH / 2));
+  const key = `${cacheW}x${cacheH}`;
   if (asset.blurredKey === key && asset.blurred) return asset.blurred;
   const c = document.createElement('canvas');
-  c.width = canvasW;
-  c.height = canvasH;
+  c.width = cacheW;
+  c.height = cacheH;
   const cx = c.getContext('2d');
   const bgZoom = 1.10;
   const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
-  const bgScale = Math.max(canvasW / srcW, canvasH / srcH) * bgZoom;
+  const bgScale = Math.max(cacheW / srcW, cacheH / srcH) * bgZoom;
   const bgW = srcW * bgScale, bgH = srcH * bgScale;
-  // Aggressive blur — user wanted the back side "as blurred as possible"
-  // for blur-fill / two-photo overlap layouts. brightness 0.45 darkens it
-  // so the sharp foreground reads stronger.
-  cx.filter = 'blur(54px) brightness(0.45) saturate(1.20)';
-  cx.drawImage(asset.bitmap, (canvasW - bgW) / 2, (canvasH - bgH) / 2, bgW, bgH);
-  // Add a faint dark vignette so the foreground reads more strongly
+  // Blur radius scales down too since cache is half-size — 54 px → 27 px
+  // gives the same visual softness when drawn at 2× back to the canvas.
+  cx.filter = 'blur(27px) brightness(0.45) saturate(1.20)';
+  cx.drawImage(asset.bitmap, (cacheW - bgW) / 2, (cacheH - bgH) / 2, bgW, bgH);
   cx.filter = 'none';
   const vignette = cx.createRadialGradient(
-    canvasW / 2, canvasH / 2, Math.min(canvasW, canvasH) * 0.35,
-    canvasW / 2, canvasH / 2, Math.max(canvasW, canvasH) * 0.75);
+    cacheW / 2, cacheH / 2, Math.min(cacheW, cacheH) * 0.35,
+    cacheW / 2, cacheH / 2, Math.max(cacheW, cacheH) * 0.75);
   vignette.addColorStop(0, 'rgba(0,0,0,0)');
   vignette.addColorStop(1, 'rgba(0,0,0,0.45)');
   cx.fillStyle = vignette;
-  cx.fillRect(0, 0, canvasW, canvasH);
+  cx.fillRect(0, 0, cacheW, cacheH);
   asset.blurred = c;
   asset.blurredKey = key;
   return c;
@@ -1843,11 +1848,10 @@ function getBlurredFill(asset, canvasW, canvasH) {
 function drawBlurFill(ctx, canvasW, canvasH, asset, t, kb) {
   const tEased = easeInOut(t);
 
-  // Background — pre-baked, sized exactly to canvas. Drawn STATIC: drifting
-  // it exposed a black canvas edge on the trailing side. Motion comes from
-  // the foreground Ken-Burns instead, which is plenty.
+  // Background — pre-baked at half canvas size to save RAM, drawn here at
+  // full canvas size. The blur masks any upscale softness completely.
   const bg = getBlurredFill(asset, canvasW, canvasH);
-  ctx.drawImage(bg, 0, 0);
+  ctx.drawImage(bg, 0, 0, canvasW, canvasH);
 
   // Foreground — scale-to-fit with subtle Ken-Burns zoom-pan
   const srcW = asset.bitmap.width, srcH = asset.bitmap.height;
@@ -3724,7 +3728,14 @@ async function exportVideo(renderer, mixer, totalSec) {
   await new Promise(r => setTimeout(r, 200));
   recorder.stop();
   await stopped;
-  return new Blob(chunks, { type: mime || (chunks[0] && chunks[0].type) || 'video/webm' });
+  const outputType = mime || (chunks[0] && chunks[0].type) || 'video/webm';
+  const blob = new Blob(chunks, { type: outputType });
+  // Drop our reference to the chunks so the engine can GC the underlying
+  // array even before the caller releases the returned Blob. On iOS the
+  // blob and the chunks may share storage; on engines that copy, this
+  // shaves the doubled-up window.
+  chunks.length = 0;
+  return blob;
 }
 
 function showOutput(blob) {
