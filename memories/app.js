@@ -384,6 +384,14 @@ function isVideo(file) {
          /\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(file.name);
 }
 
+// Tear down a transient &lt;video&gt; element so its decoder slot is released
+// — iOS Safari throttles after ~16 simultaneous video elements per page,
+// so we don't want long ingest sessions piling decoders even briefly.
+function teardownVideoElement(v) {
+  try { v.pause(); } catch (_) {}
+  try { v.removeAttribute('src'); v.load(); } catch (_) {}
+}
+
 function loadVideoMetadata(url) {
   return withTimeout(new Promise((resolve, reject) => {
     const v = document.createElement('video');
@@ -391,14 +399,20 @@ function loadVideoMetadata(url) {
     v.preload = 'metadata';
     v.playsInline = true;
     v.src = url;
+    const cleanup = () => teardownVideoElement(v);
     v.addEventListener('loadedmetadata', () => {
-      resolve({
+      const meta = {
         durationSec: isFinite(v.duration) ? v.duration : 0,
         width: v.videoWidth,
         height: v.videoHeight,
-      });
+      };
+      cleanup();
+      resolve(meta);
     }, { once: true });
-    v.addEventListener('error', () => reject(new Error('動画メタデータの読み込みに失敗しました')), { once: true });
+    v.addEventListener('error', () => {
+      cleanup();
+      reject(new Error('動画メタデータの読み込みに失敗しました'));
+    }, { once: true });
   }), 10000, 'video metadata');
 }
 
@@ -411,8 +425,12 @@ function extractVideoFrameAt(url, atSec, durationSec) {
     v.crossOrigin = 'anonymous';
     v.src = url;
     let done = false;
-    const finish = (val) => { if (!done) { done = true; resolve(val); } };
-    const fail = (err) => { if (!done) { done = true; reject(err); } };
+    const finish = (val) => {
+      if (!done) { done = true; teardownVideoElement(v); resolve(val); }
+    };
+    const fail = (err) => {
+      if (!done) { done = true; teardownVideoElement(v); reject(err); }
+    };
     v.addEventListener('loadedmetadata', () => {
       const max = (durationSec || v.duration || 0.1) - 0.05;
       v.currentTime = Math.max(0, Math.min(max, atSec));
@@ -3301,7 +3319,14 @@ async function setupRendererForPlay(opts, plan, audioCtx, mode = 'preview') {
       try {
         await mixer.setupBgm(bgmSrc, plan.totalSec, 1.5);
       } catch (e) {
+        // Surface to the user too (was silently warning to console, leaving
+        // the user wondering why the BGM never started).
         console.warn('BGM setup failed', e);
+        const note = document.getElementById('previewQualityNote');
+        if (note) {
+          note.style.display = '';
+          note.innerHTML = '⚠️ BGMの読み込みに失敗しました。BGMなしで再生します。';
+        }
       }
     }
   } catch (e) {
