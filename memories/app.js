@@ -2219,13 +2219,15 @@ function drawTitleCard(ctx, w, h, clip, localT, posterAsset = null) {
   } else {
     drawCardBackground(ctx, w, h);
   }
-  // Internal fade in/out — multiplied with whatever globalAlpha the renderer
-  // already set for crossfade.
-  const fadeIn = 0.5, fadeOut = 1.0;
+  // No fade-in — title text is at full opacity from t=0 so frame 0 of the
+  // recorded video shows photo+title together. iOS Photos thumbnails frame
+  // 0; if that frame is text-less, the saved file's poster looks like a
+  // generic photo with no context. Fade-out at the tail still happens so
+  // the transition into the first body clip is smooth.
+  const fadeOut = 1.0;
   const dur = clip.durationSec;
   let alpha;
-  if (localT < fadeIn) alpha = localT / fadeIn;
-  else if (localT > dur - fadeOut) alpha = Math.max(0, (dur - localT) / fadeOut);
+  if (localT > dur - fadeOut) alpha = Math.max(0, (dur - localT) / fadeOut);
   else alpha = 1;
 
   ctx.save();
@@ -3877,6 +3879,12 @@ function patchMp4Durations(buffer, totalSec) {
 }
 
 async function exportVideo(renderer, mixer, totalSec) {
+  // Prime the canvas with frame 0 BEFORE captureStream / recorder.start —
+  // iOS Safari grabs the canvas state at start() and without this the
+  // first frames recorded are blank (stale preview content or fresh clear).
+  // iOS Photos thumbnails frame 0, so a black frame here = black thumbnail
+  // forever after.
+  try { renderer.renderFrame(0); } catch (_) {}
   const stream = renderer.canvas.captureStream(30);
   if (mixer && mixer.dest && mixer.dest.stream) {
     for (const track of mixer.dest.stream.getAudioTracks()) {
