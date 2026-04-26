@@ -2262,6 +2262,13 @@ function drawTitleCard(ctx, w, h, clip, localT, posterAsset = null) {
   ctx.fillStyle = usedPhoto ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.55)';
   ctx.fillRect(w / 2 - accentW / 2, h * 0.50 + h * 0.002, accentW, Math.max(1, Math.round(h * 0.0015)));
   if (clip.subtitle) {
+    // Subtitle keeps a short fade-in (~0.6s) — the main title is already
+    // visible at frame 0 for the thumbnail, but adding a delayed reveal on
+    // the subtitle gives the title card some on-screen motion when played.
+    const subFadeIn = 0.6;
+    const subAlpha = Math.min(1, Math.max(0, localT / subFadeIn));
+    ctx.save();
+    ctx.globalAlpha *= subAlpha;
     const subIdeal = Math.max(14, Math.round(h * 0.024));
     const subMin   = Math.max(12, Math.round(h * 0.018));
     const subFit = fitOrWrapTitle(ctx, clip.subtitle, '400', fontStack(), w * 0.86, subIdeal, subMin);
@@ -2277,6 +2284,7 @@ function drawTitleCard(ctx, w, h, clip, localT, posterAsset = null) {
     for (let i = 0; i < subFit.lines.length; i++) {
       ctx.fillText(subFit.lines[i], w / 2, top + i * lineH);
     }
+    ctx.restore();
   }
   ctx.restore();
 }
