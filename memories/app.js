@@ -1056,9 +1056,10 @@ function recommendedCount(usableCount, opts) {
     return Math.max(minKeep, Math.min(usableCount, desired));
   }
   // No BGM — keep almost everything; 80% floor for any size, light cap so
-  // 200-photo dumps don't produce 10-minute videos.
+  // 200-photo dumps don't produce 10-minute videos. Cap raised to 120 so
+  // 100-photo uploads pass through entirely.
   if (usableCount <= 30) return usableCount;
-  return Math.max(minKeep, Math.min(usableCount, 60));
+  return Math.max(minKeep, Math.min(usableCount, 120));
 }
 
 // -----------------------------------------------------------------------------
@@ -1489,14 +1490,15 @@ function getRenderBitmapMaxDim(opts, mode, itemCount) {
     return Math.min(2400, Math.round(canvasLong * 1.4));
   }
   // Preview: drops fast as the upload grows. Each bitmap is ~ (dim/1000)^2 ×
-  // 4MB raw, so a 50-item set at 320 long side is ~16 MB total — comfortably
-  // inside iOS Safari's ceiling.
+  // 4MB raw, so a 100-item set at 200 long side is ~16 MB total — comfortably
+  // inside iOS Safari's ceiling even with video element decoders alongside.
   const n = itemCount || 0;
-  if (n <= 8)  return 540;
-  if (n <= 20) return 432;
-  if (n <= 40) return 360;
-  if (n <= 80) return 300;
-  return 260;
+  if (n <=   8) return 540;
+  if (n <=  20) return 432;
+  if (n <=  40) return 340;
+  if (n <=  80) return 260;
+  if (n <= 120) return 200;
+  return 170;
 }
 
 function previewQualityReduced(opts, itemCount) {
@@ -1550,12 +1552,18 @@ async function preloadAssets(plan, opts, mode, onProgress) {
           v.addEventListener('loadedmetadata', res, { once: true });
           v.addEventListener('error', () => rej(new Error('video load')), { once: true });
         }), 25000, 'preload ' + clip.ref.sourceName);
-        try {
-          await withTimeout(new Promise((res) => {
-            v.addEventListener('seeked', res, { once: true });
-            v.currentTime = clip.ref.highlightStartSec || 0;
-          }), 8000, 'preseek ' + clip.ref.sourceName);
-        } catch (_) { /* non-fatal */ }
+        // Skip the pre-seek warm-up entirely in preview mode — the &lt;video&gt;
+        // will seek + paint when its clip activates. A few frames of
+        // black at clip start is preferable to blocking the whole preload
+        // pipeline behind 5+ video seeks.
+        if (mode !== 'preview') {
+          try {
+            await withTimeout(new Promise((res) => {
+              v.addEventListener('seeked', res, { once: true });
+              v.currentTime = clip.ref.highlightStartSec || 0;
+            }), 8000, 'preseek ' + clip.ref.sourceName);
+          } catch (_) { /* non-fatal */ }
+        }
         // For video-band, also decode the two border photos.
         let borderBitmaps = null;
         if (clip.layout === 'video-band' && clip.borderRefs && clip.borderRefs.length >= 2) {
