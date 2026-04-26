@@ -3684,10 +3684,15 @@ async function setupRendererForPlay(opts, plan, audioCtx, mode = 'preview') {
 // MediaRecorder MIME picking — MP4 strongly preferred (saves to iOS Photos
 // app via the share sheet). Falls back to WebM (Chrome/Firefox desktop).
 function pickRecorderMime() {
+  // Order matters: 'video/mp4' (no codec spec) first nudges iOS Safari
+  // to use the standard ISOBMFF muxer with a single moov + proper
+  // duration. Specific-codec strings sometimes activate the
+  // fragmented-MP4 (fMP4) muxer instead, whose output iOS Photos
+  // imports as a "ライブブロードキャスト" without a known length.
   const candidates = [
+    'video/mp4',
     'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
     'video/mp4;codecs=avc1.4D401E,mp4a.40.2',
-    'video/mp4',
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
     'video/webm',
@@ -3706,6 +3711,108 @@ function showRenderProgress(pct, text) {
 }
 function hideRenderProgress() {
   dom.renderProg.style.display = 'none';
+}
+
+// Patch mvhd / tkhd / mdhd duration fields in an MP4 buffer so iOS Photos
+// reads a valid duration. iOS Safari's MediaRecorder writes fragmented MP4
+// with mvhd.duration = 0xFFFFFFFF (= "use the fragments to compute"); iOS
+// Photos doesn't follow the fragments and shows the file as a never-ending
+// "ライブブロードキャスト" with a duration like 119,306:06 (= UINT32_MAX
+// divided by the typical 10000 timescale ≈ 119306 hours). Overwriting the
+// movie/track/media durations with the actual total length makes the file
+// import as a normal video.
+function patchMp4Durations(buffer, totalSec) {
+  if (!buffer || !(buffer instanceof ArrayBuffer)) return false;
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  const readType = (o) => String.fromCharCode(bytes[o], bytes[o+1], bytes[o+2], bytes[o+3]);
+  const readSize = (o) => view.getUint32(o);
+  const findBox = (start, end, type) => {
+    let off = start;
+    while (off + 8 <= end) {
+      const size = readSize(off);
+      if (size === 0) break;          // box runs to EOF — uncommon in MediaRecorder out
+      if (size === 1) return null;    // 64-bit box size — bail
+      const t = readType(off + 4);
+      if (t === type) return { offset: off, size, end: off + size };
+      off += size;
+    }
+    return null;
+  };
+  const writeU32 = (o, v) => view.setUint32(o, v >>> 0);
+  const writeU64Lo = (o, v) => { writeU32(o, 0); writeU32(o + 4, v >>> 0); };
+
+  try {
+    const moov = findBox(0, bytes.length, 'moov');
+    if (!moov) return false;
+
+    // ---- mvhd: movie-wide duration in movie timescale ----
+    const mvhd = findBox(moov.offset + 8, moov.end, 'mvhd');
+    if (!mvhd) return false;
+    const mvhdBody = mvhd.offset + 8;
+    const mvhdVer = bytes[mvhdBody];
+    let movieTimescale, mvhdDurOff, mvhdDur64;
+    if (mvhdVer === 1) {
+      movieTimescale = view.getUint32(mvhdBody + 4 + 8 + 8);
+      mvhdDurOff = mvhdBody + 4 + 8 + 8 + 4;
+      mvhdDur64 = true;
+    } else {
+      movieTimescale = view.getUint32(mvhdBody + 4 + 4 + 4);
+      mvhdDurOff = mvhdBody + 4 + 4 + 4 + 4;
+      mvhdDur64 = false;
+    }
+    if (!movieTimescale || movieTimescale > 10_000_000) return false; // sanity
+    const movieDuration = Math.max(1, Math.round(totalSec * movieTimescale));
+    if (mvhdDur64) writeU64Lo(mvhdDurOff, movieDuration); else writeU32(mvhdDurOff, movieDuration);
+
+    // ---- per-track tkhd + mdia/mdhd ----
+    let off = moov.offset + 8;
+    while (off + 8 <= moov.end) {
+      const size = readSize(off);
+      if (size === 0) break;
+      const t = readType(off + 4);
+      if (t === 'trak') {
+        const trakEnd = off + size;
+        const tkhd = findBox(off + 8, trakEnd, 'tkhd');
+        if (tkhd) {
+          const tk = tkhd.offset + 8;
+          const v = bytes[tk];
+          // tkhd body: 4 (vfl) | (8|4) ctime | (8|4) mtime | 4 track_id | 4 rsv | (8|4) duration
+          let dOff, big;
+          if (v === 1) { dOff = tk + 4 + 8 + 8 + 4 + 4; big = true; }
+          else         { dOff = tk + 4 + 4 + 4 + 4 + 4; big = false; }
+          if (big) writeU64Lo(dOff, movieDuration); else writeU32(dOff, movieDuration);
+        }
+        const mdia = findBox(off + 8, trakEnd, 'mdia');
+        if (mdia) {
+          const mdhd = findBox(mdia.offset + 8, mdia.end, 'mdhd');
+          if (mdhd) {
+            const md = mdhd.offset + 8;
+            const v = bytes[md];
+            let mts, dOff, big;
+            if (v === 1) {
+              mts = view.getUint32(md + 4 + 8 + 8);
+              dOff = md + 4 + 8 + 8 + 4;
+              big = true;
+            } else {
+              mts = view.getUint32(md + 4 + 4 + 4);
+              dOff = md + 4 + 4 + 4 + 4;
+              big = false;
+            }
+            if (mts && mts < 10_000_000) {
+              const trackDur = Math.max(1, Math.round(totalSec * mts));
+              if (big) writeU64Lo(dOff, trackDur); else writeU32(dOff, trackDur);
+            }
+          }
+        }
+      }
+      off += size;
+    }
+    return true;
+  } catch (e) {
+    console.warn('patchMp4Durations failed', e);
+    return false;
+  }
 }
 
 async function exportVideo(renderer, mixer, totalSec) {
@@ -3740,10 +3847,10 @@ async function exportVideo(renderer, mixer, totalSec) {
   const chunks = [];
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
   const stopped = new Promise((res) => recorder.addEventListener('stop', res, { once: true }));
-  // 250ms timeslice — fires ondataavailable 4×/sec so chunks become
-  // shorter and the array grows in finer increments. Helps GC pressure
-  // on iOS where the running buffer would otherwise sit in one big slot.
-  recorder.start(250);
+  // No timeslice → ondataavailable fires once at stop(). iOS Safari still
+  // emits fragmented MP4 either way, but a single chunk avoids any chance
+  // of mid-recording fragments being concatenated with mismatched headers.
+  recorder.start();
   if (mixer) mixer.start();
   await renderer.play((p) => {
     showRenderProgress(p, `🎬 書き出し中… ${Math.round(p * 100)}% (${(p * totalSec).toFixed(1)} / ${totalSec.toFixed(1)}s)`);
@@ -3753,12 +3860,23 @@ async function exportVideo(renderer, mixer, totalSec) {
   recorder.stop();
   await stopped;
   const outputType = mime || (chunks[0] && chunks[0].type) || 'video/webm';
-  const blob = new Blob(chunks, { type: outputType });
-  // Drop our reference to the chunks so the engine can GC the underlying
-  // array even before the caller releases the returned Blob. On iOS the
-  // blob and the chunks may share storage; on engines that copy, this
-  // shaves the doubled-up window.
+  let blob = new Blob(chunks, { type: outputType });
   chunks.length = 0;
+
+  // iOS Safari MediaRecorder writes fMP4 with mvhd.duration = 0xFFFFFFFF,
+  // which iOS Photos misreads as "ライブブロードキャスト" + a 119,306時間
+  // bogus runtime. Rewrite the duration fields in-place so the file
+  // imports as a normal video (and Photos can extract a thumbnail).
+  if (outputType.includes('mp4')) {
+    try {
+      const ab = await blob.arrayBuffer();
+      if (patchMp4Durations(ab, totalSec)) {
+        blob = new Blob([ab], { type: outputType });
+      }
+    } catch (e) {
+      console.warn('mp4 duration patch skipped', e);
+    }
+  }
   return blob;
 }
 
