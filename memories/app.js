@@ -1165,40 +1165,35 @@ function fmtLocationSummary(clusters) {
 function orderForTimeline(selected, _clusters) {
   // Strict chronological — videos slot in by their actual timestamp.
   //
-  // Special case: a video whose ts came from file.lastModified (mp4 metadata
-  // parse failed / unavailable, common for HEVC iPhone clips that were
-  // forwarded) will sort to the end of the timeline because lastModified
-  // tracks the upload/copy time rather than when the clip was filmed. The
-  // user explicitly doesn't want videos clumping at the end:
-  //   「出来れば同じ場所にいる時にしたい。わからない場合は、1番最後ではなく
-  //    推測できる可能性の1番高い箇所に。最後に溜まるくらいならランダムのが
-  //    良い」
-  // We don't have GPS on videos, so the best deterministic guess is to
-  // spread them UNIFORMLY across the photo timestamp range. Reliable-ts
-  // videos (mp4 creation_time successfully parsed) keep their real ts.
+  // Special case: a video whose ts falls clearly outside the photo time
+  // range (mtime fell-back, or mp4-creation that reflects the *edit*
+  // time of a re-encoded clip) would sort to the end and clump there.
+  // Spread those uniformly across the photo time range. Videos whose
+  // ts looks plausible (within or close to the photo range) keep their
+  // own ts so genuinely-mid-trip videos slot in correctly.
   const photos = selected.filter(p => p.kind !== 'video');
-  const unreliableVids = selected.filter(p =>
-    p.kind === 'video' && p.tsSource === 'mtime'
-  );
-  if (photos.length >= 2 && unreliableVids.length > 0) {
+  const allVids  = selected.filter(p => p.kind === 'video');
+  if (photos.length >= 2 && allVids.length > 0) {
     const tsList = photos.map(p => p.ts).sort((a, b) => a - b);
     const tsMin = tsList[0];
     const tsMax = tsList[tsList.length - 1];
     const range = tsMax - tsMin;
-    // Only redistribute when the video's mtime falls clearly outside the
-    // photo time range (e.g. forwarded yesterday for a trip a year ago).
-    // Within-range mtime is probably accurate-enough — leave it.
-    const FAR_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
-    const toSpread = unreliableVids.filter(v =>
+    const FAR_MS = 3 * 24 * 60 * 60 * 1000; // 3 days outside photo range
+    const toSpread = allVids.filter(v =>
       v.ts > tsMax + FAR_MS || v.ts < tsMin - FAR_MS
     );
     if (toSpread.length > 0 && range > 0) {
-      // Sort by source name so the placement is stable across re-previews
-      // (the original ts is uninformative; sourceName is the only stable key).
+      // Stable ordering — sourceName is the only key that's invariant
+      // across re-renders / cache reuse.
       toSpread.sort((a, b) => (a.sourceName || '').localeCompare(b.sourceName || ''));
       toSpread.forEach((v, i) => {
         v.adjustedTs = Math.round(tsMin + range * (i + 1) / (toSpread.length + 1));
       });
+    }
+    // Clear stale adjustedTs for videos that ARE in-range — happens if a
+    // previous run set it and the data set changed since.
+    for (const v of allVids) {
+      if (!toSpread.includes(v) && v.adjustedTs != null) v.adjustedTs = null;
     }
   }
   return selected.slice().sort((a, b) => {
@@ -2493,6 +2488,11 @@ class Renderer {
           asset.element.currentTime = startSec;
         } catch (_) {}
       }
+      // Belt-and-braces: AudioMixer.attachVideo set muted=false at preload
+      // but iOS sometimes resets it after a long pause/seek. Re-assert
+      // every activation so the original video audio actually flows
+      // through the MediaElementSource.
+      try { asset.element.muted = false; } catch (_) {}
       asset.playing = true;
       asset.element.play().catch((e) => {
         console.warn('video play rejected', e);
