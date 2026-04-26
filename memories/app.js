@@ -34,10 +34,10 @@ const state = {
   photos: [],   // all decoded inputs (photos + videos), chronological
   groups: [],   // similarity groups [[photo,...], ...] (same chronology)
   loading: false,
-  // Inline preview-time overrides. quick-edit panel writes these; readPlanOpts
-  // and buildPlan honour them on the next preview/export run.
-  overrides: { title: null, subtitle: null, bgmId: null },
-  lastUsedTrack: null, // the track autoPickBgmTrack returned (for UI feedback)
+  // The track that the most recent preview / autoPickBgmTrack actually
+  // played; populateSettingsFromPlan reads this to commit '__auto__' →
+  // explicit selection in the settings panel.
+  lastUsedTrack: null,
 };
 
 // -----------------------------------------------------------------------------
@@ -71,8 +71,6 @@ const dom = {
   renderProgText: document.getElementById('renderProgText'),
   renderProgBar: document.getElementById('renderProgBar'),
   output: document.getElementById('output'),
-  quickEdit: document.getElementById('quickEdit'),
-  quickApply: document.getElementById('quickApply'),
 };
 
 // -----------------------------------------------------------------------------
@@ -225,8 +223,9 @@ function computeDHash(srcCanvas) {
   const TW = 9, TH = 8;
   const c = document.createElement('canvas');
   c.width = TW; c.height = TH;
-  c.getContext('2d').drawImage(srcCanvas, 0, 0, TW, TH);
-  const data = c.getContext('2d').getImageData(0, 0, TW, TH).data;
+  const cx = c.getContext('2d');
+  cx.drawImage(srcCanvas, 0, 0, TW, TH);
+  const data = cx.getImageData(0, 0, TW, TH).data;
   const gray = new Float32Array(TW * TH);
   for (let i = 0, j = 0; i < data.length; i += 4, j++) {
     gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
@@ -922,11 +921,13 @@ async function nameClusters(clusters, useNominatim = true) {
       if (!c.state && r.state) c.state = r.state;
     }
   }
-  // Pass 3: generic fallback for unnamed GPS clusters
+  // Pass 3: generic fallback for unnamed GPS clusters. Only increment the
+  // alphabet for clusters we actually label so the visible sequence is
+  // always A, B, C, ... (no gaps from skipped no-GPS clusters).
   let alpha = 0;
   for (const c of clusters) {
-    if (!c.label) {
-      if (c.hasGps) c.label = `エリア ${String.fromCharCode(65 + alpha)}`;
+    if (!c.label && c.hasGps) {
+      c.label = `エリア ${String.fromCharCode(65 + alpha)}`;
       alpha++;
     }
   }
@@ -1809,20 +1810,22 @@ function drawCoverIntoSlot(ctx, x, y, slotW, slotH, source, srcW, srcH, t, kb) {
 // frozen against the moving centre.
 function drawVideoBand(ctx, canvasW, canvasH, videoEl, srcW, srcH, borderBitmaps, t, kb) {
   // Video band centred at 50% of canvas height; photo borders fill the
-  // remaining top/bottom. NO gaps — borders butt up against the band so
-  // there's never a black sliver visible between sections.
+  // remaining top/bottom. NO gaps — borders butt directly against the
+  // band. Top border height = floor((canvasH - bandH)/2), bottom border
+  // takes the rest so an odd remainder doesn't leave a 1px gap at the
+  // very bottom seam.
   const bandH = Math.round(canvasH * 0.50);
-  const borderH = Math.ceil((canvasH - bandH) / 2);
-  const bandY = borderH;
-  // Hairline white seams for crisp definition between sections without
-  // black gap. Drawn last over the content edges.
+  const borderTopH = Math.floor((canvasH - bandH) / 2);
+  const bandY = borderTopH;
+  const bandBottomY = bandY + bandH;
+  const borderBottomH = canvasH - bandBottomY;
   if (borderBitmaps && borderBitmaps[0]) {
-    drawCoverIntoSlot(ctx, 0, 0, canvasW, borderH,
+    drawCoverIntoSlot(ctx, 0, 0, canvasW, borderTopH,
       borderBitmaps[0], borderBitmaps[0].width, borderBitmaps[0].height,
       t, makeKenburnsParams(0));
   }
   if (borderBitmaps && borderBitmaps[1]) {
-    drawCoverIntoSlot(ctx, 0, canvasH - borderH, canvasW, borderH,
+    drawCoverIntoSlot(ctx, 0, bandBottomY, canvasW, borderBottomH,
       borderBitmaps[1], borderBitmaps[1].width, borderBitmaps[1].height,
       t, makeKenburnsParams(1));
   }
@@ -1832,8 +1835,8 @@ function drawVideoBand(ctx, canvasW, canvasH, videoEl, srcW, srcH, borderBitmaps
   ctx.strokeStyle = 'rgba(255,255,255,0.18)';
   ctx.lineWidth = Math.max(1, Math.round(canvasH * 0.0015));
   ctx.beginPath();
-  ctx.moveTo(0, bandY);          ctx.lineTo(canvasW, bandY);
-  ctx.moveTo(0, bandY + bandH);  ctx.lineTo(canvasW, bandY + bandH);
+  ctx.moveTo(0, bandY);        ctx.lineTo(canvasW, bandY);
+  ctx.moveTo(0, bandBottomY);  ctx.lineTo(canvasW, bandBottomY);
   ctx.stroke();
   ctx.restore();
 }
@@ -2951,7 +2954,7 @@ function renderReview() {
   let kept = 0, dropped = 0, duplicatesMerged = 0, withFaces = 0, videos = 0;
   for (const g of groups) {
     const rep = pickBestOfGroup(g, prefOri);
-    for (const m of g) m.isRep = (m === rep);
+    // (m.isRep was removed — it was set on every member but never read.)
     if (rep.bad) dropped++; else kept++;
     duplicatesMerged += (g.length - 1);
     if (rep.hasFaces) withFaces++;
@@ -3178,10 +3181,8 @@ function stopAudition() {
     try { auditionAudio.removeAttribute('src'); auditionAudio.load(); } catch (_) {}
     auditionAudio = null;
   }
-  for (const id of ['catalogAudition', 'quickAudition']) {
-    const btn = document.getElementById(id);
-    if (btn) btn.textContent = '▶︎';
-  }
+  const btn = document.getElementById('catalogAudition');
+  if (btn) btn.textContent = '▶';
 }
 
 function bindCatalogAudition() {
@@ -3549,7 +3550,10 @@ async function onPreview() {
     dom.stageOverlay.classList.remove('hidden');
     // Bring the preview into view — the stage is now above settings, so
     // smooth-scroll to it and the user sees what's happening.
-    try { dom.stagePanel.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {}
+    // 'auto' (instant) — 'smooth' was racing with the preload-overlay
+    // → preview-start handoff and sometimes left the user halfway between
+    // panels.
+    try { dom.stagePanel.scrollIntoView({ behavior: 'auto', block: 'start' }); } catch (_) {}
     // Preview-quality disclaimer if memory budget kicked in.
     const itemCount = plan.timeline.filter(c => c.kind === 'photo' || c.kind === 'video').length;
     const note = document.getElementById('previewQualityNote');
