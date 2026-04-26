@@ -3927,10 +3927,18 @@ async function exportVideo(renderer, mixer, totalSec) {
   const chunks = [];
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
   const stopped = new Promise((res) => recorder.addEventListener('stop', res, { once: true }));
-  // No timeslice → ondataavailable fires once at stop(). iOS Safari still
-  // emits fragmented MP4 either way, but a single chunk avoids any chance
-  // of mid-recording fragments being concatenated with mismatched headers.
-  recorder.start();
+  // 1s timeslice — ondataavailable fires every second so chunks accumulate
+  // throughout the recording instead of buffering everything until stop().
+  // Two reasons to keep this:
+  //   (a) on long exports iOS Safari sometimes never fires the 'stop' event
+  //       once the in-memory buffer is huge — we'd hang on `await stopped`
+  //       forever and the user would be stuck at 100%. With timeslice we
+  //       already have ~all the data even if the final flush misbehaves.
+  //   (b) memory pressure stays bounded because each chunk is moved out of
+  //       the recorder's internal buffer on each tick.
+  // The duration patcher (patchMp4Durations) walks the moov tree on the
+  // concatenated buffer and works the same regardless of timeslice.
+  recorder.start(1000);
   // mixer.start() is async (it awaits ctx.resume() on iOS) — without this
   // await the BGM AudioBufferSource starts a few ms after the renderer's
   // first frame, so the very start of the track is clipped.
@@ -3938,10 +3946,22 @@ async function exportVideo(renderer, mixer, totalSec) {
   await renderer.play((p) => {
     showRenderProgress(p, `🎬 書き出し中… ${Math.round(p * 100)}% (${(p * totalSec).toFixed(1)} / ${totalSec.toFixed(1)}s)`);
   });
+  showRenderProgress(1, '🎬 ファイナライズ中…');
   // Give the recorder a moment to flush the final frame's data.
   await new Promise(r => setTimeout(r, 200));
-  recorder.stop();
-  await stopped;
+  // Force-flush the in-progress timeslice before stop() so the very last
+  // ~1s of frames isn't dropped on iOS (where the implicit flush at stop
+  // sometimes drops the partial buffer).
+  try { if (recorder.state === 'recording') recorder.requestData(); } catch (_) {}
+  try { recorder.stop(); } catch (_) {}
+  // Cap the wait on the 'stop' event. If iOS Safari's recorder doesn't
+  // dispatch it (long exports occasionally hang here), fall back to
+  // whatever chunks we already have.
+  await Promise.race([
+    stopped,
+    new Promise(r => setTimeout(r, 8000)),
+  ]);
+  if (!chunks.length) throw new Error('録画データが空です。長すぎる動画は端末メモリが不足している可能性があります。');
   const outputType = mime || (chunks[0] && chunks[0].type) || 'video/webm';
   let blob = new Blob(chunks, { type: outputType });
   chunks.length = 0;
@@ -3950,7 +3970,10 @@ async function exportVideo(renderer, mixer, totalSec) {
   // which iOS Photos misreads as "ライブブロードキャスト" + a 119,306時間
   // bogus runtime. Rewrite the duration fields in-place so the file
   // imports as a normal video (and Photos can extract a thumbnail).
-  if (outputType.includes('mp4')) {
+  // Skipped for very large blobs where blob.arrayBuffer() would peak at
+  // 2× the file size in RAM and might OOM iOS — the file still plays,
+  // just with the (cosmetic) bogus duration.
+  if (outputType.includes('mp4') && blob.size < 180 * 1024 * 1024) {
     try {
       const ab = await blob.arrayBuffer();
       if (patchMp4Durations(ab, totalSec)) {
