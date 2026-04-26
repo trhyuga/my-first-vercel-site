@@ -1490,17 +1490,32 @@ function mergeStackPairs(timeline, opts) {
 // land in the next sub-steps.
 // =============================================================================
 
+// Coarse mobile-device detector. Used to gate all the iOS-driven memory
+// throttles — desktop browsers have plenty of RAM and can decode the
+// whole timeline at full resolution without sliding-window or canvas
+// downscaling.
+function isMobileDevice() {
+  const ua = navigator.userAgent || '';
+  if (/iPhone|iPad|iPod|Android|Mobile|webOS|BlackBerry/i.test(ua)) return true;
+  // iPadOS 13+ reports as desktop Safari but exposes touch points.
+  if (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua)) return true;
+  // Low-RAM hint, where exposed.
+  if (typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 4) return true;
+  return false;
+}
+
 function canvasDimsFor(orientation, resolutionShortSide, mode, opts, itemCount) {
-  if (mode === 'preview') {
-    // Match canvas internal size to the bitmap budget so drawImage runs
-    // 1:1 (no upscale-blur). Falls from 540 → 170 long side as item count
-    // grows; on-screen <canvas> CSS-stretches to fit the stage panel.
+  if (mode === 'preview' && isMobileDevice()) {
+    // Mobile preview: small internal canvas matching the bitmap budget so
+    // drawImage runs 1:1 (no upscale-blur). On-screen <canvas>
+    // CSS-stretches to fit the stage panel.
     const longSide = getRenderBitmapMaxDim(opts || {}, 'preview', itemCount || 0);
     const shortSide = Math.round(longSide * 9 / 16);
     if (orientation === 'square') return [longSide, longSide];
     if (orientation === 'landscape') return [longSide, shortSide];
     return [shortSide, longSide]; // portrait
   }
+  // Desktop preview AND any mode's export — full canvas resolution.
   const r = parseInt(resolutionShortSide, 10) || 720;
   if (orientation === 'square') return [r, r];
   const long = Math.round(r * 16 / 9);
@@ -1563,9 +1578,16 @@ async function decodeBitmapForRender(ref, maxDim = 1600) {
 
 // Different working-set bitmap budget for preview vs export. Both modes
 // taper as item count grows so iOS Safari can hold the working set.
+// Desktop browsers bypass the throttle entirely (plenty of RAM).
 function getRenderBitmapMaxDim(opts, mode, itemCount) {
   const res = parseInt(opts && opts.resolution, 10) || 720;
   const canvasLong = Math.round(res * 16 / 9);
+  if (!isMobileDevice()) {
+    // Desktop: full quality regardless of count or mode. Slightly above
+    // canvas long side for ken-burns headroom; capped at 3200 so any
+    // pathological 100-MP source doesn't melt the GPU on draw.
+    return Math.min(3200, Math.round(canvasLong * 1.5));
+  }
   if (mode === 'export') {
     // Keep export quality high. The sliding-window keeps only ~5 photo
     // bitmaps decoded at any time, so we can afford big per-bitmap dims
@@ -1579,7 +1601,7 @@ function getRenderBitmapMaxDim(opts, mode, itemCount) {
     if (n <= 200) return Math.min(1800, Math.round(canvasLong * 0.95));
     return Math.min(1600, Math.round(canvasLong * 0.80));
   }
-  // Preview budget — sliding-window means peak RAM is O(window size), not
+  // Mobile preview — sliding-window means peak RAM is O(window size), not
   // O(item count), so we can afford bigger per-bitmap dims for low/medium
   // counts. Cap still tapers at very heavy loads for safety.
   const n = itemCount || 0;
@@ -1592,7 +1614,9 @@ function getRenderBitmapMaxDim(opts, mode, itemCount) {
 }
 
 function previewQualityReduced(opts, itemCount) {
-  // Banner threshold: below ~420 we say the preview is reduced.
+  // Banner threshold: below ~420 we say the preview is reduced. Desktop
+  // never trips it.
+  if (!isMobileDevice()) return false;
   return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 420;
 }
 
@@ -1712,7 +1736,11 @@ async function preloadAssets(plan, opts, mode, onProgress) {
     tick();
   }
   // Phase 2: prime first N photos; rest pending.
-  const primeMax = (mode === 'export') ? PHOTO_PRIME_EXPORT : PHOTO_PRIME_PREVIEW;
+  // Desktop has plenty of RAM — prime every photo upfront so the renderer
+  // never has to lazy-decode. Mobile uses the sliding-window primer.
+  const primeMax = !isMobileDevice() ? Infinity
+    : (mode === 'export') ? PHOTO_PRIME_EXPORT
+    : PHOTO_PRIME_PREVIEW;
   let primedPhotos = 0;
   for (const clip of plan.timeline) {
     if (clip.kind !== 'photo') continue;
@@ -2316,6 +2344,8 @@ class Renderer {
   // of warning — plenty for MediaRecorder to never see a placeholder.
   ensureWindow(activeIdxs) {
     if (!this.assets || !activeIdxs.length) return;
+    // Desktop primed everything in preloadAssets; nothing to slide.
+    if (!isMobileDevice()) return;
     const LOOK_AHEAD  = (this.mode === 'export') ? 5 : 3;
     const LOOK_BEHIND = 0;
     const FREE_AFTER  = (this.mode === 'export') ? 1 : 2;
