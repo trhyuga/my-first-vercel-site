@@ -2706,7 +2706,7 @@ let activeRenderer = null;
 // =============================================================================
 
 const VIDEO_DUCK_LEVEL = 1.00;     // no ducking — BGM plays full volume even during video clips
-const VIDEO_CLIP_GAIN  = 2.00;     // ~+6dB; iPhone video audio is normally quieter than music — boost so it cuts through BGM without forcing BGM down
+const VIDEO_CLIP_GAIN  = 2.50;     // ~+8dB; iPhone video audio is normally quieter than music — boost so it cuts through BGM without forcing BGM down
 const DUCK_RAMP_SEC = 0.30;
 const UNDUCK_RAMP_SEC = 0.40;
 
