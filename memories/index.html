@@ -56,11 +56,6 @@
       </div>
       <p class="hint" id="previewQualityNote" style="display:none; text-align:center;">⚠️ 端末メモリ節約のため <b>プレビューは画質を落としています</b>。書き出しは元解像度で出力します。</p>
       <p class="hint" style="text-align:center; margin-top:0.3rem;">↓ 下の「設定」を変えて <b>「▶️ プレビュー」</b> をもう一度押せば反映されます。納得したら <b>「🎬 動画を書き出す」</b>。</p>
-      <div class="progress-block" id="renderProg" style="display:none;">
-        <span id="renderProgText">書き出し中…</span>
-        <div class="progress-bar"><span id="renderProgBar" style="width:0%"></span></div>
-      </div>
-      <div id="output"></div>
     </section>
 
     <section class="panel" id="settingsPanel" style="display:none;">
@@ -161,6 +156,12 @@
         <button class="btn-secondary" id="previewBtn">▶️ プレビュー</button>
         <button class="btn-primary" id="exportBtn">🎬 動画を書き出す</button>
       </div>
+
+      <div class="progress-block" id="renderProg" style="display:none;">
+        <span id="renderProgText">書き出し中…</span>
+        <div class="progress-bar"><span id="renderProgBar" style="width:0%"></span></div>
+      </div>
+      <div id="output"></div>
     </section>
 
     <section class="footer-note">

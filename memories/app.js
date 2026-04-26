@@ -3742,6 +3742,7 @@ function showOutput(blob) {
   dom.output.innerHTML = '';
   const url = URL.createObjectURL(blob);
   const isMp4 = (blob.type || '').includes('mp4');
+  const filename = `memories.${isMp4 ? 'mp4' : 'webm'}`;
 
   const wrap = document.createElement('div');
   wrap.className = 'alert success';
@@ -3754,17 +3755,51 @@ function showOutput(blob) {
   video.playsInline = true;
   dom.output.appendChild(video);
 
+  const btnRow = document.createElement('div');
+  btnRow.className = 'btn-row';
+  btnRow.style.marginTop = '0.6rem';
+
+  // iOS / mobile: prefer the Web Share API so the system share sheet
+  // appears and the user can pick "ビデオを保存" → goes straight into
+  // the Photos app without the Files-→-share dance.
+  const file = (typeof File === 'function')
+    ? new File([blob], filename, { type: blob.type })
+    : null;
+  const canShareFile = !!(navigator.canShare && file && navigator.canShare({ files: [file] }));
+  if (canShareFile) {
+    const shareBtn = document.createElement('button');
+    shareBtn.type = 'button';
+    shareBtn.className = 'btn-primary';
+    shareBtn.textContent = '📱 写真に保存 / 共有';
+    shareBtn.addEventListener('click', async () => {
+      try {
+        await navigator.share({ files: [file], title: filename });
+      } catch (e) {
+        if (e && e.name !== 'AbortError') {
+          console.warn('share failed', e);
+          alert('共有に失敗しました: ' + (e.message || e));
+        }
+      }
+    });
+    btnRow.appendChild(shareBtn);
+  }
+
   const a = document.createElement('a');
   a.href = url;
-  a.download = `memories.${isMp4 ? 'mp4' : 'webm'}`;
-  a.className = 'download-link';
-  a.textContent = `📥 ダウンロード (.${isMp4 ? 'mp4' : 'webm'})`;
-  dom.output.appendChild(a);
+  a.download = filename;
+  a.className = canShareFile ? 'btn-secondary download-link' : 'download-link';
+  a.textContent = canShareFile
+    ? `📥 ファイル保存`
+    : `📥 ダウンロード (.${isMp4 ? 'mp4' : 'webm'})`;
+  btnRow.appendChild(a);
+  dom.output.appendChild(btnRow);
 
   const hint = document.createElement('p');
   hint.className = 'hint';
-  if (isMp4) {
-    hint.innerHTML = '📱 <b>iPhone</b>: ダウンロードして Files / 「ファイル」アプリで開き、共有 → 「ビデオを保存」で写真アプリに追加できます。';
+  if (canShareFile) {
+    hint.innerHTML = '📱 <b>「写真に保存 / 共有」</b> を押すと共有メニューが出るので「ビデオを保存」を選ぶと iOS 写真アプリに直接追加されます。';
+  } else if (isMp4) {
+    hint.innerHTML = '📥 ダウンロードした MP4 はそのまま動画プレイヤーで再生できます。iPhone でこのページを開いている場合は「写真に保存 / 共有」ボタンが出ます。';
   } else {
     hint.innerHTML = '⚠️ MP4書き出しに対応していない端末でした。WebMはPC・Androidの動画プレイヤーで再生できます。iPhone「写真」に入れたい場合は別端末でMP4化してください。';
   }
@@ -3809,13 +3844,18 @@ async function onExport() {
       dom.stageStatus.textContent = `🖼 ${Math.round(p * 100)}% 読込中…`;
     });
 
-    dom.stageOverlay.classList.add('hidden');
     dom.exportBtn.textContent = '🎬 書き出し中…';
     showRenderProgress(0, '🎬 0% (0.0 / ' + plan.totalSec.toFixed(1) + 's)');
+    // Hide the live preview during export — the canvas is still drawn (the
+    // MediaRecorder needs frames) but pulling it out of the layout means
+    // the GPU isn't compositing it to screen and the user isn't watching
+    // a duplicate playback. Reduces visual / GPU pressure on iOS.
+    dom.stagePanel.style.display = 'none';
     const blob = await exportVideo(renderer, mixer, plan.totalSec);
     hideRenderProgress();
     showOutput(blob);
-    dom.stageStatus.textContent = '✅ 書き出し完了';
+    // Scroll the output into view since the stage panel just collapsed.
+    try { dom.output.scrollIntoView({ behavior: 'auto', block: 'center' }); } catch (_) {}
   } catch (e) {
     console.error(e);
     hideRenderProgress();
