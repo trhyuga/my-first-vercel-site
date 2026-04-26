@@ -1567,16 +1567,17 @@ function getRenderBitmapMaxDim(opts, mode, itemCount) {
   const res = parseInt(opts && opts.resolution, 10) || 720;
   const canvasLong = Math.round(res * 16 / 9);
   if (mode === 'export') {
-    // Export aims for crisp output but a 90-item all-resident pool at 2000+
-    // px each blew past iOS RAM. Taper now that sliding-window keeps the
-    // pool bounded — quality stays high for ≤25 photo videos and gracefully
-    // degrades on extreme uploads.
+    // Keep export quality high. The sliding-window keeps only ~5 photo
+    // bitmaps decoded at any time, so we can afford big per-bitmap dims
+    // even on heavy uploads. HEIC inputs are already capped at 1800 by
+    // the heic2any downsample so the upper limits matter mainly for
+    // non-HEIC sources.
     const n = itemCount || 0;
-    if (n <=  25) return Math.min(2400, Math.round(canvasLong * 1.40));
-    if (n <=  50) return Math.min(2000, Math.round(canvasLong * 1.20));
-    if (n <=  90) return Math.min(1600, Math.round(canvasLong * 0.95));
-    if (n <= 150) return Math.min(1200, Math.round(canvasLong * 0.75));
-    return Math.min(960, Math.round(canvasLong * 0.55));
+    if (n <=  30) return Math.min(2400, Math.round(canvasLong * 1.40));
+    if (n <=  60) return Math.min(2200, Math.round(canvasLong * 1.25));
+    if (n <= 100) return Math.min(2000, Math.round(canvasLong * 1.10));
+    if (n <= 200) return Math.min(1800, Math.round(canvasLong * 0.95));
+    return Math.min(1600, Math.round(canvasLong * 0.80));
   }
   // Preview budget — sliding-window means peak RAM is O(window size), not
   // O(item count), so we can afford bigger per-bitmap dims for low/medium
@@ -1689,7 +1690,7 @@ function freeDecodedAsset(asset) {
 //             look-ahead in export so MediaRecorder never sees a
 //             "loading…" placeholder.
 const PHOTO_PRIME_PREVIEW = 4;
-const PHOTO_PRIME_EXPORT  = 8;
+const PHOTO_PRIME_EXPORT  = 5;  // matches export LOOK_AHEAD; keeps initial decode spike bounded
 async function preloadAssets(plan, opts, mode, onProgress) {
   const itemCount = plan.timeline.filter(c => c.kind === 'photo' || c.kind === 'video').length;
   const maxDim = getRenderBitmapMaxDim(opts, mode, itemCount);
@@ -2307,10 +2308,17 @@ class Renderer {
   // are decoded and clips outside are freed. Videos are excluded from the
   // window logic entirely — they're primed once at preload and stay
   // resident (re-warming on iOS is too slow). Called once per renderFrame.
+  //
+  // Export uses bigger bitmaps (up to 2400 px), so we tighten the window
+  // (smaller LOOK_AHEAD + immediate FREE_AFTER) to keep the working pool
+  // around ~5-6 bitmaps regardless of timeline length. Decode is fast
+  // (~100-300 ms per photo), so look-ahead 5 with ~3 s/clip gives ~15 s
+  // of warning — plenty for MediaRecorder to never see a placeholder.
   ensureWindow(activeIdxs) {
     if (!this.assets || !activeIdxs.length) return;
-    const LOOK_AHEAD = (this.mode === 'export') ? 8 : 3;
-    const LOOK_BEHIND = 1, FREE_AFTER = 2;
+    const LOOK_AHEAD  = (this.mode === 'export') ? 5 : 3;
+    const LOOK_BEHIND = 0;
+    const FREE_AFTER  = (this.mode === 'export') ? 1 : 2;
     const minA = Math.min(...activeIdxs);
     const maxA = Math.max(...activeIdxs);
     const keepFrom = Math.max(0, minA - LOOK_BEHIND);
