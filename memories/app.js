@@ -592,20 +592,22 @@ async function processImage(file) {
 
   const badReason = rejectionReason({ blurScore, lumaMean, lumaVar });
   const bad = !!badReason;
-  // Photos that won't make the cut don't need the full-size object URL kept
-  // around for the renderer — release it immediately to free RAM.
-  if (bad) {
-    try { URL.revokeObjectURL(url); } catch (_) {}
-  }
+  // Analysis is done — release the blob URL we created for the <img>.
+  // For photos the renderer reads decodedBlob directly (createImageBitmap),
+  // so this URL is never used downstream and only inflates the per-photo
+  // RAM footprint by holding the decoded blob alive twice.
+  try { URL.revokeObjectURL(url); } catch (_) {}
 
   return {
     id: nextId(),
-    file,
     sourceName: file.name,
     mime: decoded.type || file.type,
     kind: 'photo',
-    decodedBlob: decoded,
-    objectUrl: bad ? null : url,
+    // decodedBlob is what the renderer hands to createImageBitmap. The
+    // original `file` field used to be retained here too, but for HEIC
+    // uploads that meant carrying the full 5-10 MB original alongside the
+    // downsampled JPEG — 100 HEIC photos was ~700 MB and OOMed iOS.
+    decodedBlob: bad ? null : decoded,
     width: w,
     height: h,
     orientation,
@@ -680,11 +682,13 @@ async function processVideo(file) {
 
   return {
     id: nextId(),
-    file,
     sourceName: file.name,
     mime: file.type || 'video/mp4',
     kind: 'video',
-    decodedBlob: file,
+    // For videos decodedBlob and objectUrl reference the same underlying
+    // file — decodedBlob is read by the bitmap-based border layout, the
+    // URL is what feeds <video src> for actual playback.
+    decodedBlob: bad ? null : file,
     objectUrl: bad ? null : url,
     width: w,
     height: h,
@@ -1594,7 +1598,7 @@ function easeInOut(t) { return t * t * (3 - 2 * t); }
 // during preview. Preview uses a smaller cap than export so iOS Safari
 // can hold the working set in RAM; export re-decodes at full size.
 async function decodeBitmapForRender(ref, maxDim = 1600) {
-  const src = ref.decodedBlob || ref.file;
+  const src = ref.decodedBlob;
   const w = ref.width || 0, h = ref.height || 0;
   if (w && h && (w > maxDim || h > maxDim)) {
     const scale = maxDim / Math.max(w, h);
