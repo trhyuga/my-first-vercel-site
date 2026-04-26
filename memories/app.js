@@ -1570,23 +1570,23 @@ function getRenderBitmapMaxDim(opts, mode, itemCount) {
   if (mode === 'export') {
     return Math.min(2400, Math.round(canvasLong * 1.4));
   }
-  // Preview: drops fast as the upload grows. Each bitmap is ~ (dim/1000)^2 ×
-  // 4MB raw, so a 100-item set at 200 long side is ~16 MB total — comfortably
-  // inside iOS Safari's ceiling even with video element decoders alongside.
+  // Preview budget. With sliding-window preload + HEIC downsample, only
+  // ~6 bitmaps live in memory at once regardless of item count, so we can
+  // afford bigger per-bitmap dims for low/medium counts. The cap still
+  // tapers at very heavy loads as a safety net (videos / mixer / mp4box
+  // also consume RAM).
   const n = itemCount || 0;
-  if (n <=   8) return 540;
-  if (n <=  20) return 432;
-  if (n <=  40) return 340;
-  if (n <=  80) return 260;
-  if (n <= 120) return 200;
-  return 170;
+  if (n <=  10) return 900;
+  if (n <=  25) return 720;
+  if (n <=  50) return 540;
+  if (n <=  90) return 420;
+  if (n <= 150) return 320;
+  return 260;
 }
 
 function previewQualityReduced(opts, itemCount) {
-  // Only flag when the cap drops far enough to be visibly chunky. Below
-  // ~360 long side the preview noticeably softens; above that it's still
-  // crisp on a phone screen and the banner just adds noise.
-  return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 360;
+  // Banner threshold: below ~420 we say the preview is reduced.
+  return getRenderBitmapMaxDim(opts, 'preview', itemCount) < 420;
 }
 
 // Decode one clip's render assets (photo bitmap / stack-pair bitmaps / video
@@ -2097,8 +2097,8 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   // Auto-fit title — shrink, then fall through to 2-line wrap for very long
   // titles. maxW reserves ~7% margin on each side so the text doesn't kiss
   // the canvas edge.
-  const idealSize = Math.max(48, Math.round(h * 0.078));
-  const minSize   = Math.max(28, Math.round(h * 0.044));
+  const idealSize = Math.max(16, Math.round(h * 0.062));
+  const minSize   = Math.max(14, Math.round(h * 0.038));
   const maxW = w * 0.80;
   const fit = fitOrWrapTitle(ctx, clip.title || '', '800', titleFontStack(), maxW, idealSize, minSize);
   ctx.font = `800 ${fit.size}px ${titleFontStack()}`;
@@ -2117,8 +2117,8 @@ function drawTitleCard(ctx, w, h, clip, localT) {
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
   ctx.fillRect(w / 2 - accentW / 2, h * 0.50 + h * 0.002, accentW, Math.max(1, Math.round(h * 0.0015)));
   if (clip.subtitle) {
-    const subIdeal = Math.max(20, Math.round(h * 0.028));
-    const subMin   = Math.max(14, Math.round(h * 0.020));
+    const subIdeal = Math.max(14, Math.round(h * 0.024));
+    const subMin   = Math.max(12, Math.round(h * 0.018));
     const subFit = fitOrWrapTitle(ctx, clip.subtitle, '400', fontStack(), w * 0.86, subIdeal, subMin);
     ctx.font = `400 ${subFit.size}px ${fontStack()}`;
     ctx.fillStyle = '#cbd5e1';
@@ -2146,8 +2146,8 @@ function drawCloserCard(ctx, w, h, clip, localT) {
   const maxW = w * 0.80;
 
   // Top line — small caption (auto-fits / wraps within frame)
-  const captionIdeal = Math.max(20, Math.round(h * 0.028));
-  const captionMin   = Math.max(14, Math.round(h * 0.020));
+  const captionIdeal = Math.max(14, Math.round(h * 0.024));
+  const captionMin   = Math.max(12, Math.round(h * 0.018));
   const captionFit = fitOrWrapTitle(ctx, clip.title || '', '400', fontStack(), maxW, captionIdeal, captionMin);
   ctx.font = `400 ${captionFit.size}px ${fontStack()}`;
   ctx.fillStyle = '#cbd5e1';
@@ -2160,8 +2160,8 @@ function drawCloserCard(ctx, w, h, clip, localT) {
   }
 
   // Bottom line — main title ("Memories" or override)
-  const titleIdeal = Math.max(36, Math.round(h * 0.05));
-  const titleMin   = Math.max(22, Math.round(h * 0.034));
+  const titleIdeal = Math.max(16, Math.round(h * 0.044));
+  const titleMin   = Math.max(14, Math.round(h * 0.030));
   const titleFit = fitOrWrapTitle(ctx, clip.subtitle || 'Memories', '700', titleFontStack(), maxW, titleIdeal, titleMin);
   ctx.font = `700 ${titleFit.size}px ${titleFontStack()}`;
   ctx.fillStyle = '#fff';
@@ -2205,7 +2205,7 @@ function drawOverlay(ctx, w, h, ovl, localT) {
   if (alpha <= 0) return;
 
   const text = ovl.text || '';
-  const fontSize = Math.max(20, Math.round(h * 0.032));
+  const fontSize = Math.max(13, Math.round(h * 0.028));
   ctx.save();
   ctx.globalAlpha *= alpha;
   ctx.font = `700 ${fontSize}px ${fontStack()}`;
