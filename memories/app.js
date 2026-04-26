@@ -2874,7 +2874,7 @@ class SynthSource {
 }
 
 class AudioMixer {
-  constructor(externalCtx) {
+  constructor(externalCtx, mode = 'preview') {
     if (externalCtx) {
       this.ctx = externalCtx;
       this.ownsCtx = false;
@@ -2884,6 +2884,11 @@ class AudioMixer {
       this.ownsCtx = true;
     }
     this.dest = this.ctx.createMediaStreamDestination(); // for MediaRecorder
+    // Export mode is a "silent recording": BGM + video audio still go to
+    // the MediaStreamDestination so MediaRecorder captures them in the
+    // file, but they don't go to ctx.destination so the user doesn't hear
+    // a doubled-up playback while writing.
+    this.silentSpeakers = (mode === 'export');
     this.bgmBuffer = null;
     this.bgmSource = null;
     this.bgmGain = null;
@@ -2910,7 +2915,7 @@ class AudioMixer {
       this.synth = new SynthSource(this.ctx, source.preset, totalSec);
       this.bgmGain = this.synth.output;
       this.bgmGain.connect(this.dest);
-      this.bgmGain.connect(this.ctx.destination);
+      if (!this.silentSpeakers) this.bgmGain.connect(this.ctx.destination);
       this.bgmFadeOutAtSec = null; // SynthSource handles its own envelope
       return;
     }
@@ -2934,7 +2939,7 @@ class AudioMixer {
     const gain = this.ctx.createGain();
     gain.gain.value = 1.0;
     gain.connect(this.dest);
-    gain.connect(this.ctx.destination);
+    if (!this.silentSpeakers) gain.connect(this.ctx.destination);
     this.bgmGain = gain;
     // Fade against the SHORTER of the timeline length and the BGM track's
     // actual duration. BufferSource doesn't loop and fading after the
@@ -2955,7 +2960,7 @@ class AudioMixer {
     gain.gain.value = 0;
     src.connect(gain);
     gain.connect(this.dest);
-    gain.connect(this.ctx.destination);
+    if (!this.silentSpeakers) gain.connect(this.ctx.destination);
     videoEl.muted = false; // routed through Web Audio now
     this.videoGains.set(clipId, gain);
   }
@@ -3572,7 +3577,7 @@ async function setupRendererForPlay(opts, plan, audioCtx, mode = 'preview') {
   // synchronously inside the click handler.
   let mixer = null;
   try {
-    mixer = new AudioMixer(audioCtx);
+    mixer = new AudioMixer(audioCtx, mode);
     const bgmSrc = await resolveBgmSource();
     if (bgmSrc) {
       try {
@@ -3631,12 +3636,24 @@ async function exportVideo(renderer, mixer, totalSec) {
       stream.addTrack(track);
     }
   }
+  // Bitrate scales DOWN for longer videos so the in-memory chunks array
+  // can't pile up past ~150 MB before MediaRecorder.stop() flushes (which
+  // is what was OOMing iOS Safari on 60+ second exports). Quality stays
+  // visually fine since memory videos rarely have action that needs high
+  // bitrate. Calibration: ~5 MB/s × duration → cap chunk pool at ~150 MB.
+  let videoBitsPerSecond;
+  if (totalSec <=  30) videoBitsPerSecond = 5_500_000;
+  else if (totalSec <=  60) videoBitsPerSecond = 4_500_000;
+  else if (totalSec <= 120) videoBitsPerSecond = 3_500_000;
+  else if (totalSec <= 240) videoBitsPerSecond = 2_500_000;
+  else                       videoBitsPerSecond = 2_000_000;
   const mime = pickRecorderMime();
   let recorder;
   try {
     recorder = new MediaRecorder(stream, mime ? {
       mimeType: mime,
-      videoBitsPerSecond: 5_000_000,
+      videoBitsPerSecond,
+      audioBitsPerSecond: 128_000,
     } : undefined);
   } catch (e) {
     throw new Error('この端末は動画書き出しに対応していません: ' + (e.message || e));
@@ -3644,7 +3661,10 @@ async function exportVideo(renderer, mixer, totalSec) {
   const chunks = [];
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
   const stopped = new Promise((res) => recorder.addEventListener('stop', res, { once: true }));
-  recorder.start(1000);
+  // 250ms timeslice — fires ondataavailable 4×/sec so chunks become
+  // shorter and the array grows in finer increments. Helps GC pressure
+  // on iOS where the running buffer would otherwise sit in one big slot.
+  recorder.start(250);
   if (mixer) mixer.start();
   await renderer.play((p) => {
     showRenderProgress(p, `🎬 書き出し中… ${Math.round(p * 100)}% (${(p * totalSec).toFixed(1)} / ${totalSec.toFixed(1)}s)`);
