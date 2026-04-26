@@ -2219,19 +2219,18 @@ function drawTitleCard(ctx, w, h, clip, localT, posterAsset = null) {
   } else {
     drawCardBackground(ctx, w, h);
   }
-  // No fade-in — title text is at full opacity from t=0 so frame 0 of the
-  // recorded video shows photo+title together. iOS Photos thumbnails frame
-  // 0; if that frame is text-less, the saved file's poster looks like a
-  // generic photo with no context. Fade-out at the tail still happens so
-  // the transition into the first body clip is smooth.
-  const fadeOut = 1.0;
+  // Title — full opacity from t=0 (so frame 0 / the iOS Photos thumbnail
+  // already shows it), then a 1.2s fade-out at the tail. Subtitle gets a
+  // separate 0.8s fade-in below so it appears AFTER the title is on screen.
+  const titleFadeOut = 1.2;
   const dur = clip.durationSec;
-  let alpha;
-  if (localT > dur - fadeOut) alpha = Math.max(0, (dur - localT) / fadeOut);
-  else alpha = 1;
+  let titleAlpha = 1;
+  if (localT > dur - titleFadeOut) {
+    titleAlpha = Math.max(0, (dur - localT) / titleFadeOut);
+  }
 
   ctx.save();
-  ctx.globalAlpha *= Math.max(0, Math.min(1, alpha));
+  ctx.globalAlpha *= titleAlpha;
   ctx.textAlign = 'center';
   ctx.fillStyle = '#fff';
   // Photo backdrop wants a darker drop shadow (vs the white-glow used on
@@ -2262,13 +2261,14 @@ function drawTitleCard(ctx, w, h, clip, localT, posterAsset = null) {
   ctx.fillStyle = usedPhoto ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.55)';
   ctx.fillRect(w / 2 - accentW / 2, h * 0.50 + h * 0.002, accentW, Math.max(1, Math.round(h * 0.0015)));
   if (clip.subtitle) {
-    // Subtitle keeps a short fade-in (~0.6s) — the main title is already
-    // visible at frame 0 for the thumbnail, but adding a delayed reveal on
-    // the subtitle gives the title card some on-screen motion when played.
-    const subFadeIn = 0.6;
-    const subAlpha = Math.min(1, Math.max(0, localT / subFadeIn));
+    // Subtitle has its own fade-in (0.8s) layered on top of the shared
+    // titleAlpha tail-fade. Combined: globalAlpha = outer × titleAlpha ×
+    // subFadeInAlpha, so the subtitle eases in over the first 0.8s and
+    // fades out together with the title in the last 1.2s.
+    const subFadeIn = 0.8;
+    const subFadeInAlpha = Math.max(0, Math.min(1, localT / subFadeIn));
     ctx.save();
-    ctx.globalAlpha *= subAlpha;
+    ctx.globalAlpha *= subFadeInAlpha;
     const subIdeal = Math.max(14, Math.round(h * 0.024));
     const subMin   = Math.max(12, Math.round(h * 0.018));
     const subFit = fitOrWrapTitle(ctx, clip.subtitle, '400', fontStack(), w * 0.86, subIdeal, subMin);
