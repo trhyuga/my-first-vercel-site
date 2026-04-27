@@ -151,8 +151,8 @@
       <div class="field">
         <label>余白</label>
         <select id="margin">
-          <option value="0">なし</option>
-          <option value="10" selected>少なめ (10mm)</option>
+          <option value="0" selected>なし</option>
+          <option value="10">少なめ (10mm)</option>
           <option value="20">標準 (20mm)</option>
           <option value="30">広め (30mm)</option>
         </select>
@@ -443,10 +443,27 @@
         document.head.appendChild(s);
       });
     }
+    // Try a sequence of CDNs / versions until one loads. docs.opencv.org has
+    // been intermittently 502'ing on the 4.5.0 path (which is what the user
+    // hit); the 4.10.0 build from the same host is healthier, and the
+    // jsdelivr-hosted @techstark mirror is a final fallback. All three expose
+    // a global `cv` so the rest of the pipeline doesn't change.
+    async function loadScriptWithFallbacks(urls) {
+      let lastErr = null;
+      for (const url of urls) {
+        try { await loadScript(url); return; }
+        catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('all script URLs failed');
+    }
     async function ensureCv() {
       if (cvReady) return cvReady;
       cvReady = (async () => {
-        await loadScript('https://docs.opencv.org/4.5.0/opencv.js');
+        await loadScriptWithFallbacks([
+          'https://docs.opencv.org/4.10.0/opencv.js',
+          'https://docs.opencv.org/4.5.0/opencv.js',
+          'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js',
+        ]);
         // OpenCV.js may expose `cv` as a Promise-like that resolves on init,
         // or already-initialized. Wait for cv.Mat to be available either way.
         await new Promise((res) => {
