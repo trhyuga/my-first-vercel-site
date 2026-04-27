@@ -456,6 +456,9 @@
     function showProgress(pct, label) {
       if (!progressWrap) return;
       progressWrap.style.display = '';
+      // Clamp to 0-100. Compressed (gzip / brotli) responses report a
+      // Content-Length smaller than the bytes the reader yields, so the
+      // raw ratio can overshoot — we saw "341%" on iOS over 4G.
       progressBar.style.width = Math.max(0, Math.min(100, Math.round(pct * 100))) + '%';
       if (label != null) progressLabel.textContent = label;
     }
@@ -463,40 +466,33 @@
       if (!progressWrap) return;
       progressWrap.style.display = 'none';
     }
-    // Fetch a script with byte-level progress, then execute it via a Blob URL.
-    // Lets the user see download progress for the ~9MB opencv.js bundle
-    // instead of staring at a frozen "準備中..." label. Falls back to plain
-    // <script src> for URLs whose CORS / bytestream we can't read (some
-    // origins disallow ReadableStream over HTTP/2).
-    async function fetchScriptWithProgress(url, onProgress) {
+    // Pre-download the opencv.js bytes only to drive the progress bar — the
+    // actual `cv` global is then loaded via a normal <script src=URL> tag,
+    // which the browser serves from cache (same URL + headers) without a
+    // second roundtrip. Why this dance: OpenCV.js is an Emscripten module
+    // whose WASM payload (opencv_js.wasm) is fetched RELATIVE to the
+    // script's URL. Injecting it as a Blob URL puts the script at
+    // blob:.../<uuid>, so the WASM resolves to blob:.../<uuid>/opencv_js.wasm
+    // → 404 → cv.onRuntimeInitialized never fires → the bar sits at 100%
+    // and the user is stuck (exact symptom we hit on iOS 4G).
+    async function downloadForProgress(url, onProgress) {
       const res = await fetch(url, { mode: 'cors' });
       if (!res.ok) throw new Error('fetch failed ' + res.status + ' ' + url);
       const total = parseInt(res.headers.get('Content-Length'), 10) || 0;
       const reader = res.body && res.body.getReader ? res.body.getReader() : null;
       if (!reader) {
-        // No streaming reader → just await as a blob, no per-chunk progress.
-        const blob = await res.blob();
+        await res.arrayBuffer();
         if (onProgress) onProgress(1);
-        const blobUrl = URL.createObjectURL(blob);
-        try { await loadScript(blobUrl); }
-        finally { URL.revokeObjectURL(blobUrl); }
         return;
       }
-      const chunks = [];
       let received = 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        chunks.push(value);
         received += value.byteLength;
-        if (onProgress) onProgress(total > 0 ? received / total : 0);
+        if (onProgress && total > 0) onProgress(Math.min(1, received / total));
       }
-      const all = new Uint8Array(received);
-      let off = 0;
-      for (const c of chunks) { all.set(c, off); off += c.byteLength; }
-      const blobUrl = URL.createObjectURL(new Blob([all], { type: 'application/javascript' }));
-      try { await loadScript(blobUrl); }
-      finally { URL.revokeObjectURL(blobUrl); }
+      if (onProgress) onProgress(1);
     }
     // Try a sequence of URLs until one loads. CDN-first per user direction;
     // ./opencv.js is the local mirror — same-origin, used as last-resort
@@ -513,12 +509,12 @@
       let lastErr = null;
       for (const url of urls) {
         try {
-          await fetchScriptWithProgress(url, onProgress);
+          await downloadForProgress(url, onProgress);
+          await loadScript(url);             // browser cache hit from the fetch above
           return;
         } catch (e) {
           lastErr = e;
-          // Reset bar for the next attempt so the user sees "trying again".
-          if (onProgress) onProgress(0);
+          if (onProgress) onProgress(0);     // reset bar before the next URL
         }
       }
       throw lastErr || new Error('all opencv.js URLs failed');
@@ -527,22 +523,34 @@
       if (cvReady) return cvReady;
       cvReady = (async () => {
         await loadCvScript(onProgress);
+        // After bytes finish downloading the WASM still has to compile +
+        // boot — that takes a few seconds on a phone. Surface it explicitly
+        // so the user doesn't think the bar is stuck.
+        if (onProgress) onProgress(1);
+        if (progressLabel) progressLabel.textContent = '画像処理エンジンを初期化中…';
         // OpenCV.js may expose `cv` as a Promise-like that resolves on init,
         // or already-initialized. Wait for cv.Mat to be available either way.
-        await new Promise((res) => {
-          if (typeof cv !== 'undefined' && cv.Mat) return res();
-          if (typeof cv !== 'undefined' && typeof cv.then === 'function') {
-            cv.then(res); return;
-          }
-          if (typeof cv !== 'undefined') {
-            cv['onRuntimeInitialized'] = res;
-            return;
-          }
-          // Last resort: poll
-          const t = setInterval(() => {
-            if (typeof cv !== 'undefined' && cv.Mat) { clearInterval(t); res(); }
-          }, 80);
-        });
+        // 60s watchdog so a wedged init surfaces an error rather than
+        // hanging the UI forever.
+        await Promise.race([
+          new Promise((res, rej) => {
+            if (typeof cv !== 'undefined' && cv.Mat) return res();
+            if (typeof cv !== 'undefined' && typeof cv.then === 'function') {
+              cv.then(res, rej); return;
+            }
+            if (typeof cv !== 'undefined') {
+              cv['onRuntimeInitialized'] = res;
+              return;
+            }
+            const t = setInterval(() => {
+              if (typeof cv !== 'undefined' && cv.Mat) { clearInterval(t); res(); }
+            }, 80);
+          }),
+          new Promise((_, rej) => setTimeout(
+            () => rej(new Error('OpenCV initialization timed out (60s)')),
+            60000
+          )),
+        ]);
         if (typeof jscanify === 'undefined') {
           await loadScript('https://cdn.jsdelivr.net/npm/jscanify@1.2.0/dist/jscanify.min.js');
         }
