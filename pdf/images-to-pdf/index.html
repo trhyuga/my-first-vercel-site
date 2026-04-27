@@ -229,6 +229,18 @@
         wrap.className = 'thumb';
         const img = new Image();
         img.src = im.dataUrl;
+        // Override the shared.css default of aspect-ratio: 3/4 (portrait
+        // box) once the image has loaded so landscape rectified output
+        // — selected via "A4 横" or auto-detected after a manual 90°
+        // rotation — actually fills the thumbnail instead of leaving
+        // huge bands of white above and below.
+        img.addEventListener('load', () => {
+          const w = img.naturalWidth, h = img.naturalHeight;
+          if (!w || !h) return;
+          if (w > h * 1.10)      wrap.style.aspectRatio = '4 / 3';
+          else if (h > w * 1.10) wrap.style.aspectRatio = '3 / 4';
+          else                   wrap.style.aspectRatio = '1 / 1';
+        }, { once: true });
         wrap.appendChild(img);
         const num = document.createElement('div');
         num.className = 'num'; num.textContent = i + 1;
@@ -729,9 +741,16 @@
 
     // Returns null when no paper was detected, otherwise
     //   { canvas: <HTMLCanvasElement>, corners: {tl,tr,bl,br} }.
-    // Caller uses canvas as the rectified result and corners to render the
-    // debug overlay if the user wants to verify the detection.
-    function rectifyWithJscanify(imgEl) {
+    // orientationHint:
+    //   'landscape' — force A4 landscape output (1754×1240).
+    //   'portrait'  — force A4 portrait output  (1240×1754).
+    //   'auto'      — pick from the source quad: paper wider than tall
+    //                 in the photo → landscape, else portrait.
+    // The hint is what lets the page-size selector (A4 横 / A4 縦) drive
+    // the output orientation, and what makes the thumbnail flip to
+    // landscape after the user manually rotates 90° in the editor (the
+    // rotated dataUrl has a landscape paper quad → auto picks landscape).
+    function rectifyWithJscanify(imgEl, orientationHint = 'auto') {
       let src = null, contour = null;
       try {
         const scanner = new jscanify();
@@ -768,7 +787,9 @@
         // the quad, which then printed at the wrong size on A4 paper.
         const A4_LONG = 1754;
         const A4_SHORT = 1240;
-        const isLandscape = w > h;
+        const isLandscape = orientationHint === 'landscape' ? true
+                          : orientationHint === 'portrait'  ? false
+                          : (w > h);
         const outW = isLandscape ? A4_LONG : A4_SHORT;
         const outH = isLandscape ? A4_SHORT : A4_LONG;
         // jscanify's contour detection tends to fall a few pixels INSIDE
@@ -837,14 +858,25 @@
     }
 
     // Returns Promise< { canvas, corners } | null >. Loads jscanify lazily.
-    async function rectifyImageEntry(im) {
+    async function rectifyImageEntry(im, orientationHint = 'auto') {
       await ensureCv();
       const img = await new Promise((r, rej) => {
         const x = new Image();
         x.onload = () => r(x); x.onerror = rej;
         x.src = im.dataUrl;
       });
-      return rectifyWithJscanify(img);
+      return rectifyWithJscanify(img, orientationHint);
+    }
+    // Map the page-size dropdown to a rectify orientation hint. A4 横 →
+    // landscape, every other size we ship is portrait. "fit" lets the
+    // detected paper orientation drive the output (or post-rotation
+    // auto-detect, when the user manually rotates 90° in the editor).
+    function currentRectifyOrientationHint() {
+      const sel = document.getElementById('pageSize');
+      const v = sel ? sel.value : '';
+      if (v === 'A4L') return 'landscape';
+      if (v === 'A4P' || v === 'B5P' || v === 'Letter') return 'portrait';
+      return 'auto';
     }
 
     // Preview-only rectify: runs the same pipeline as the PDF export but
@@ -911,7 +943,8 @@
           // already-rectified canvas (= cropped further or fails).
           if (!im.originalDataUrl) im.originalDataUrl = im.dataUrl;
           else im.dataUrl = im.originalDataUrl;
-          const rectified = await rectifyImageEntry(im).catch(() => null);
+          const rectified = await rectifyImageEntry(im, currentRectifyOrientationHint())
+            .catch(() => null);
           if (rectified) {
             try {
               im.dataUrl = rectified.canvas.toDataURL('image/jpeg', 0.85);
@@ -1005,7 +1038,8 @@
           let embed;
           if (autoRectify && !previewAttempted) {
             // No preview was run for this image — apply rectify on the fly.
-            const rectified = await rectifyImageEntry(im).catch(() => null);
+            const rectified = await rectifyImageEntry(im, currentRectifyOrientationHint())
+              .catch(() => null);
             if (rectified) {
               im.originalDataUrl = im.dataUrl;
               im.dataUrl = rectified.canvas.toDataURL('image/jpeg', 0.85);
