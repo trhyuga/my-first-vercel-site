@@ -49,6 +49,16 @@
         <span class="size" id="srcSize"></span>
       </div>
       <div class="field">
+        <label style="display:flex;align-items:center;gap:0.55rem;cursor:pointer;font-weight:600;">
+          <input type="checkbox" id="ocrPrep" checked style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
+          <span>📐 OCR前に画像を補正 (歪み補正・濃度UP・推奨)</span>
+        </label>
+        <div class="info-hint" style="margin:0.2rem 0 0 1.5rem;">
+          紙の四隅検出で台形補正してから、グレースケール化 + CLAHE で文字を濃く + アンシャープでエッジを引き立たせます。<br>
+          初回のみ画像処理エンジン (約9MB) のダウンロードあり。端末内処理。
+        </div>
+      </div>
+      <div class="field">
         <label>言語</label>
         <div class="radio-row">
           <label><input type="radio" name="lang" value="jpn+eng" checked><span>🇯🇵🇺🇸 日本語+英語 (推奨)</span></label>
@@ -101,6 +111,211 @@
   <script>
     const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, setupPdfJs } = PDFApp;
     setupPdfJs();
+
+    // ====== OpenCV + jscanify loader (mirrored from images-to-pdf) ======
+    // Lazy: nothing loads until the user actually opts in to OCR pre-prep.
+    let cvReady = null;
+    function loadScript(src) {
+      return new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = res; s.onerror = () => rej(new Error('script load failed: ' + src));
+        document.head.appendChild(s);
+      });
+    }
+    async function downloadForProgress(url, onProgress) {
+      const res = await fetch(url, { mode: 'cors' });
+      if (!res.ok) throw new Error('fetch failed ' + res.status + ' ' + url);
+      const total = parseInt(res.headers.get('Content-Length'), 10) || 0;
+      const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+      if (!reader) { await res.arrayBuffer(); if (onProgress) onProgress(1); return; }
+      let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+        if (onProgress && total > 0) onProgress(Math.min(1, received / total));
+      }
+      if (onProgress) onProgress(1);
+    }
+    async function loadCvScript(onProgress) {
+      const urls = [
+        '../images-to-pdf/opencv.js',                                        // local mirror committed under images-to-pdf
+        'https://docs.opencv.org/4.10.0/opencv.js',
+        'https://docs.opencv.org/4.5.0/opencv.js',
+        'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js',
+      ];
+      let lastErr = null;
+      for (const url of urls) {
+        const prevModule = window.Module;
+        try {
+          await downloadForProgress(url, onProgress);
+          const initialized = new Promise((res) => {
+            window.Module = Object.assign({}, prevModule || {}, {
+              onRuntimeInitialized() { res(); },
+            });
+          });
+          await loadScript(url);
+          if (onProgress) onProgress(1);
+          await Promise.race([
+            initialized,
+            new Promise((res) => {
+              const t = setInterval(() => {
+                if (typeof cv !== 'undefined' && cv && cv.Mat) { clearInterval(t); res(); }
+              }, 100);
+            }),
+            new Promise((_, rej) => setTimeout(
+              () => rej(new Error('OpenCV initialization timed out (60s)')),
+              60000
+            )),
+          ]);
+          if (typeof cv !== 'undefined' && !cv.Mat) {
+            if (typeof cv === 'function') {
+              const m = await cv();
+              if (m && m.Mat) window.cv = m;
+            } else if (typeof cv === 'object' && cv && typeof cv.then === 'function') {
+              const m = await cv;
+              if (m && m.Mat) window.cv = m;
+            }
+          }
+          window.Module = prevModule;
+          if (typeof cv === 'undefined' || !cv.Mat) throw new Error('cv.Mat missing');
+          return;
+        } catch (e) {
+          window.Module = prevModule;
+          lastErr = e;
+          if (onProgress) onProgress(0);
+        }
+      }
+      throw lastErr || new Error('all opencv.js URLs failed');
+    }
+    async function loadJscanify() {
+      if (typeof jscanify !== 'undefined') return;
+      const urls = [
+        '../images-to-pdf/jscanify.js',
+        'https://cdn.jsdelivr.net/npm/jscanify@1.2.0/src/jscanify.js',
+        'https://cdn.jsdelivr.net/npm/jscanify@1.2.0',
+        'https://unpkg.com/jscanify@1.2.0/src/jscanify.js',
+      ];
+      let lastErr = null;
+      for (const url of urls) {
+        try { await loadScript(url); if (typeof jscanify !== 'undefined') return; }
+        catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('jscanify load failed');
+    }
+    async function ensureCv(onProgress) {
+      if (cvReady) return cvReady;
+      cvReady = (async () => {
+        await loadCvScript(onProgress);
+        await loadJscanify();
+      })();
+      return cvReady;
+    }
+
+    // ====== OCR pre-pass: rectify + grayscale + CLAHE + unsharp ======
+    // Returns a NEW canvas optimized for Tesseract:
+    //   - if a paper outline is detected, perspective-corrects to A4
+    //     (auto-orientation by detected quad);
+    //   - otherwise keeps the source canvas geometry;
+    //   - converts to grayscale (Tesseract works on luminance anyway —
+    //     dropping the colour channels speeds up internal binarisation);
+    //   - CLAHE on the gray channel lifts faint or unevenly-lit text;
+    //   - mild unsharp tightens stroke edges so character classification
+    //     has cleaner inputs.
+    // We deliberately DON'T binarise here — Tesseract has its own Otsu
+    // pass and handing it pre-binarised input often loses anti-aliased
+    // strokes that would have classified correctly in grayscale.
+    function rectifyCanvasIfPossible(srcCanvas) {
+      let src = null, contour = null;
+      try {
+        const scanner = new jscanify();
+        src = cv.imread(srcCanvas);
+        contour = scanner.findPaperContour(src);
+        if (!contour || (typeof contour.empty === 'function' && contour.empty())) return null;
+        const corners = scanner.getCornerPoints(contour);
+        if (!corners) return null;
+        const tl = corners.topLeftCorner, tr = corners.topRightCorner;
+        const bl = corners.bottomLeftCorner, br = corners.bottomRightCorner;
+        if (!tl || !tr || !bl || !br) return null;
+        const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+        const w = Math.max(dist(tl, tr), dist(bl, br));
+        const h = Math.max(dist(tl, bl), dist(tr, br));
+        if (!isFinite(w) || !isFinite(h) || w < 50 || h < 50) return null;
+        const W = srcCanvas.width, H = srcCanvas.height;
+        const imgArea = W * H;
+        const detectedArea = w * h;
+        if (imgArea > 0) {
+          if (detectedArea > imgArea * 0.97) return null;   // jscanify fell back to image bounds
+          if (detectedArea < imgArea * 0.05) return null;   // tiny noise
+        }
+        // Same expansion + bleed-then-crop pipeline as images-to-pdf so
+        // the rectified canvas matches what the user sees in that tool.
+        const A4_LONG = 1754, A4_SHORT = 1240;
+        const isLandscape = w > h;
+        const outW = isLandscape ? A4_LONG : A4_SHORT;
+        const outH = isLandscape ? A4_SHORT : A4_LONG;
+        const cx = (tl.x + tr.x + br.x + bl.x) / 4;
+        const cy = (tl.y + tr.y + br.y + bl.y) / 4;
+        const PAD = 1.025;
+        const expand = (p) => ({
+          x: Math.max(0, Math.min(W - 1, cx + (p.x - cx) * PAD)),
+          y: Math.max(0, Math.min(H - 1, cy + (p.y - cy) * PAD)),
+        });
+        const expanded = {
+          topLeftCorner: expand(tl), topRightCorner: expand(tr),
+          bottomRightCorner: expand(br), bottomLeftCorner: expand(bl),
+        };
+        const BLEED = 1.06;
+        const warpW = Math.round(outW * BLEED), warpH = Math.round(outH * BLEED);
+        const oversized = scanner.extractPaper(srcCanvas, warpW, warpH, expanded);
+        if (!oversized) return null;
+        const cropped = document.createElement('canvas');
+        cropped.width = outW; cropped.height = outH;
+        const cropX = Math.round((warpW - outW) / 2);
+        const cropY = Math.round((warpH - outH) / 2);
+        cropped.getContext('2d').drawImage(oversized, cropX, cropY, outW, outH, 0, 0, outW, outH);
+        return cropped;
+      } catch (e) {
+        console.warn('rectify failed', e);
+        return null;
+      } finally {
+        if (src && typeof src.delete === 'function') { try { src.delete(); } catch (_) {} }
+        if (contour && typeof contour.delete === 'function') { try { contour.delete(); } catch (_) {} }
+      }
+    }
+    function enhanceForOcrInPlace(canvas) {
+      let src = null, gray = null, blur = null, clahe = null, rgba = null;
+      try {
+        src = cv.imread(canvas);
+        gray = new cv.Mat();
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        if (typeof cv.CLAHE === 'function') {
+          clahe = new cv.CLAHE(2.5, new cv.Size(8, 8));   // a bit stronger than print mode — Tesseract benefits from sharper local contrast
+          clahe.apply(gray, gray);
+        }
+        blur = new cv.Mat();
+        cv.GaussianBlur(gray, blur, new cv.Size(0, 0), 1.4);
+        cv.addWeighted(gray, 1.7, blur, -0.7, 0, gray);   // amount 0.7 — borderline halo but Tesseract is tolerant on greyscale
+        rgba = new cv.Mat();
+        cv.cvtColor(gray, rgba, cv.COLOR_GRAY2RGBA);
+        cv.imshow(canvas, rgba);
+      } catch (e) {
+        console.warn('enhanceForOcr failed', e);
+      } finally {
+        if (src)   try { src.delete(); }   catch (_) {}
+        if (gray)  try { gray.delete(); }  catch (_) {}
+        if (blur)  try { blur.delete(); }  catch (_) {}
+        if (clahe) try { clahe.delete(); } catch (_) {}
+        if (rgba)  try { rgba.delete(); }  catch (_) {}
+      }
+    }
+    async function prepareForOcr(srcCanvas) {
+      const rect = rectifyCanvasIfPossible(srcCanvas);
+      const target = rect || srcCanvas;
+      enhanceForOcrInPlace(target);
+      return target;
+    }
 
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
@@ -339,6 +554,33 @@
         } else {
           setProgress(15, '画像を読み込み中…');
           canvases = [await imageFileToCanvas(currentFile)];
+        }
+
+        // Pre-OCR enhancement: rectify (perspective correct) + grayscale
+        // + CLAHE + unsharp. Runs in-place on each canvas before
+        // Tesseract sees it so the OCR works on a cleaner, sharper,
+        // more evenly-contrasted image.
+        const ocrPrep = document.getElementById('ocrPrep').checked;
+        if (ocrPrep) {
+          setProgress(18, '画像処理エンジンを準備中…');
+          try {
+            await ensureCv((p) => {
+              setProgress(18, `画像処理エンジンを準備中… ${Math.round(p * 100)}%`);
+            });
+            for (let i = 0; i < canvases.length; i++) {
+              setProgress(18, `画像補正中… ${i + 1}/${canvases.length}`);
+              try { canvases[i] = await prepareForOcr(canvases[i]); }
+              catch (e) { console.warn('prepareForOcr failed for page', i + 1, e); }
+            }
+          } catch (e) {
+            // Engine load failed — surface a non-blocking warning and
+            // let Tesseract run on the raw canvases.
+            console.warn('OCR pre-prep skipped', e);
+            const warn = document.createElement('div');
+            warn.className = 'info';
+            warn.textContent = '⚠ 画像補正エンジンの読込に失敗 — 補正なしで続行します';
+            msg.appendChild(warn);
+          }
         }
 
         // Spin a single Tesseract worker so re-OCR of low-confidence words
