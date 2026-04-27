@@ -1204,18 +1204,20 @@ function fmtLocationSummary(clusters) {
 }
 
 function orderForTimeline(selected) {
-  // Strict chronological — videos slot in by their actual timestamp.
+  // Chronological ordering by item ts, with one twist for videos: a clip
+  // whose ts is just file.lastModified (mtime — usually the forwarded /
+  // download time) carries no real positional information and would clump
+  // either at the end of the timeline or at "today". For those we spread
+  // adjustedTs uniformly across the photo time range so they intersperse.
   //
-  // Special case: a video whose ts falls clearly outside the photo time
-  // range (mtime fell-back, or mp4-creation that reflects the *edit*
-  // time of a re-encoded clip) would sort to the end and clump there.
-  // Spread those uniformly across the photo time range. Videos whose
-  // ts looks plausible (within or close to the photo range) keep their
-  // own ts so genuinely-mid-trip videos slot in correctly.
-  // Note: videos NEVER carry their own date/location overlay
-  // (buildTimeline skips them) and never break the photo streak, so
-  // even an evenly-distributed video can't make the date overlays
-  // jump back-and-forth.
+  // Videos with a real mp4-creation ts (or future GPS) keep their natural
+  // ts and slot chronologically — even if that ts is well past the photo
+  // range, the user wanted them placed at the appropriate moment rather
+  // than artificially redistributed.
+  //
+  // Videos NEVER carry their own date/location overlay (buildTimeline
+  // skips them) and never break the photo streak, so an evenly-spread
+  // video can't make the date/location overlays jump back-and-forth.
   const photos = selected.filter(p => p.kind !== 'video');
   const allVids  = selected.filter(p => p.kind === 'video');
   if (photos.length >= 2 && allVids.length > 0) {
@@ -1223,10 +1225,11 @@ function orderForTimeline(selected) {
     const tsMin = tsList[0];
     const tsMax = tsList[tsList.length - 1];
     const range = tsMax - tsMin;
-    const FAR_MS = 3 * 24 * 60 * 60 * 1000; // 3 days outside photo range
-    const toSpread = allVids.filter(v =>
-      v.ts > tsMax + FAR_MS || v.ts < tsMin - FAR_MS
-    );
+    const toSpread = allVids.filter(v => {
+      const hasReliableTs = v.tsSource === 'mp4-creation';
+      const hasLocation = v.gps && (v.gps.lat != null || v.gps.lon != null);
+      return !hasReliableTs && !hasLocation;
+    });
     if (toSpread.length > 0 && range > 0) {
       // Stable ordering — sourceName is the only key that's invariant
       // across re-renders / cache reuse.
@@ -1235,8 +1238,8 @@ function orderForTimeline(selected) {
         v.adjustedTs = Math.round(tsMin + range * (i + 1) / (toSpread.length + 1));
       });
     }
-    // Clear stale adjustedTs for videos that ARE in-range — happens if a
-    // previous run set it and the data set changed since.
+    // Clear stale adjustedTs for videos that we did NOT decide to spread
+    // (e.g. they were spread on a previous run before tsSource changed).
     for (const v of allVids) {
       if (!toSpread.includes(v) && v.adjustedTs != null) v.adjustedTs = null;
     }
