@@ -137,6 +137,13 @@
         <button type="button" id="rectifyPreview" style="margin:0.4rem 0 0 1.5rem; padding:0.4rem 0.8rem; border:1px solid #cbd5e1; border-radius:8px; background:#f1f5f9; cursor:pointer; font-size:0.85rem; font-weight:600;">
           👁 整形プレビュー (PDFは作らずサムネだけ更新)
         </button>
+        <button type="button" id="rectifyRestore" style="margin:0.4rem 0 0 0.4rem; padding:0.4rem 0.8rem; border:1px solid #cbd5e1; border-radius:8px; background:#f1f5f9; cursor:pointer; font-size:0.85rem; font-weight:600;">
+          ↺ 元画像に戻す
+        </button>
+        <label style="display:flex; align-items:center; gap:0.4rem; margin:0.4rem 0 0 1.5rem; cursor:pointer; font-size:0.82rem; color:#475569;">
+          <input type="checkbox" id="rectifyDebug" style="width:16px; height:16px; accent-color:#0ea5e9;" />
+          <span>🔍 検出した四隅をオーバーレイ表示 (デバッグ)</span>
+        </label>
         <div id="rectifyProgressWrap" style="display:none; margin:0.5rem 0 0 1.5rem;">
           <div id="rectifyProgressLabel" style="font-size:0.78rem; color:#475569; margin-bottom:0.2rem;"></div>
           <div style="height:6px; background:#e2e8f0; border-radius:6px; overflow:hidden;">
@@ -224,13 +231,24 @@
 
     const images = []; // {file, dataUrl}
 
+    // When the debug checkbox is on AND the image was rectified (so we
+    // have a corner-overlay image cached), the thumb shows the original
+    // with the detected 4 corners drawn on top. Otherwise it shows
+    // im.dataUrl, which is whatever the latest pipeline produced
+    // (rectified after preview, or original after upload / restore).
+    function thumbSrcFor(im) {
+      const dbg = document.getElementById('rectifyDebug');
+      if (dbg && dbg.checked && im.cornerOverlayDataUrl) return im.cornerOverlayDataUrl;
+      return im.dataUrl;
+    }
+
     function render() {
       grid.innerHTML = '';
       images.forEach((im, i) => {
         const wrap = document.createElement('div');
         wrap.className = 'thumb';
         const img = new Image();
-        img.src = im.dataUrl;
+        img.src = thumbSrcFor(im);
         wrap.appendChild(img);
         const num = document.createElement('div');
         num.className = 'num'; num.textContent = i + 1;
@@ -616,6 +634,49 @@
     // The previous implementation called getCornerPoints(imgEl) directly,
     // which reads contour.data32S off an HTMLImageElement — undefined →
     // throws → caught → every image went through unrectified.
+    // Render the original image with the detected 4 corners drawn on top
+    // so the user can verify what jscanify actually thought was the paper.
+    // Toggleable via the "🔍 検出した四隅をオーバーレイ表示" checkbox; without
+    // this the rectify result alone made it impossible to tell whether
+    // perspective correction actually fired or jscanify just picked the
+    // image bounds (= no-op warp).
+    function makeCornerOverlay(imgEl, corners) {
+      const W = imgEl.naturalWidth || imgEl.width;
+      const H = imgEl.naturalHeight || imgEl.height;
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(imgEl, 0, 0, W, H);
+      const tl = corners.topLeftCorner, tr = corners.topRightCorner;
+      const br = corners.bottomRightCorner, bl = corners.bottomLeftCorner;
+      // Translucent fill + bright outline so the quad reads at any thumb
+      // size on any background.
+      ctx.fillStyle = 'rgba(255, 200, 0, 0.20)';
+      ctx.strokeStyle = 'rgba(255, 80, 0, 0.95)';
+      ctx.lineWidth = Math.max(4, Math.round(Math.min(W, H) * 0.008));
+      ctx.beginPath();
+      ctx.moveTo(tl.x, tl.y);
+      ctx.lineTo(tr.x, tr.y);
+      ctx.lineTo(br.x, br.y);
+      ctx.lineTo(bl.x, bl.y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      // Corner dots so the user can tell which corner is which.
+      const r = Math.max(8, Math.round(Math.min(W, H) * 0.012));
+      ctx.fillStyle = '#ff3030';
+      for (const p of [tl, tr, br, bl]) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      return c;
+    }
+
+    // Returns null when no paper was detected, otherwise
+    //   { canvas: <HTMLCanvasElement>, corners: {tl,tr,bl,br} }.
+    // Caller uses canvas as the rectified result and corners to render the
+    // debug overlay if the user wants to verify the detection.
     function rectifyWithJscanify(imgEl) {
       let src = null, contour = null;
       try {
@@ -653,8 +714,9 @@
         const outH = Math.round(h * scale);
         // Pass cornerPoints as 4th arg so extractPaper doesn't redo
         // findPaperContour internally (saves a second OpenCV pass).
-        const result = scanner.extractPaper(imgEl, outW, outH, corners);
-        return result || null;
+        const canvas = scanner.extractPaper(imgEl, outW, outH, corners);
+        if (!canvas) return null;
+        return { canvas, corners };
       } catch (e) {
         console.warn('rectify failed', e);
         return null;
@@ -671,7 +733,10 @@
       }
     }
 
-    // Returns a Promise<HTMLCanvasElement | null>. Loads jscanify lazily.
+    // Returns Promise< { canvas, corners, sourceImg } | null >. Loads
+    // jscanify lazily. sourceImg is the loaded HTMLImageElement of the
+    // pre-rectify input — handed back so the caller can render the
+    // corner-overlay debug thumb without re-loading.
     async function rectifyImageEntry(im) {
       await ensureCv();
       const img = await new Promise((r, rej) => {
@@ -679,7 +744,9 @@
         x.onload = () => r(x); x.onerror = rej;
         x.src = im.dataUrl;
       });
-      return rectifyWithJscanify(img);
+      const result = rectifyWithJscanify(img);
+      if (!result) return null;
+      return { ...result, sourceImg: img };
     }
 
     // Preview-only rectify: runs the same pipeline as the PDF export but
@@ -688,6 +755,35 @@
     // Stashes the pre-rectify dataUrl on im.originalDataUrl the first
     // time so subsequent previews don't compound on already-rectified
     // canvases (jscanify on its own clean output produces garbage).
+    // 元画像に戻す: drop the rectified result + cached overlay and restore
+    // im.dataUrl from the originalDataUrl stash. After this the thumbs
+    // look the same as right after upload (any in-editor rotate/crop made
+    // BEFORE the first preview is also undone, since originalDataUrl
+    // captured the dataUrl at that point).
+    document.getElementById('rectifyRestore').addEventListener('click', () => {
+      if (!images.length) return;
+      let restored = 0;
+      for (const im of images) {
+        if (im.originalDataUrl && im.dataUrl !== im.originalDataUrl) {
+          im.dataUrl = im.originalDataUrl;
+          restored++;
+        }
+        im.cornerOverlayDataUrl = null;
+      }
+      render();
+      clearBox(msg);
+      const note = document.createElement('div');
+      note.className = 'success';
+      note.textContent = `↺ ${restored}件を元画像に戻しました`;
+      msg.appendChild(note);
+    });
+
+    // Debug overlay toggle: just re-render — thumbSrcFor() picks the
+    // overlay dataUrl when this checkbox is checked.
+    document.getElementById('rectifyDebug').addEventListener('change', () => {
+      render();
+    });
+
     document.getElementById('rectifyPreview').addEventListener('click', async () => {
       if (!images.length) { showError(msg, '画像を1枚以上選んでください'); return; }
       const btn = document.getElementById('rectifyPreview');
@@ -712,10 +808,21 @@
           // already-rectified canvas (= cropped further or fails).
           if (!im.originalDataUrl) im.originalDataUrl = im.dataUrl;
           else im.dataUrl = im.originalDataUrl;
+          // Drop any previous overlay so we don't show stale corners while
+          // the new ones are being computed.
+          im.cornerOverlayDataUrl = null;
           const rectified = await rectifyImageEntry(im).catch(() => null);
           if (rectified) {
-            try { im.dataUrl = rectified.toDataURL('image/jpeg', 0.85); ok++; }
-            catch (_) { skipped++; }
+            try {
+              im.dataUrl = rectified.canvas.toDataURL('image/jpeg', 0.85);
+              // Cache the corner-overlay image so the debug toggle is
+              // instant (no recompute when flipping the checkbox).
+              try {
+                im.cornerOverlayDataUrl = makeCornerOverlay(rectified.sourceImg, rectified.corners)
+                  .toDataURL('image/jpeg', 0.7);
+              } catch (_) {}
+              ok++;
+            } catch (_) { skipped++; }
           } else {
             skipped++;
           }
@@ -795,11 +902,18 @@
           if (autoRectify) {
             const rectified = await rectifyImageEntry(im).catch(() => null);
             if (rectified) {
-              embed = await rectifiedToJpg(rectified);
+              embed = await rectifiedToJpg(rectified.canvas);
               rectifiedCount++;
               // Update the UI thumbnail too so the user can see what landed
-              // in the PDF after rectification.
-              try { im.dataUrl = rectified.toDataURL('image/jpeg', 0.85); render(); } catch (e) {}
+              // in the PDF after rectification, plus cache the corner-overlay
+              // for the debug toggle.
+              try {
+                if (!im.originalDataUrl) im.originalDataUrl = im.dataUrl;
+                im.dataUrl = rectified.canvas.toDataURL('image/jpeg', 0.85);
+                im.cornerOverlayDataUrl = makeCornerOverlay(rectified.sourceImg, rectified.corners)
+                  .toDataURL('image/jpeg', 0.7);
+                render();
+              } catch (e) {}
             } else {
               rectifySkipped++;
               try {
