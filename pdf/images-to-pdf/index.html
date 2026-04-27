@@ -871,10 +871,22 @@
       msg.appendChild(note);
     });
 
+    // Re-runnable preview. The handler is idempotent: every click
+    // restores im.dataUrl from im.originalDataUrl (so we re-rectify the
+    // ORIGINAL source each time, not an already-rectified canvas) and
+    // always returns the button to its enabled / labelled state in
+    // finally. A reentrancy guard ignores rapid double-taps so a still-
+    // running pass can't be interrupted halfway through. Use a constant
+    // label instead of capturing btn.textContent — capturing risked
+    // freezing the button on an intermediate "整形プレビュー中…" string
+    // if a click ever fired while a previous run was mid-flight.
+    const PREVIEW_LABEL = '👁 整形プレビュー (PDFは作らずサムネだけ更新)';
+    let previewRunning = false;
     document.getElementById('rectifyPreview').addEventListener('click', async () => {
+      if (previewRunning) return;
       if (!images.length) { showError(msg, '画像を1枚以上選んでください'); return; }
+      previewRunning = true;
       const btn = document.getElementById('rectifyPreview');
-      const orig = btn.textContent;
       btn.disabled = true;
       clearBox(msg);
       try {
@@ -914,8 +926,9 @@
       } catch (e) {
         showError(msg, '整形プレビュー失敗: ' + (e.message || e));
       } finally {
+        previewRunning = false;
         btn.disabled = false;
-        btn.textContent = orig;
+        btn.textContent = PREVIEW_LABEL;
         // Leave the bar visible at 100% briefly so the user sees completion,
         // then hide it.
         setTimeout(hideProgress, 800);
