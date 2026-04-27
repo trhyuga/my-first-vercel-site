@@ -673,6 +673,51 @@
       return c;
     }
 
+    // Apply an unsharp mask + light CLAHE pass to the rectified canvas in
+    // place. Compensates for the softness on the camera-far side (where
+    // warpPerspective stretches a smaller pixel patch over more output
+    // pixels) and lifts low-contrast text on uneven lighting. CLAHE is
+    // applied to the L channel only so colours stay neutral; the unsharp
+    // mask is mild (sigma 1.4, amount 0.6) to avoid the haloing you get
+    // from aggressive document-scan filters.
+    function sharpenCanvasInPlace(canvas) {
+      let src = null, lab = null, channels = null, clahe = null, blurred = null, dst = null;
+      try {
+        src = cv.imread(canvas);
+        // ----- CLAHE on L channel for local contrast lift -----
+        try {
+          lab = new cv.Mat();
+          cv.cvtColor(src, lab, cv.COLOR_RGBA2RGB);
+          cv.cvtColor(lab, lab, cv.COLOR_RGB2Lab);
+          channels = new cv.MatVector();
+          cv.split(lab, channels);
+          if (typeof cv.CLAHE === 'function') {
+            clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+            const L = channels.get(0);
+            clahe.apply(L, L);
+          }
+          cv.merge(channels, lab);
+          cv.cvtColor(lab, lab, cv.COLOR_Lab2RGB);
+          cv.cvtColor(lab, src, cv.COLOR_RGB2RGBA);
+        } catch (_) { /* CLAHE optional — fall through to unsharp only */ }
+        // ----- Unsharp mask -----
+        blurred = new cv.Mat();
+        dst = new cv.Mat();
+        cv.GaussianBlur(src, blurred, new cv.Size(0, 0), 1.4);
+        cv.addWeighted(src, 1.6, blurred, -0.6, 0, dst);
+        cv.imshow(canvas, dst);
+      } catch (e) {
+        console.warn('sharpen failed', e);
+      } finally {
+        if (src)      try { src.delete(); } catch (_) {}
+        if (lab)      try { lab.delete(); } catch (_) {}
+        if (channels) try { channels.delete(); } catch (_) {}
+        if (clahe)    try { clahe.delete(); } catch (_) {}
+        if (blurred)  try { blurred.delete(); } catch (_) {}
+        if (dst)      try { dst.delete(); } catch (_) {}
+      }
+    }
+
     // Returns null when no paper was detected, otherwise
     //   { canvas: <HTMLCanvasElement>, corners: {tl,tr,bl,br} }.
     // Caller uses canvas as the rectified result and corners to render the
@@ -706,16 +751,28 @@
           if (detectedArea > imgArea * 0.97) return null;
           if (detectedArea < imgArea * 0.05) return null;
         }
-        // Scale up to ~150 DPI A4-equivalent on the longer side, preserving
-        // the detected aspect ratio.
-        const targetLong = 1754;
-        const scale = targetLong / Math.max(w, h);
-        const outW = Math.round(w * scale);
-        const outH = Math.round(h * scale);
+        // Force A4 aspect (1:√2). The user's input is presumed to be a
+        // printed A4 sheet, so we map the detected quad to the standard
+        // A4 rectangle at ~150 DPI (1240×1754) regardless of how skewed
+        // the camera shot was — the previous "preserve detected aspect"
+        // path output 1:1.2-ish rectangles when the camera tilt squashed
+        // the quad, which then printed at the wrong size on A4 paper.
+        const A4_LONG = 1754;
+        const A4_SHORT = 1240;
+        const isLandscape = w > h;
+        const outW = isLandscape ? A4_LONG : A4_SHORT;
+        const outH = isLandscape ? A4_SHORT : A4_LONG;
         // Pass cornerPoints as 4th arg so extractPaper doesn't redo
         // findPaperContour internally (saves a second OpenCV pass).
         const canvas = scanner.extractPaper(imgEl, outW, outH, corners);
         if (!canvas) return null;
+        // Sharpen in place — when the camera was tilted, the side that
+        // was further from the lens captured fewer pixels per unit area,
+        // and warpPerspective stretches them out so the side reads as
+        // soft / blurry. Unsharp masking lifts edge contrast across the
+        // whole image, which compensates for the perceived softness of
+        // the camera-far side without over-sharpening the near side.
+        sharpenCanvasInPlace(canvas);
         return { canvas, corners };
       } catch (e) {
         console.warn('rectify failed', e);
