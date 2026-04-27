@@ -134,6 +134,9 @@
           紙資料を撮った写真の四隅を検出して真っ直ぐに伸ばし、机や床などの周りを切り捨てて整形PDFを作ります。<br>
           初回のみ画像処理エンジン (約9MB) のダウンロードあり。端末内処理。
         </div>
+        <button type="button" id="rectifyPreview" style="margin:0.4rem 0 0 1.5rem; padding:0.4rem 0.8rem; border:1px solid #cbd5e1; border-radius:8px; background:#f1f5f9; cursor:pointer; font-size:0.85rem; font-weight:600;">
+          👁 整形プレビュー (PDFは作らずサムネだけ更新)
+        </button>
       </div>
       <div class="field">
         <label>ページサイズ</label>
@@ -544,6 +547,51 @@
       });
       return rectifyWithJscanify(img);
     }
+
+    // Preview-only rectify: runs the same pipeline as the PDF export but
+    // stops after updating the on-page thumbnails, so the user can see
+    // the corner-detection result without committing to a PDF download.
+    // Stashes the pre-rectify dataUrl on im.originalDataUrl the first
+    // time so subsequent previews don't compound on already-rectified
+    // canvases (jscanify on its own clean output produces garbage).
+    document.getElementById('rectifyPreview').addEventListener('click', async () => {
+      if (!images.length) { showError(msg, '画像を1枚以上選んでください'); return; }
+      const btn = document.getElementById('rectifyPreview');
+      const orig = btn.textContent;
+      btn.disabled = true;
+      clearBox(msg);
+      try {
+        btn.textContent = '画像処理エンジンを準備中…';
+        await ensureCv();
+        let ok = 0, skipped = 0;
+        for (let i = 0; i < images.length; i++) {
+          const im = images[i];
+          btn.textContent = `整形プレビュー中… ${i + 1} / ${images.length}`;
+          // Preserve the original so a re-run starts from the same source
+          // each time. Without this a second click would re-rectify the
+          // already-rectified canvas (= cropped further or fails).
+          if (!im.originalDataUrl) im.originalDataUrl = im.dataUrl;
+          else im.dataUrl = im.originalDataUrl;
+          const rectified = await rectifyImageEntry(im).catch(() => null);
+          if (rectified) {
+            try { im.dataUrl = rectified.toDataURL('image/jpeg', 0.85); ok++; }
+            catch (_) { skipped++; }
+          } else {
+            skipped++;
+          }
+          render();
+        }
+        const note = document.createElement('div');
+        note.className = 'success';
+        note.textContent = `📐 整形: ${ok}件 / 自動検出できず原画像のまま: ${skipped}件 (PDFはまだ作っていません)`;
+        msg.appendChild(note);
+      } catch (e) {
+        showError(msg, '整形プレビュー失敗: ' + (e.message || e));
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
+    });
 
     document.getElementById('run').addEventListener('click', async () => {
       if (!images.length) { showError(msg, '画像を1枚以上選んでください'); return; }
