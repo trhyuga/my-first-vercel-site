@@ -500,6 +500,16 @@
     // CDN roundtrip. The CDN URLs are kept as fallbacks for the case where
     // the local file ever goes missing or gets stale. To refresh the local
     // mirror to a newer build run `bash update-opencv.sh` in this folder.
+    //
+    // For each URL we ALSO pre-register an onRuntimeInitialized callback
+    // on window.Module BEFORE running the script. The opencv.js bundle uses
+    // `if (typeof Module === 'undefined') Module = {}` then `cv(Module)` —
+    // so a Module we put on window first is preserved and our callback gets
+    // called as soon as the WASM runtime is ready. Without the pre-register
+    // the previous code attached cv.onRuntimeInitialized AFTER the script
+    // ran, racing with WASM compile; on faster init paths the callback was
+    // assigned AFTER Emscripten had already fired its no-op handler, so cv
+    // never reported ready and the page sat at "初期化中…" forever.
     async function loadCvScript(onProgress) {
       const urls = [
         './opencv.js',
@@ -509,64 +519,67 @@
       ];
       let lastErr = null;
       for (const url of urls) {
+        const prevModule = window.Module;
         try {
           await downloadForProgress(url, onProgress);
+          // Race-free init signal.
+          const initialized = new Promise((res) => {
+            window.Module = Object.assign({}, prevModule || {}, {
+              onRuntimeInitialized() { res(); },
+            });
+          });
           await loadScript(url);             // browser cache hit from the fetch above
+          if (onProgress) onProgress(1);
+          if (progressLabel) progressLabel.textContent = '画像処理エンジンを初期化中…';
+          // Wait for: explicit Module callback OR cv.Mat polling OR timeout.
+          // Polling is a safety net for builds that don't honour the Module
+          // hook (some derivative bundles populate cv.Mat synchronously).
+          await Promise.race([
+            initialized,
+            new Promise((res) => {
+              const t = setInterval(() => {
+                if (typeof cv !== 'undefined' && cv && cv.Mat) {
+                  clearInterval(t); res();
+                }
+              }, 100);
+            }),
+            new Promise((_, rej) => setTimeout(
+              () => rej(new Error('OpenCV initialization timed out (60s)')),
+              60000
+            )),
+          ]);
+          // If cv ended up as a factory / Promise (some 4.10 derivatives),
+          // resolve it now and replace the global so the rest of the code
+          // can use it directly.
+          if (typeof cv !== 'undefined' && !cv.Mat) {
+            if (typeof cv === 'function') {
+              const m = await cv();
+              if (m && m.Mat) window.cv = m;
+            } else if (typeof cv === 'object' && cv && typeof cv.then === 'function') {
+              const m = await cv;
+              if (m && m.Mat) window.cv = m;
+            }
+          }
+          window.Module = prevModule;        // restore so we don't leak globals
+          if (typeof cv === 'undefined' || !cv.Mat) {
+            throw new Error('cv.Mat missing after init from ' + url);
+          }
           return;
         } catch (e) {
+          window.Module = prevModule;        // restore on failure too
           lastErr = e;
           if (onProgress) onProgress(0);     // reset bar before the next URL
         }
       }
       throw lastErr || new Error('all opencv.js URLs failed');
     }
-    // OpenCV.js init shape varies by version:
-    //   v4.5.x style: `var cv = Module; cv.onRuntimeInitialized = fn`
-    //   v4.10.x style: `var cv = function(){...}` (factory returning a Promise)
-    //   already-loaded: `cv.Mat` exists immediately
-    // Earlier code only handled the callback variant — on docs.opencv.org's
-    // current 4.10.0 build, `cv` is a factory function and our handler
-    // never got wired in, so the user sat at "初期化中…" forever.
-    async function waitForCvRuntime(timeoutMs = 60000) {
-      if (typeof cv === 'undefined') throw new Error('cv global missing after script load');
-      if (cv.Mat) return;
-      // Factory pattern — call once and replace the global with the
-      // resolved module.
-      if (typeof cv === 'function') {
-        const m = await cv();
-        if (m && m.Mat) { window.cv = m; return; }
-      }
-      // Already-a-Promise pattern.
-      if (typeof cv === 'object' && cv && typeof cv.then === 'function') {
-        const m = await cv;
-        if (m && m.Mat) { window.cv = m; return; }
-      }
-      // Callback pattern + polling fallback. We register
-      // onRuntimeInitialized AND poll for cv.Mat — whichever fires first.
-      await new Promise((res, rej) => {
-        let done = false;
-        const finish = () => { if (!done) { done = true; clearInterval(poll); clearTimeout(deadline); res(); } };
-        const fail = (e) => { if (!done) { done = true; clearInterval(poll); clearTimeout(deadline); rej(e); } };
-        try { cv.onRuntimeInitialized = finish; } catch (_) {}
-        const poll = setInterval(() => {
-          if (typeof cv !== 'undefined' && cv.Mat) finish();
-        }, 200);
-        const deadline = setTimeout(
-          () => fail(new Error('OpenCV initialization timed out (' + timeoutMs + 'ms)')),
-          timeoutMs
-        );
-      });
-    }
     async function ensureCv(onProgress) {
       if (cvReady) return cvReady;
       cvReady = (async () => {
+        // loadCvScript handles the byte download, the script execution AND
+        // the WASM-runtime-ready wait (it pre-installs window.Module so
+        // onRuntimeInitialized fires reliably).
         await loadCvScript(onProgress);
-        if (onProgress) onProgress(1);
-        // After bytes finish downloading the WASM still has to compile +
-        // boot — surface it explicitly so the user doesn't think the bar
-        // is stuck.
-        if (progressLabel) progressLabel.textContent = '画像処理エンジンを初期化中…';
-        await waitForCvRuntime(60000);
         if (typeof jscanify === 'undefined') {
           await loadScript('https://cdn.jsdelivr.net/npm/jscanify@1.2.0/dist/jscanify.min.js');
         }
