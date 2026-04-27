@@ -472,10 +472,23 @@
     // photos that aren't of a document at all). Output canvas size targets
     // A4 portrait at ~150 DPI but uses the detected quad's aspect ratio so
     // a Letter page or a notebook spread isn't squashed to A4.
+    //
+    // jscanify@1.2.0 API: findPaperContour(cvMat) → cv.Mat,
+    //                     getCornerPoints(contour) → {tl, tr, bl, br},
+    //                     extractPaper(image, w, h, cornerPoints?) → canvas.
+    // The previous implementation called getCornerPoints(imgEl) directly,
+    // which reads contour.data32S off an HTMLImageElement — undefined →
+    // throws → caught → every image went through unrectified.
     function rectifyWithJscanify(imgEl) {
+      let src = null, contour = null;
       try {
         const scanner = new jscanify();
-        const corners = scanner.getCornerPoints && scanner.getCornerPoints(imgEl);
+        src = cv.imread(imgEl);
+        contour = scanner.findPaperContour(src);
+        if (!contour || (typeof contour.empty === 'function' && contour.empty())) {
+          return null;
+        }
+        const corners = scanner.getCornerPoints(contour);
         if (!corners) return null;
         const tl = corners.topLeftCorner, tr = corners.topRightCorner;
         const bl = corners.bottomLeftCorner, br = corners.bottomRightCorner;
@@ -485,15 +498,40 @@
         const hLft = dist(tl, bl), hRgt = dist(tr, br);
         const w = Math.max(wTop, wBot), h = Math.max(hLft, hRgt);
         if (!isFinite(w) || !isFinite(h) || w < 50 || h < 50) return null;
+        // Reject "the corners cover essentially the whole frame" — that
+        // happens when findPaperContour can't see a real paper edge and
+        // falls back to the image bounds. Without this guard the result
+        // is a no-op warp on every photo of e.g. a person or a sky.
+        const imgArea = (imgEl.naturalWidth || imgEl.width) * (imgEl.naturalHeight || imgEl.height);
+        const detectedArea = w * h;
+        if (imgArea > 0) {
+          if (detectedArea > imgArea * 0.97) return null;
+          if (detectedArea < imgArea * 0.05) return null;
+        }
         // Scale up to ~150 DPI A4-equivalent on the longer side, preserving
         // the detected aspect ratio.
         const targetLong = 1754;
         const scale = targetLong / Math.max(w, h);
         const outW = Math.round(w * scale);
         const outH = Math.round(h * scale);
-        const result = scanner.extractPaper(imgEl, outW, outH);
+        // Pass cornerPoints as 4th arg so extractPaper doesn't redo
+        // findPaperContour internally (saves a second OpenCV pass).
+        const result = scanner.extractPaper(imgEl, outW, outH, corners);
         return result || null;
-      } catch (e) { return null; }
+      } catch (e) {
+        console.warn('rectify failed', e);
+        return null;
+      } finally {
+        // OpenCV.js Mats live in the WASM heap and must be explicitly
+        // freed — without this the heap grows by ~12-30 MB per page on
+        // typical phone-camera input and crashes after ~10-15 images.
+        if (src && typeof src.delete === 'function') {
+          try { src.delete(); } catch (_) {}
+        }
+        if (contour && typeof contour.delete === 'function') {
+          try { contour.delete(); } catch (_) {}
+        }
+      }
     }
 
     // Returns a Promise<HTMLCanvasElement | null>. Loads jscanify lazily.
