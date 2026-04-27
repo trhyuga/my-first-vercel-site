@@ -137,6 +137,12 @@
         <button type="button" id="rectifyPreview" style="margin:0.4rem 0 0 1.5rem; padding:0.4rem 0.8rem; border:1px solid #cbd5e1; border-radius:8px; background:#f1f5f9; cursor:pointer; font-size:0.85rem; font-weight:600;">
           👁 整形プレビュー (PDFは作らずサムネだけ更新)
         </button>
+        <div id="rectifyProgressWrap" style="display:none; margin:0.5rem 0 0 1.5rem;">
+          <div id="rectifyProgressLabel" style="font-size:0.78rem; color:#475569; margin-bottom:0.2rem;"></div>
+          <div style="height:6px; background:#e2e8f0; border-radius:6px; overflow:hidden;">
+            <div id="rectifyProgressBar" style="height:100%; width:0%; background:linear-gradient(90deg, #0ea5e9, #06b6d4); transition:width 0.2s;"></div>
+          </div>
+        </div>
       </div>
       <div class="field">
         <label>ページサイズ</label>
@@ -443,27 +449,84 @@
         document.head.appendChild(s);
       });
     }
-    // Try a sequence of CDNs / versions until one loads. docs.opencv.org has
-    // been intermittently 502'ing on the 4.5.0 path (which is what the user
-    // hit); the 4.10.0 build from the same host is healthier, and the
-    // jsdelivr-hosted @techstark mirror is a final fallback. All three expose
-    // a global `cv` so the rest of the pipeline doesn't change.
-    async function loadScriptWithFallbacks(urls) {
+    // Helpers for the visible progress bar / label.
+    const progressWrap  = document.getElementById('rectifyProgressWrap');
+    const progressBar   = document.getElementById('rectifyProgressBar');
+    const progressLabel = document.getElementById('rectifyProgressLabel');
+    function showProgress(pct, label) {
+      if (!progressWrap) return;
+      progressWrap.style.display = '';
+      progressBar.style.width = Math.max(0, Math.min(100, Math.round(pct * 100))) + '%';
+      if (label != null) progressLabel.textContent = label;
+    }
+    function hideProgress() {
+      if (!progressWrap) return;
+      progressWrap.style.display = 'none';
+    }
+    // Fetch a script with byte-level progress, then execute it via a Blob URL.
+    // Lets the user see download progress for the ~9MB opencv.js bundle
+    // instead of staring at a frozen "準備中..." label. Falls back to plain
+    // <script src> for URLs whose CORS / bytestream we can't read (some
+    // origins disallow ReadableStream over HTTP/2).
+    async function fetchScriptWithProgress(url, onProgress) {
+      const res = await fetch(url, { mode: 'cors' });
+      if (!res.ok) throw new Error('fetch failed ' + res.status + ' ' + url);
+      const total = parseInt(res.headers.get('Content-Length'), 10) || 0;
+      const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+      if (!reader) {
+        // No streaming reader → just await as a blob, no per-chunk progress.
+        const blob = await res.blob();
+        if (onProgress) onProgress(1);
+        const blobUrl = URL.createObjectURL(blob);
+        try { await loadScript(blobUrl); }
+        finally { URL.revokeObjectURL(blobUrl); }
+        return;
+      }
+      const chunks = [];
+      let received = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+        if (onProgress) onProgress(total > 0 ? received / total : 0);
+      }
+      const all = new Uint8Array(received);
+      let off = 0;
+      for (const c of chunks) { all.set(c, off); off += c.byteLength; }
+      const blobUrl = URL.createObjectURL(new Blob([all], { type: 'application/javascript' }));
+      try { await loadScript(blobUrl); }
+      finally { URL.revokeObjectURL(blobUrl); }
+    }
+    // Try a sequence of URLs until one loads. CDN-first per user direction;
+    // ./opencv.js is the local mirror — same-origin, used as last-resort
+    // fallback when every CDN is unreachable. To populate the local mirror
+    // run `bash update-opencv.sh` in this folder (grabs the latest stable
+    // build from docs.opencv.org and writes opencv.js).
+    async function loadCvScript(onProgress) {
+      const urls = [
+        'https://docs.opencv.org/4.10.0/opencv.js',
+        'https://docs.opencv.org/4.5.0/opencv.js',
+        'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js',
+        './opencv.js',
+      ];
       let lastErr = null;
       for (const url of urls) {
-        try { await loadScript(url); return; }
-        catch (e) { lastErr = e; }
+        try {
+          await fetchScriptWithProgress(url, onProgress);
+          return;
+        } catch (e) {
+          lastErr = e;
+          // Reset bar for the next attempt so the user sees "trying again".
+          if (onProgress) onProgress(0);
+        }
       }
-      throw lastErr || new Error('all script URLs failed');
+      throw lastErr || new Error('all opencv.js URLs failed');
     }
-    async function ensureCv() {
+    async function ensureCv(onProgress) {
       if (cvReady) return cvReady;
       cvReady = (async () => {
-        await loadScriptWithFallbacks([
-          'https://docs.opencv.org/4.10.0/opencv.js',
-          'https://docs.opencv.org/4.5.0/opencv.js',
-          'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js',
-        ]);
+        await loadCvScript(onProgress);
         // OpenCV.js may expose `cv` as a Promise-like that resolves on init,
         // or already-initialized. Wait for cv.Mat to be available either way.
         await new Promise((res) => {
@@ -579,11 +642,17 @@
       clearBox(msg);
       try {
         btn.textContent = '画像処理エンジンを準備中…';
-        await ensureCv();
+        showProgress(0, '画像処理エンジンを準備中…');
+        await ensureCv((p) => {
+          showProgress(p, `画像処理エンジンを準備中… ${Math.round(p * 100)}%`);
+        });
         let ok = 0, skipped = 0;
         for (let i = 0; i < images.length; i++) {
           const im = images[i];
+          const pct = Math.round(((i) / images.length) * 100);
           btn.textContent = `整形プレビュー中… ${i + 1} / ${images.length}`;
+          showProgress(i / images.length,
+            `整形プレビュー中… ${i + 1} / ${images.length} (${pct}%)`);
           // Preserve the original so a re-run starts from the same source
           // each time. Without this a second click would re-rectify the
           // already-rectified canvas (= cropped further or fails).
@@ -598,6 +667,7 @@
           }
           render();
         }
+        showProgress(1, '完了');
         const note = document.createElement('div');
         note.className = 'success';
         note.textContent = `📐 整形: ${ok}件 / 自動検出できず原画像のまま: ${skipped}件 (PDFはまだ作っていません)`;
@@ -607,6 +677,9 @@
       } finally {
         btn.disabled = false;
         btn.textContent = orig;
+        // Leave the bar visible at 100% briefly so the user sees completion,
+        // then hide it.
+        setTimeout(hideProgress, 800);
       }
     });
 
@@ -642,13 +715,27 @@
         let rectifySkipped = 0;
         if (autoRectify) {
           runBtn.textContent = '画像処理エンジンを準備中...';
-          try { await ensureCv(); }
+          showProgress(0, '画像処理エンジンを準備中…');
+          try {
+            await ensureCv((p) => {
+              showProgress(p, `画像処理エンジンを準備中… ${Math.round(p * 100)}%`);
+            });
+          }
           catch (e) {
             showError(msg, '整形エンジンの読み込みに失敗: ' + (e.message || e) + ' (整形なしで続行します)');
           }
           runBtn.textContent = '処理中...';
         }
-        for (const im of images) {
+        for (let pi = 0; pi < images.length; pi++) {
+          const im = images[pi];
+          const pct = Math.round((pi / images.length) * 100);
+          if (autoRectify) {
+            showProgress(pi / images.length,
+              `整形 + PDF化中… ${pi + 1} / ${images.length} (${pct}%)`);
+          } else {
+            showProgress(pi / images.length,
+              `PDF化中… ${pi + 1} / ${images.length} (${pct}%)`);
+          }
           const bytes = await fileToBytes(im.file);
           let embed;
           if (autoRectify) {
@@ -696,6 +783,7 @@
             page.drawImage(embed, { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h });
           }
         }
+        showProgress(1, 'PDF化完了');
         const outBlob = new Blob([await doc.save()], { type: 'application/pdf' });
         download(outBlob, safeFilename(fname.value, 'images') + '.pdf');
         appendPrintButton(msg, outBlob);
@@ -710,6 +798,7 @@
       } finally {
         runBtn.disabled = false;
         runBtn.textContent = orig;
+        setTimeout(hideProgress, 800);
       }
     });
   </script>
