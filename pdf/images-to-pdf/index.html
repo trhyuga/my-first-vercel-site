@@ -669,13 +669,19 @@
     // warpPerspective stretches a smaller pixel patch over more output
     // pixels) and lifts low-contrast text on uneven lighting. CLAHE is
     // applied to the L channel only so colours stay neutral; the unsharp
-    // mask is mild (sigma 1.4, amount 0.6) to avoid the haloing you get
-    // from aggressive document-scan filters.
+    // mask is mild (sigma 1.4, amount 0.6) — bumping it to amount=1.0
+    // turned out to clip both ends around text edges, which painted a
+    // dark halo on the paper background and made the whole page read
+    // as grey/black. 0.6 keeps the sharpness gain without the halo.
     function sharpenCanvasInPlace(canvas) {
       let src = null, lab = null, channels = null, clahe = null, blurred = null, dst = null;
       try {
         src = cv.imread(canvas);
         // ----- CLAHE on L channel for local contrast lift -----
+        // Clip 1.5 (down from 2.0) — the stronger setting was visibly
+        // darkening the paper background on document scans, where most
+        // pixels are already near-white and CLAHE was compressing the
+        // bright end of the histogram.
         try {
           lab = new cv.Mat();
           cv.cvtColor(src, lab, cv.COLOR_RGBA2RGB);
@@ -683,7 +689,7 @@
           channels = new cv.MatVector();
           cv.split(lab, channels);
           if (typeof cv.CLAHE === 'function') {
-            clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+            clahe = new cv.CLAHE(1.5, new cv.Size(8, 8));
             const L = channels.get(0);
             clahe.apply(L, L);
           }
@@ -691,15 +697,11 @@
           cv.cvtColor(lab, lab, cv.COLOR_Lab2RGB);
           cv.cvtColor(lab, src, cv.COLOR_RGB2RGBA);
         } catch (_) { /* CLAHE optional — fall through to unsharp only */ }
-        // ----- Unsharp mask (stronger) -----
-        // Bumped from 1.6/-0.6 → 2.0/-1.0 (amount=1.0) so the camera-far
-        // side (which warpPerspective stretched out) reads sharp instead
-        // of just "less blurry". The matched ±1.0 keeps the overall
-        // brightness unchanged.
+        // ----- Unsharp mask (mild) -----
         blurred = new cv.Mat();
         dst = new cv.Mat();
         cv.GaussianBlur(src, blurred, new cv.Size(0, 0), 1.4);
-        cv.addWeighted(src, 2.0, blurred, -1.0, 0, dst);
+        cv.addWeighted(src, 1.6, blurred, -0.6, 0, dst);
         cv.imshow(canvas, dst);
       } catch (e) {
         console.warn('sharpen failed', e);
