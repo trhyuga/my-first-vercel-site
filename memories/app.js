@@ -1212,6 +1212,10 @@ function orderForTimeline(selected) {
   // Spread those uniformly across the photo time range. Videos whose
   // ts looks plausible (within or close to the photo range) keep their
   // own ts so genuinely-mid-trip videos slot in correctly.
+  // Note: videos NEVER carry their own date/location overlay
+  // (buildTimeline skips them) and never break the photo streak, so
+  // even an evenly-distributed video can't make the date overlays
+  // jump back-and-forth.
   const photos = selected.filter(p => p.kind !== 'video');
   const allVids  = selected.filter(p => p.kind === 'video');
   if (photos.length >= 2 && allVids.length > 0) {
@@ -1332,13 +1336,19 @@ function buildTimeline(orderedItems, allClusters, opts) {
   const timeline = [];
 
   // --- Title card ---
-  const usedClusters = [...new Set(orderedItems.map(p => p.clusterId).filter(Boolean))]
+  // Date range + cluster summary come from PHOTOS only — a video's ts is
+  // often the forwarded/re-encode timestamp and would skew the title's
+  // "2024.06.01 – 06.05" range to today's date. Photos are the trip's
+  // ground truth; videos ride along but don't define the chronology.
+  const photoItems = orderedItems.filter(p => p.kind !== 'video');
+  const tsItems = photoItems.length ? photoItems : orderedItems;
+  const usedClusters = [...new Set(tsItems.map(p => p.clusterId).filter(Boolean))]
     .map(cid => allClusters.find(c => c.id === cid))
     .filter(Boolean);
   const locLabel = fmtLocationSummary(usedClusters);
   // Subtitle = specific date range; the big title above it is filled in by
   // resolveTitle() in buildPlan (place + 年月 / user override / custom).
-  const dateRangeLabel = fmtTitleDateRange(orderedItems.map(p => p.ts));
+  const dateRangeLabel = fmtTitleDateRange(tsItems.map(p => p.ts));
   // posterPhotoId — used by drawTitleCard to render the first body photo as
   // the title-card backdrop so frame 0 of the video isn't a black card. iOS
   // Photos thumbnails the first frame, so a bright photo+title here gives
@@ -1353,43 +1363,55 @@ function buildTimeline(orderedItems, allClusters, opts) {
   });
 
   // --- Body clips with day/location chapter overlays ---
+  // Videos are transparent to the date/location streak: they get no
+  // overlay text themselves and don't update lastDay/lastLabel. So a
+  // photo coming AFTER a video is compared to the photo BEFORE the
+  // video — if they share the same date/location no fresh overlay
+  // appears, and the user isn't pulled out of the trip's chronology
+  // by an interspersed video clip.
   // Suppress the location overlay when the previous photo's cluster
   // resolved to the SAME LABEL — e.g. a single Disneyland trip can split
   // into two GPS clusters (entrance + inside) that both name-resolve to
   // 'ディズニーランド', and the user doesn't want to see the label
   // appear twice in a row.
   let lastDay = null, lastLabel = null;
-  const days = distinctDays(orderedItems);
+  const days = distinctDays(photoItems.length ? photoItems : orderedItems);
   const showDayLabel = days.length > 1; // single-day trip → date is on the title card only
   for (const item of orderedItems) {
+    const isVideo = item.kind === 'video';
     const overlays = [];
-    const day = ymdString(item.ts);
-    const cid = item.clusterId || null;
-    const cluster = allClusters.find(c => c.id === cid);
-    const label = (cluster && cluster.label) ? cluster.label : null;
-
-    const dayChanged = day !== lastDay;
-    const locChanged = label && label !== lastLabel;
-
-    if (opts.subtitlesOn) {
-      if (dayChanged && showDayLabel) {
-        overlays.push({
-          kind: 'date',
-          text: fmtJpDate(item.ts),
-          enterAt: 0.25, holdUntil: perPhotoSec - 0.25, fadeMs: 350,
-        });
+    if (!isVideo) {
+      const day = ymdString(item.ts);
+      const cid = item.clusterId || null;
+      const cluster = allClusters.find(c => c.id === cid);
+      const label = (cluster && cluster.label) ? cluster.label : null;
+      const dayChanged = day !== lastDay;
+      const locChanged = label && label !== lastLabel;
+      if (opts.subtitlesOn) {
+        if (dayChanged && showDayLabel) {
+          overlays.push({
+            kind: 'date',
+            text: fmtJpDate(item.ts),
+            enterAt: 0.25, holdUntil: perPhotoSec - 0.25, fadeMs: 350,
+          });
+        }
+        if (locChanged) {
+          overlays.push({
+            kind: 'location',
+            text: '📍 ' + label,
+            enterAt: 0.45, holdUntil: perPhotoSec - 0.4, fadeMs: 400,
+          });
+        }
       }
-      if (locChanged) {
-        overlays.push({
-          kind: 'location',
-          text: '📍 ' + label,
-          enterAt: 0.45, holdUntil: perPhotoSec - 0.4, fadeMs: 400,
-        });
-      }
+      lastDay = day;
+      // Only update lastLabel when this clip actually carries a label —
+      // a labelless (no-GPS) clip in between two same-label clips must
+      // not break the streak.
+      if (label) lastLabel = label;
     }
 
     timeline.push({
-      kind: item.kind === 'video' ? 'video' : 'photo',
+      kind: isVideo ? 'video' : 'photo',
       photoId: item.id,
       ref: item,
       durationSec: perPhotoSec,
@@ -1397,12 +1419,6 @@ function buildTimeline(orderedItems, allClusters, opts) {
       kenburns: makeKenburnsParams(timeline.length),
       overlays,
     });
-
-    lastDay = day;
-    // Only update lastLabel when this clip actually carries a label —
-    // a labelless (no-GPS) clip in between two same-label clips must
-    // not break the streak.
-    if (label) lastLabel = label;
   }
 
   // --- Closer --- title overwritten in buildPlan to mirror the resolved
