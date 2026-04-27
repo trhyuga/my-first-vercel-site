@@ -9,28 +9,37 @@ window.PDFApp = (function () {
   // iOS Safari ignores `<a download="...">` — clicking the link just
   // navigates to the blob URL, which opens the PDF inline (often
   // sideways on landscape pages because iOS auto-rotates to fit the
-  // screen). The Web Share API is the only path that reliably brings
-  // up the system share sheet with "ファイルに保存 / 写真に保存", which
-  // is what users expect when they tap "ダウンロード". Keep the legacy
-  // anchor-click as a fallback for desktop and any browser that doesn't
-  // implement canShare({files}).
+  // screen). Web Share API with `{ files: [...] }` brings up the
+  // system share sheet with "ファイルに保存", which is what users
+  // expect when they tap "ダウンロード".
+  //
+  // Importantly we do NOT pass `title` here — when the user picked a
+  // text-receiving share target (Notes / Messages / etc.) iOS treated
+  // the title field as the message body and the resulting "saved
+  // file" was a plain-text snippet containing the filename, not the
+  // actual PDF. Files-only is unambiguous.
   function legacyAnchorDownload(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    // target=_blank lets iOS open the blob in a new tab → PDF viewer →
+    // share button → ファイルに保存. Without it iOS replaces the current
+    // page with the PDF inline and the user can't get back to the tool.
+    a.target = '_blank';
+    a.rel = 'noopener';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    // 30 s — Safari/iOS may take a while to actually claim the URL after click().
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    // 60 s — Safari/iOS may take a while to actually claim the URL after click().
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
   function download(blob, filename) {
     const file = (typeof File === 'function')
       ? new File([blob], filename, { type: blob.type })
       : null;
     if (navigator.canShare && file && navigator.canShare({ files: [file] })) {
-      navigator.share({ files: [file], title: filename }).catch((e) => {
+      navigator.share({ files: [file] }).catch((e) => {
         // AbortError = the user cancelled the share sheet. Anything else
         // is a real failure — fall back to the legacy download path so
         // the user still gets the file somehow.
