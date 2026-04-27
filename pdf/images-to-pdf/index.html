@@ -126,8 +126,18 @@
 
     <div class="controls" id="controls" style="display:none;">
       <div class="field">
+        <label>ページサイズ</label>
+        <select id="pageSize">
+          <option value="fit">画像サイズに合わせる</option>
+          <option value="A4P" selected>A4 縦</option>
+          <option value="A4L">A4 横</option>
+          <option value="Letter">Letter</option>
+          <option value="B5P">B5 縦</option>
+        </select>
+      </div>
+      <div class="field">
         <label style="display:flex;align-items:center;gap:0.55rem;cursor:pointer;font-weight:600;">
-          <input type="checkbox" id="autoRectify" style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
+          <input type="checkbox" id="autoRectify" checked style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
           <span>📐 ドキュメント自動整形 (歪み補正・背景除去)</span>
         </label>
         <div class="info-hint" style="margin:0.2rem 0 0 1.5rem;">
@@ -135,7 +145,7 @@
           初回のみ画像処理エンジン (約9MB) のダウンロードあり。端末内処理。
         </div>
         <button type="button" id="rectifyPreview" style="margin:0.4rem 0 0 1.5rem; padding:0.4rem 0.8rem; border:1px solid #cbd5e1; border-radius:8px; background:#f1f5f9; cursor:pointer; font-size:0.85rem; font-weight:600;">
-          👁 整形プレビュー (PDFは作らずサムネだけ更新)
+          👁 整形プレビュー
         </button>
         <button type="button" id="rectifyRestore" style="margin:0.4rem 0 0 0.4rem; padding:0.4rem 0.8rem; border:1px solid #cbd5e1; border-radius:8px; background:#f1f5f9; cursor:pointer; font-size:0.85rem; font-weight:600;">
           ↺ 元画像に戻す
@@ -147,17 +157,13 @@
           </div>
         </div>
       </div>
-      <div class="field">
-        <label>ページサイズ</label>
-        <select id="pageSize">
-          <option value="fit">画像サイズに合わせる</option>
-          <option value="A4P" selected>A4 縦</option>
-          <option value="A4L">A4 横</option>
-          <option value="Letter">Letter</option>
-          <option value="B5P">B5 縦</option>
-        </select>
-      </div>
       <div class="thumb-grid" id="grid"></div>
+      <!-- Status / result message lives just above the filename input so
+           the user sees the latest "整形 N件" / "PDF出力完了" line right
+           where they're about to act on the result. clearBox() is called
+           before each new message append so only the most recent one is
+           on screen at a time. -->
+      <div id="msg"></div>
       <div class="field">
         <label for="fname">出力ファイル名</label>
         <input type="text" id="fname" value="images" />
@@ -165,8 +171,6 @@
       <button class="btn-primary green" id="run">📄 PDFを作成してダウンロード</button>
       <button class="btn-secondary" id="clear">クリア</button>
     </div>
-
-    <div id="msg"></div>
   </div>
 
   <!-- Per-image rotate + crop editor -->
@@ -880,7 +884,7 @@
     // label instead of capturing btn.textContent — capturing risked
     // freezing the button on an intermediate "整形プレビュー中…" string
     // if a click ever fired while a previous run was mid-flight.
-    const PREVIEW_LABEL = '👁 整形プレビュー (PDFは作らずサムネだけ更新)';
+    const PREVIEW_LABEL = '👁 整形プレビュー';
     let previewRunning = false;
     document.getElementById('rectifyPreview').addEventListener('click', async () => {
       if (previewRunning) return;
@@ -1059,13 +1063,19 @@
         showProgress(1, 'PDF化完了');
         const outBlob = new Blob([await doc.save()], { type: 'application/pdf' });
         download(outBlob, safeFilename(fname.value, 'images') + '.pdf');
+        // Replace any prior status note — only the latest run's message
+        // should be on screen so the user can see what happened most
+        // recently without scrolling past stale text.
+        clearBox(msg);
+        const note = document.createElement('div');
+        note.className = 'success';
+        const total = rectifiedCount + rectifySkipped;
+        const counts = total > 0
+          ? ` / 📐 整形: ${rectifiedCount}件 / 整形できず原画像のまま: ${rectifySkipped}件`
+          : '';
+        note.textContent = `🎉 PDF出力完了${counts}`;
+        msg.appendChild(note);
         appendPrintButton(msg, outBlob);
-        if (autoRectify) {
-          const note = document.createElement('div');
-          note.className = 'success';
-          note.textContent = `📐 整形: ${rectifiedCount}件 / 自動検出できず原画像のまま: ${rectifySkipped}件`;
-          msg.appendChild(note);
-        }
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {

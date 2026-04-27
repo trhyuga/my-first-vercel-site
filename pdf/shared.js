@@ -74,12 +74,31 @@ window.PDFApp = (function () {
     }
   }
 
-  // Open the given PDF blob in a hidden iframe and trigger the browser's
-  // print dialog. iOS Safari can't always drive print() through an iframe
-  // for cross-origin-ish blob URLs, so fall back to opening the blob in a
-  // new tab — the user prints from Safari's native PDF viewer UI.
+  // Print is platform-split:
+  //   • iOS Safari → open the blob in a new tab and let the user invoke
+  //     Safari's native share sheet → "プリント". The hidden-iframe path
+  //     used to throw "このウェブページより印刷することは禁止しています"
+  //     on some iOS configurations, even though no such restriction is
+  //     declared anywhere in our code — the prompt is iOS' generic
+  //     reaction to a JS-driven print() against an iframe whose document
+  //     it considers cross-origin (a blob: URL is, by iOS' rules).
+  //     Punting to a new tab avoids that prompt entirely and gives the
+  //     user the same Safari PDF UI they'd get via "ファイルに保存".
+  //   • Desktop / Android → hidden iframe + iframe.print() works fine
+  //     and is silent (no extra tab to close).
+  function isIOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
   function printPdfBlob(blob) {
     const url = URL.createObjectURL(blob);
+    if (isIOS()) {
+      window.open(url, '_blank');
+      // Keep the URL alive long enough for the new tab to load + Safari
+      // to render the PDF before the user reaches for the share sheet.
+      setTimeout(() => URL.revokeObjectURL(url), 120000);
+      return;
+    }
     const existing = document.getElementById('__tr_print_iframe');
     if (existing) { try { existing.parentNode.removeChild(existing); } catch (e) {} }
     const iframe = document.createElement('iframe');
