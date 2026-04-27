@@ -573,6 +573,25 @@
       }
       throw lastErr || new Error('all opencv.js URLs failed');
     }
+    // jscanify@1.2.0 ships its source at src/jscanify.js (no built dist),
+    // so the original /dist/jscanify.min.js URL was a 404. The local
+    // ./jscanify.js mirror is preferred (same-origin, no DNS) and the
+    // jsdelivr / unpkg URLs are fallbacks.
+    async function loadJscanify() {
+      if (typeof jscanify !== 'undefined') return;
+      const urls = [
+        './jscanify.js',
+        'https://cdn.jsdelivr.net/npm/jscanify@1.2.0/src/jscanify.js',
+        'https://cdn.jsdelivr.net/npm/jscanify@1.2.0',
+        'https://unpkg.com/jscanify@1.2.0/src/jscanify.js',
+      ];
+      let lastErr = null;
+      for (const url of urls) {
+        try { await loadScript(url); if (typeof jscanify !== 'undefined') return; }
+        catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('jscanify load failed');
+    }
     async function ensureCv(onProgress) {
       if (cvReady) return cvReady;
       cvReady = (async () => {
@@ -580,9 +599,7 @@
         // the WASM-runtime-ready wait (it pre-installs window.Module so
         // onRuntimeInitialized fires reliably).
         await loadCvScript(onProgress);
-        if (typeof jscanify === 'undefined') {
-          await loadScript('https://cdn.jsdelivr.net/npm/jscanify@1.2.0/dist/jscanify.min.js');
-        }
+        await loadJscanify();
       })();
       return cvReady;
     }
