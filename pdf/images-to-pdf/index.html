@@ -519,38 +519,53 @@
       }
       throw lastErr || new Error('all opencv.js URLs failed');
     }
+    // OpenCV.js init shape varies by version:
+    //   v4.5.x style: `var cv = Module; cv.onRuntimeInitialized = fn`
+    //   v4.10.x style: `var cv = function(){...}` (factory returning a Promise)
+    //   already-loaded: `cv.Mat` exists immediately
+    // Earlier code only handled the callback variant — on docs.opencv.org's
+    // current 4.10.0 build, `cv` is a factory function and our handler
+    // never got wired in, so the user sat at "初期化中…" forever.
+    async function waitForCvRuntime(timeoutMs = 60000) {
+      if (typeof cv === 'undefined') throw new Error('cv global missing after script load');
+      if (cv.Mat) return;
+      // Factory pattern — call once and replace the global with the
+      // resolved module.
+      if (typeof cv === 'function') {
+        const m = await cv();
+        if (m && m.Mat) { window.cv = m; return; }
+      }
+      // Already-a-Promise pattern.
+      if (typeof cv === 'object' && cv && typeof cv.then === 'function') {
+        const m = await cv;
+        if (m && m.Mat) { window.cv = m; return; }
+      }
+      // Callback pattern + polling fallback. We register
+      // onRuntimeInitialized AND poll for cv.Mat — whichever fires first.
+      await new Promise((res, rej) => {
+        let done = false;
+        const finish = () => { if (!done) { done = true; clearInterval(poll); clearTimeout(deadline); res(); } };
+        const fail = (e) => { if (!done) { done = true; clearInterval(poll); clearTimeout(deadline); rej(e); } };
+        try { cv.onRuntimeInitialized = finish; } catch (_) {}
+        const poll = setInterval(() => {
+          if (typeof cv !== 'undefined' && cv.Mat) finish();
+        }, 200);
+        const deadline = setTimeout(
+          () => fail(new Error('OpenCV initialization timed out (' + timeoutMs + 'ms)')),
+          timeoutMs
+        );
+      });
+    }
     async function ensureCv(onProgress) {
       if (cvReady) return cvReady;
       cvReady = (async () => {
         await loadCvScript(onProgress);
-        // After bytes finish downloading the WASM still has to compile +
-        // boot — that takes a few seconds on a phone. Surface it explicitly
-        // so the user doesn't think the bar is stuck.
         if (onProgress) onProgress(1);
+        // After bytes finish downloading the WASM still has to compile +
+        // boot — surface it explicitly so the user doesn't think the bar
+        // is stuck.
         if (progressLabel) progressLabel.textContent = '画像処理エンジンを初期化中…';
-        // OpenCV.js may expose `cv` as a Promise-like that resolves on init,
-        // or already-initialized. Wait for cv.Mat to be available either way.
-        // 60s watchdog so a wedged init surfaces an error rather than
-        // hanging the UI forever.
-        await Promise.race([
-          new Promise((res, rej) => {
-            if (typeof cv !== 'undefined' && cv.Mat) return res();
-            if (typeof cv !== 'undefined' && typeof cv.then === 'function') {
-              cv.then(res, rej); return;
-            }
-            if (typeof cv !== 'undefined') {
-              cv['onRuntimeInitialized'] = res;
-              return;
-            }
-            const t = setInterval(() => {
-              if (typeof cv !== 'undefined' && cv.Mat) { clearInterval(t); res(); }
-            }, 80);
-          }),
-          new Promise((_, rej) => setTimeout(
-            () => rej(new Error('OpenCV initialization timed out (60s)')),
-            60000
-          )),
-        ]);
+        await waitForCvRuntime(60000);
         if (typeof jscanify === 'undefined') {
           await loadScript('https://cdn.jsdelivr.net/npm/jscanify@1.2.0/dist/jscanify.min.js');
         }
