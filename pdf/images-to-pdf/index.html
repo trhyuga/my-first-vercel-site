@@ -664,54 +664,116 @@
       return c;
     }
 
-    // Apply an unsharp mask + light CLAHE pass to the rectified canvas in
-    // place. Compensates for the softness on the camera-far side (where
-    // warpPerspective stretches a smaller pixel patch over more output
-    // pixels) and lifts low-contrast text on uneven lighting. CLAHE is
-    // applied to the L channel only so colours stay neutral; the unsharp
-    // mask is mild (sigma 1.4, amount 0.6) — bumping it to amount=1.0
-    // turned out to clip both ends around text edges, which painted a
-    // dark halo on the paper background and made the whole page read
-    // as grey/black. 0.6 keeps the sharpness gain without the halo.
-    function sharpenCanvasInPlace(canvas) {
-      let src = null, lab = null, channels = null, clahe = null, blurred = null, dst = null;
+    // Post-warp enhancement for the rectified canvas. Two passes fused
+    // into one pixel loop:
+    //
+    //   1. White-point auto-level — find the 95th percentile per RGB
+    //      channel and scale so that becomes ~250. Replaces the previous
+    //      CLAHE pass, which was visibly darkening the paper background
+    //      (CLAHE redistributes the histogram and a near-white-only
+    //      input gets its bright end compressed). The simple percentile
+    //      scale just makes the brightest 5% of pixels become "white",
+    //      which reads correctly on document scans.
+    //
+    //   2. Graduated unsharp mask — varies the amount along the
+    //      detected camera-far axis. The far side (where warpPerspective
+    //      stretches a smaller source patch over more output pixels)
+    //      gets amount ≈ 1.0; the near side gets amount ≈ 0.5. A
+    //      uniform amount=1.0 produced black halos around text on the
+    //      near side; varying by row/column localises the strong
+    //      sharpening to the side that actually needs it.
+    //
+    // `corners` is the SOURCE quad (pre-expansion) — the side with the
+    // shorter source edge is the camera-far side. After warpPerspective
+    // maps that edge to one side of the output rectangle, we can address
+    // the far output side by row or column.
+    function sharpenCanvasInPlace(canvas, corners) {
+      let src = null, blurred = null;
       try {
         src = cv.imread(canvas);
-        // ----- CLAHE on L channel for local contrast lift -----
-        // Clip 1.5 (down from 2.0) — the stronger setting was visibly
-        // darkening the paper background on document scans, where most
-        // pixels are already near-white and CLAHE was compressing the
-        // bright end of the histogram.
-        try {
-          lab = new cv.Mat();
-          cv.cvtColor(src, lab, cv.COLOR_RGBA2RGB);
-          cv.cvtColor(lab, lab, cv.COLOR_RGB2Lab);
-          channels = new cv.MatVector();
-          cv.split(lab, channels);
-          if (typeof cv.CLAHE === 'function') {
-            clahe = new cv.CLAHE(1.5, new cv.Size(8, 8));
-            const L = channels.get(0);
-            clahe.apply(L, L);
-          }
-          cv.merge(channels, lab);
-          cv.cvtColor(lab, lab, cv.COLOR_Lab2RGB);
-          cv.cvtColor(lab, src, cv.COLOR_RGB2RGBA);
-        } catch (_) { /* CLAHE optional — fall through to unsharp only */ }
-        // ----- Unsharp mask (mild) -----
         blurred = new cv.Mat();
-        dst = new cv.Mat();
         cv.GaussianBlur(src, blurred, new cv.Size(0, 0), 1.4);
-        cv.addWeighted(src, 1.6, blurred, -0.6, 0, dst);
-        cv.imshow(canvas, dst);
+        const W = src.cols, H = src.rows;
+        const sd = src.data;
+        const bd = blurred.data;
+        const N = W * H;
+        // ----- White-point histogram → per-channel scale -----
+        const hist = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+        for (let i = 0; i < N; i++) {
+          const j = i * 4;
+          hist[0][sd[j]]++;
+          hist[1][sd[j + 1]]++;
+          hist[2][sd[j + 2]]++;
+        }
+        const target = 250;
+        const scales = [1, 1, 1];
+        for (let c = 0; c < 3; c++) {
+          let cum = 0;
+          const threshold = N * 0.95;
+          for (let v = 0; v < 256; v++) {
+            cum += hist[c][v];
+            if (cum >= threshold) {
+              // Guard against pathological inputs where the 95th percentile
+              // is very dark — those aren't documents and we don't want a
+              // 5× brightness blow-up. Cap the scale at 1.6 either way.
+              if (v > 50) scales[c] = Math.min(1.6, target / v);
+              break;
+            }
+          }
+        }
+        // ----- Detect which output side was camera-far -----
+        let farSide = null;
+        if (corners) {
+          const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+          const cTL = corners.topLeftCorner,    cTR = corners.topRightCorner;
+          const cBL = corners.bottomLeftCorner, cBR = corners.bottomRightCorner;
+          const top = dist(cTL, cTR);
+          const bot = dist(cBL, cBR);
+          const lft = dist(cTL, cBL);
+          const rgt = dist(cTR, cBR);
+          const horizRatio = Math.max(top, bot) / Math.max(1, Math.min(top, bot));
+          const vertRatio  = Math.max(lft, rgt) / Math.max(1, Math.min(lft, rgt));
+          // Pick the more pronounced axis. Threshold 1.05 stops square
+          // shots from triggering a directional pass at all.
+          if (horizRatio > vertRatio && horizRatio > 1.05) {
+            farSide = (top < bot) ? 'top' : 'bottom';
+          } else if (vertRatio > 1.05) {
+            farSide = (lft < rgt) ? 'left' : 'right';
+          }
+        }
+        // ----- Combined graduated unsharp + white-point boost -----
+        const baseAmount = 0.5;
+        const deltaAmount = farSide ? 0.5 : 0;     // 0.5..1.0 across the far axis
+        const sR = scales[0], sG = scales[1], sB = scales[2];
+        for (let y = 0; y < H; y++) {
+          let yFactor = 0.5;
+          if (farSide === 'top')         yFactor = 1 - y / H;
+          else if (farSide === 'bottom') yFactor = y / H;
+          for (let x = 0; x < W; x++) {
+            let factor;
+            if (farSide === 'left')       factor = 1 - x / W;
+            else if (farSide === 'right') factor = x / W;
+            else                          factor = yFactor;
+            const amount = baseAmount + deltaAmount * factor;
+            const i = (y * W + x) * 4;
+            // R
+            let v = (sd[i]   + (sd[i]   - bd[i])   * amount) * sR;
+            sd[i]   = v < 0 ? 0 : v > 255 ? 255 : v;
+            // G
+            v       = (sd[i+1] + (sd[i+1] - bd[i+1]) * amount) * sG;
+            sd[i+1] = v < 0 ? 0 : v > 255 ? 255 : v;
+            // B
+            v       = (sd[i+2] + (sd[i+2] - bd[i+2]) * amount) * sB;
+            sd[i+2] = v < 0 ? 0 : v > 255 ? 255 : v;
+            // alpha untouched
+          }
+        }
+        cv.imshow(canvas, src);
       } catch (e) {
         console.warn('sharpen failed', e);
       } finally {
-        if (src)      try { src.delete(); } catch (_) {}
-        if (lab)      try { lab.delete(); } catch (_) {}
-        if (channels) try { channels.delete(); } catch (_) {}
-        if (clahe)    try { clahe.delete(); } catch (_) {}
-        if (blurred)  try { blurred.delete(); } catch (_) {}
-        if (dst)      try { dst.delete(); } catch (_) {}
+        if (src)     try { src.delete(); } catch (_) {}
+        if (blurred) try { blurred.delete(); } catch (_) {}
       }
     }
 
@@ -761,18 +823,22 @@
         const outH = isLandscape ? A4_SHORT : A4_LONG;
         // jscanify's contour detection tends to fall a few pixels INSIDE
         // the actual paper edge (the threshold step erodes the boundary).
-        // Push each corner outward from the quad centroid by ~2.5% so the
-        // warp captures the full sheet rather than leaving a ghostly
-        // background border on the rectified output. Clamp to image bounds
-        // so we never sample beyond what the camera saw.
+        // Push each corner outward from the quad centroid; X gets ~2.5%,
+        // Y gets ~4.5% — Y needs more because jscanify's contour is more
+        // conservative on the horizontal paper edges (top/bottom of the
+        // sheet) than on the vertical ones, so without the extra Y push
+        // a thin strip of floor still sneaks into the rectified output's
+        // top/bottom on otherwise good captures. Clamp to image bounds so
+        // we never sample beyond what the camera saw.
         const W = imgEl.naturalWidth || imgEl.width;
         const H = imgEl.naturalHeight || imgEl.height;
         const cx = (tl.x + tr.x + br.x + bl.x) / 4;
         const cy = (tl.y + tr.y + br.y + bl.y) / 4;
-        const PAD = 1.025;
+        const PAD_X = 1.025;
+        const PAD_Y = 1.045;
         const expand = (p) => ({
-          x: Math.max(0, Math.min(W - 1, cx + (p.x - cx) * PAD)),
-          y: Math.max(0, Math.min(H - 1, cy + (p.y - cy) * PAD)),
+          x: Math.max(0, Math.min(W - 1, cx + (p.x - cx) * PAD_X)),
+          y: Math.max(0, Math.min(H - 1, cy + (p.y - cy) * PAD_Y)),
         });
         const expandedCorners = {
           topLeftCorner:     expand(tl),
@@ -784,13 +850,11 @@
         // findPaperContour internally (saves a second OpenCV pass).
         const canvas = scanner.extractPaper(imgEl, outW, outH, expandedCorners);
         if (!canvas) return null;
-        // Sharpen in place — when the camera was tilted, the side that
-        // was further from the lens captured fewer pixels per unit area,
-        // and warpPerspective stretches them out so the side reads as
-        // soft / blurry. Unsharp masking lifts edge contrast across the
-        // whole image, which compensates for the perceived softness of
-        // the camera-far side without over-sharpening the near side.
-        sharpenCanvasInPlace(canvas);
+        // Pass the ORIGINAL (pre-expansion) corners so sharpenCanvasInPlace
+        // can detect which side was camera-far from the source quad's edge
+        // lengths. The near/far asymmetry is determined by how the camera
+        // saw the page, not by our expansion.
+        sharpenCanvasInPlace(canvas, corners);
         // Return the EXPANDED corners so the debug overlay shows the
         // actual quad we warped, not the smaller contour jscanify found.
         return { canvas, corners: expandedCorners };
