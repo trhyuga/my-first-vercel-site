@@ -4004,19 +4004,26 @@ async function exportVideo(renderer, mixer, totalSec) {
     showRenderProgress(p, `🎬 書き出し中… ${Math.round(p * 100)}% (${(p * totalSec).toFixed(1)} / ${totalSec.toFixed(1)}s)`);
   });
   showRenderProgress(1, '🎬 ファイナライズ中…');
-  // Give the recorder a moment to flush the final frame's data.
-  await new Promise(r => setTimeout(r, 200));
+  // Stop the captureStream's video+audio tracks BEFORE recorder.stop() so
+  // iOS Safari can't keep grabbing frames from the (now-frozen) canvas
+  // during MediaRecorder finalize. Without this the file's tail kept
+  // growing for ~30-60s with duplicated closer-card frames on long
+  // exports — iOS treats stop() as "finish current buffer" but the
+  // captureStream keeps feeding new frames into that buffer in the
+  // meantime. Killing the source tracks closes that loop.
+  try { for (const t of stream.getTracks()) t.stop(); } catch (_) {}
   // Force-flush the in-progress timeslice before stop() so the very last
-  // ~1s of frames isn't dropped on iOS (where the implicit flush at stop
-  // sometimes drops the partial buffer).
+  // ~1s of frames isn't dropped on iOS.
   try { if (recorder.state === 'recording') recorder.requestData(); } catch (_) {}
   try { recorder.stop(); } catch (_) {}
-  // Cap the wait on the 'stop' event. If iOS Safari's recorder doesn't
-  // dispatch it (long exports occasionally hang here), fall back to
-  // whatever chunks we already have.
+  // 1.5s cap on the 'stop' event — with the tracks already stopped the
+  // recorder typically finalizes within a few hundred ms. The longer 8s
+  // we used to allow ended up adding seconds of frozen tail to long
+  // exports because iOS wasn't honoring the stop until the buffer
+  // drained.
   await Promise.race([
     stopped,
-    new Promise(r => setTimeout(r, 8000)),
+    new Promise(r => setTimeout(r, 1500)),
   ]);
   if (!chunks.length) throw new Error('録画データが空です。長すぎる動画は端末メモリが不足している可能性があります。');
   const outputType = mime || (chunks[0] && chunks[0].type) || 'video/webm';
