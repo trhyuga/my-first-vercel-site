@@ -266,7 +266,29 @@ function computeDHash(srcCanvas) {
   c.width = TW; c.height = TH;
   const cx = c.getContext('2d');
   cx.drawImage(srcCanvas, 0, 0, TW, TH);
-  const data = cx.getImageData(0, 0, TW, TH).data;
+  return _hashFrom9x8(cx.getImageData(0, 0, TW, TH).data);
+}
+
+// Square-centred variant of the dHash. Forces a centre-square crop of the
+// source before the 9×8 thumbnail so portrait and landscape shots of the
+// same scene produce comparable hashes — the regular dHash squashes the
+// long axis, which makes cross-orientation duplicates look nothing alike.
+function computeDHashSquare(srcCanvas) {
+  const w = srcCanvas.width, h = srcCanvas.height;
+  if (!w || !h) return { lo: 0, hi: 0 };
+  const side = Math.min(w, h);
+  const sx = Math.floor((w - side) / 2);
+  const sy = Math.floor((h - side) / 2);
+  const TW = 9, TH = 8;
+  const c = document.createElement('canvas');
+  c.width = TW; c.height = TH;
+  const cx = c.getContext('2d');
+  cx.drawImage(srcCanvas, sx, sy, side, side, 0, 0, TW, TH);
+  return _hashFrom9x8(cx.getImageData(0, 0, TW, TH).data);
+}
+
+function _hashFrom9x8(data) {
+  const TW = 9, TH = 8;
   const gray = new Float32Array(TW * TH);
   for (let i = 0, j = 0; i < data.length; i += 4, j++) {
     gray[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
@@ -581,6 +603,8 @@ async function processImage(file) {
   const blurScore = laplacianVariance(analysisCanvas);
   const { mean: lumaMean, variance: lumaVar } = frameLumaStats(analysisCanvas);
   const dHash = computeDHash(analysisCanvas);
+  // Cross-orientation dedup hash — see computeDHashSquare above.
+  const dHashSquare = computeDHashSquare(analysisCanvas);
 
   // Face quality on a slightly larger canvas — TinyFaceDetector struggles
   // below ~480px when faces are small in the frame.
@@ -616,6 +640,7 @@ async function processImage(file) {
     gps,
     blurScore,
     dHash,
+    dHashSquare,
     hasFaces: face.hasFaces,
     faceCount: face.faceCount,
     faceScore: face.faceScore,
@@ -740,7 +765,15 @@ function groupSimilarPhotos(photos) {
       const head = g[0];
       if (head.kind === 'video' || !head.dHash) continue;
       if (Math.abs(p.ts - head.ts) > timeWindow) continue;
-      if (hammingDistance(head.dHash, p.dHash) <= hammingMax) {
+      // Same orientation → use the regular dHash. Different orientation
+      // (portrait vs landscape) → use the centre-square dHash; the regular
+      // one squashes the long axis differently for each orientation so
+      // same-scene cross-orientation pairs look unrelated to it.
+      const sameOri = head.orientation === p.orientation;
+      const dist = sameOri
+        ? hammingDistance(head.dHash, p.dHash)
+        : hammingDistance(head.dHashSquare, p.dHashSquare);
+      if (dist <= hammingMax) {
         g.push(p);
         placed = true;
         break;
@@ -761,8 +794,13 @@ function pickBestOfGroup(group, prefOrientation) {
     if (p.bad) score -= 5;             // blurry photos demoted hard
     if (p.faceScore !== undefined) score += p.faceScore * 1.4;
     score += Math.log10(Math.max(1, p.blurScore)) * 0.5;
-    if (p.orientation === prefOrientation) score += 0.6;
-    else if (p.orientation === 'square') score += 0.1;
+    // Strong orientation preference — when a group contains both a
+    // portrait and a landscape of the same scene the user wants the one
+    // matching the output aspect, even if the other has a slightly
+    // better face/blur score. Bonus is large enough (+2.0) to override
+    // typical face-score deltas (~±1.4) but not a "bad" tag (-5).
+    if (p.orientation === prefOrientation) score += 2.0;
+    else if (p.orientation === 'square') score += 0.5;
     if (score > bestScore) { best = p; bestScore = score; }
   }
   return best;
