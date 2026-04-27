@@ -642,7 +642,12 @@
       try {
         src = cv.imread(canvas);
         blurred = new cv.Mat();
-        cv.GaussianBlur(src, blurred, new cv.Size(0, 0), 1.4);
+        // sigma 1.8 (was 1.4) — the camera-far side's softness is a
+        // wider blur (warpPerspective stretching a smaller patch over
+        // more pixels), so a slightly larger sigma reaches the actual
+        // edges that need recovering rather than just the smallest
+        // local details.
+        cv.GaussianBlur(src, blurred, new cv.Size(0, 0), 1.8);
         const W = src.cols, H = src.rows;
         const sd = src.data;
         const bd = blurred.data;
@@ -692,8 +697,13 @@
           }
         }
         // ----- Combined graduated unsharp + white-point boost -----
+        // baseAmount stays 0.5 on the near side (no halos there). delta
+        // bumped 0.5 → 0.7 so the far edge tops out at amount=1.2 — a
+        // bit more bite for the still-soft far side. Halos saturate at
+        // either end of the unsharp formula, so going past 1.0 mostly
+        // just widens existing halos rather than introducing new ones.
         const baseAmount = 0.5;
-        const deltaAmount = farSide ? 0.5 : 0;     // 0.5..1.0 across the far axis
+        const deltaAmount = farSide ? 0.7 : 0;     // 0.5..1.2 across the far axis
         const sR = scales[0], sG = scales[1], sB = scales[2];
         for (let y = 0; y < H; y++) {
           let yFactor = 0.5;
