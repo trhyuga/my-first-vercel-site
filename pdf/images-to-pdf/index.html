@@ -161,15 +161,6 @@
           <option value="B5P">B5 縦</option>
         </select>
       </div>
-      <div class="field">
-        <label>余白</label>
-        <select id="margin">
-          <option value="0" selected>なし</option>
-          <option value="10">少なめ (10mm)</option>
-          <option value="20">標準 (20mm)</option>
-          <option value="30">広め (30mm)</option>
-        </select>
-      </div>
       <div class="thumb-grid" id="grid"></div>
       <div class="field">
         <label for="fname">出力ファイル名</label>
@@ -700,11 +691,15 @@
           cv.cvtColor(lab, lab, cv.COLOR_Lab2RGB);
           cv.cvtColor(lab, src, cv.COLOR_RGB2RGBA);
         } catch (_) { /* CLAHE optional — fall through to unsharp only */ }
-        // ----- Unsharp mask -----
+        // ----- Unsharp mask (stronger) -----
+        // Bumped from 1.6/-0.6 → 2.0/-1.0 (amount=1.0) so the camera-far
+        // side (which warpPerspective stretched out) reads sharp instead
+        // of just "less blurry". The matched ±1.0 keeps the overall
+        // brightness unchanged.
         blurred = new cv.Mat();
         dst = new cv.Mat();
         cv.GaussianBlur(src, blurred, new cv.Size(0, 0), 1.4);
-        cv.addWeighted(src, 1.6, blurred, -0.6, 0, dst);
+        cv.addWeighted(src, 2.0, blurred, -1.0, 0, dst);
         cv.imshow(canvas, dst);
       } catch (e) {
         console.warn('sharpen failed', e);
@@ -762,9 +757,30 @@
         const isLandscape = w > h;
         const outW = isLandscape ? A4_LONG : A4_SHORT;
         const outH = isLandscape ? A4_SHORT : A4_LONG;
+        // jscanify's contour detection tends to fall a few pixels INSIDE
+        // the actual paper edge (the threshold step erodes the boundary).
+        // Push each corner outward from the quad centroid by ~2.5% so the
+        // warp captures the full sheet rather than leaving a ghostly
+        // background border on the rectified output. Clamp to image bounds
+        // so we never sample beyond what the camera saw.
+        const W = imgEl.naturalWidth || imgEl.width;
+        const H = imgEl.naturalHeight || imgEl.height;
+        const cx = (tl.x + tr.x + br.x + bl.x) / 4;
+        const cy = (tl.y + tr.y + br.y + bl.y) / 4;
+        const PAD = 1.025;
+        const expand = (p) => ({
+          x: Math.max(0, Math.min(W - 1, cx + (p.x - cx) * PAD)),
+          y: Math.max(0, Math.min(H - 1, cy + (p.y - cy) * PAD)),
+        });
+        const expandedCorners = {
+          topLeftCorner:     expand(tl),
+          topRightCorner:    expand(tr),
+          bottomRightCorner: expand(br),
+          bottomLeftCorner:  expand(bl),
+        };
         // Pass cornerPoints as 4th arg so extractPaper doesn't redo
         // findPaperContour internally (saves a second OpenCV pass).
-        const canvas = scanner.extractPaper(imgEl, outW, outH, corners);
+        const canvas = scanner.extractPaper(imgEl, outW, outH, expandedCorners);
         if (!canvas) return null;
         // Sharpen in place — when the camera was tilted, the side that
         // was further from the lens captured fewer pixels per unit area,
@@ -773,7 +789,9 @@
         // whole image, which compensates for the perceived softness of
         // the camera-far side without over-sharpening the near side.
         sharpenCanvasInPlace(canvas);
-        return { canvas, corners };
+        // Return the EXPANDED corners so the debug overlay shows the
+        // actual quad we warped, not the smaller contour jscanify found.
+        return { canvas, corners: expandedCorners };
       } catch (e) {
         console.warn('rectify failed', e);
         return null;
@@ -910,8 +928,9 @@
       try {
         const doc = await PDFLib.PDFDocument.create();
         const sizeKey = document.getElementById('pageSize').value;
-        const marginMm = parseFloat(document.getElementById('margin').value);
-        const marginPt = marginMm / 25.4 * 72;
+        // Margin selector was removed (always "なし") — keep marginPt = 0
+        // so the existing fit-vs-bordered branching below still compiles.
+        const marginPt = 0;
         const autoRectify = document.getElementById('autoRectify').checked;
 
         // Re-encode via canvas for cases where pdf-lib can't embed the raw
