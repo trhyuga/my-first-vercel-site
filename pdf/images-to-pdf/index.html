@@ -126,16 +126,6 @@
 
     <div class="controls" id="controls" style="display:none;">
       <div class="field">
-        <label>ページサイズ</label>
-        <select id="pageSize">
-          <option value="fit">画像サイズに合わせる</option>
-          <option value="A4P" selected>A4 縦</option>
-          <option value="A4L">A4 横</option>
-          <option value="Letter">Letter</option>
-          <option value="B5P">B5 縦</option>
-        </select>
-      </div>
-      <div class="field">
         <label style="display:flex;align-items:center;gap:0.55rem;cursor:pointer;font-weight:600;">
           <input type="checkbox" id="autoRectify" checked style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
           <span>📐 ドキュメント自動整形 (歪み補正・背景除去)</span>
@@ -206,12 +196,10 @@
   <script>
     const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, appendPrintButton } = PDFApp;
 
-    const SIZES = {
-      A4P: [595.28, 841.89],
-      A4L: [841.89, 595.28],
-      Letter: [612, 792],
-      B5P: [498.89, 708.66],
-    };
+    // A4 in PDF points (72/inch). The page size dropdown was removed —
+    // every page is A4, oriented to match the embedded image's aspect.
+    const A4_PORTRAIT  = [595.28, 841.89];
+    const A4_LANDSCAPE = [841.89, 595.28];
 
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
@@ -858,25 +846,17 @@
     }
 
     // Returns Promise< { canvas, corners } | null >. Loads jscanify lazily.
-    async function rectifyImageEntry(im, orientationHint = 'auto') {
+    // Orientation is always auto-detected from the source paper quad, so
+    // shooting a landscape doc (or rotating 90° in the editor) maps to a
+    // landscape A4 output and shooting a portrait doc maps to portrait.
+    async function rectifyImageEntry(im) {
       await ensureCv();
       const img = await new Promise((r, rej) => {
         const x = new Image();
         x.onload = () => r(x); x.onerror = rej;
         x.src = im.dataUrl;
       });
-      return rectifyWithJscanify(img, orientationHint);
-    }
-    // Map the page-size dropdown to a rectify orientation hint. A4 横 →
-    // landscape, every other size we ship is portrait. "fit" lets the
-    // detected paper orientation drive the output (or post-rotation
-    // auto-detect, when the user manually rotates 90° in the editor).
-    function currentRectifyOrientationHint() {
-      const sel = document.getElementById('pageSize');
-      const v = sel ? sel.value : '';
-      if (v === 'A4L') return 'landscape';
-      if (v === 'A4P' || v === 'B5P' || v === 'Letter') return 'portrait';
-      return 'auto';
+      return rectifyWithJscanify(img);
     }
 
     // Preview-only rectify: runs the same pipeline as the PDF export but
@@ -943,8 +923,7 @@
           // already-rectified canvas (= cropped further or fails).
           if (!im.originalDataUrl) im.originalDataUrl = im.dataUrl;
           else im.dataUrl = im.originalDataUrl;
-          const rectified = await rectifyImageEntry(im, currentRectifyOrientationHint())
-            .catch(() => null);
+          const rectified = await rectifyImageEntry(im).catch(() => null);
           if (rectified) {
             try {
               im.dataUrl = rectified.canvas.toDataURL('image/jpeg', 0.85);
@@ -980,10 +959,6 @@
       runBtn.textContent = '処理中...';
       try {
         const doc = await PDFLib.PDFDocument.create();
-        const sizeKey = document.getElementById('pageSize').value;
-        // Margin selector was removed (always "なし") — keep marginPt = 0
-        // so the existing fit-vs-bordered branching below still compiles.
-        const marginPt = 0;
         const autoRectify = document.getElementById('autoRectify').checked;
 
         // Re-encode via canvas for cases where pdf-lib can't embed the raw
@@ -1038,8 +1013,7 @@
           let embed;
           if (autoRectify && !previewAttempted) {
             // No preview was run for this image — apply rectify on the fly.
-            const rectified = await rectifyImageEntry(im, currentRectifyOrientationHint())
-              .catch(() => null);
+            const rectified = await rectifyImageEntry(im).catch(() => null);
             if (rectified) {
               im.originalDataUrl = im.dataUrl;
               im.dataUrl = rectified.canvas.toDataURL('image/jpeg', 0.85);
@@ -1076,23 +1050,17 @@
               } else { embed = await reencodeAsJpg(im); }
             } catch (e) { embed = await reencodeAsJpg(im); }
           }
-          let pageW, pageH;
-          if (sizeKey === 'fit') {
-            pageW = embed.width; pageH = embed.height;
-          } else {
-            [pageW, pageH] = SIZES[sizeKey];
-          }
+          // Always A4, oriented to match the embedded image. Rectified
+          // pages map exactly (1240×1754 px @ 150 DPI = A4 in points);
+          // raw photos scale-to-fit centred on whichever orientation
+          // their aspect points to.
+          const isLandscapeEmbed = embed.width > embed.height;
+          const [pageW, pageH] = isLandscapeEmbed ? A4_LANDSCAPE : A4_PORTRAIT;
           const page = doc.addPage([pageW, pageH]);
-          if (sizeKey === 'fit') {
-            page.drawImage(embed, { x: 0, y: 0, width: pageW, height: pageH });
-          } else {
-            const innerW = pageW - marginPt * 2;
-            const innerH = pageH - marginPt * 2;
-            const scale = Math.min(innerW / embed.width, innerH / embed.height);
-            const w = embed.width * scale;
-            const h = embed.height * scale;
-            page.drawImage(embed, { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h });
-          }
+          const scale = Math.min(pageW / embed.width, pageH / embed.height);
+          const w = embed.width * scale;
+          const h = embed.height * scale;
+          page.drawImage(embed, { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h });
         }
         showProgress(1, 'PDF化完了');
         const outBlob = new Blob([await doc.save()], { type: 'application/pdf' });
