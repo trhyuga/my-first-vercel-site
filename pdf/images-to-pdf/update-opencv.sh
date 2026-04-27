@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Refresh the local opencv.js mirror used as the last-resort fallback
-# in pdf/images-to-pdf/index.html (the "整形プレビュー" / 自動整形 path).
+# Refresh the local opencv.js bundle that the 整形プレビュー / 自動整形
+# path in pdf/images-to-pdf/index.html loads first (same-origin, no CDN
+# roundtrip). The CDN URLs in the loader are now fallbacks; this script
+# keeps the local copy current with upstream stable.
 #
 # Usage:  bash update-opencv.sh
-# Result: writes ./opencv.js (~9 MB) and prints its size for verification.
-#
-# The page already loads opencv.js from CDNs first
-# (docs.opencv.org → jsdelivr) and only falls back to ./opencv.js when
-# every CDN attempt fails. Refreshing this file periodically keeps the
-# offline / outage-fallback build current.
+# Result: writes ./opencv.js (~10 MB) and prints its size for verification.
+# Then:   git add opencv.js && git commit -m "..." && git push.
 
 set -euo pipefail
 
