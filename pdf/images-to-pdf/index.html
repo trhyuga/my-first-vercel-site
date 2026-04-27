@@ -989,22 +989,28 @@
             showProgress(pi / images.length,
               `PDF化中… ${pi + 1} / ${images.length} (${pct}%)`);
           }
-          const bytes = await fileToBytes(im.file);
+          // im.originalDataUrl is set the first time the preview button (or
+          // an on-the-fly autoRectify pass below) touches this image — it
+          // marks "rectification has already been attempted, im.dataUrl
+          // reflects whatever the user has decided to use". When set we
+          // MUST embed from im.dataUrl, not from im.file: ignoring the
+          // preview's result was the "横画像が出てきた" bug — the run path
+          // re-read im.file (raw, untilted) and embedded that, throwing
+          // away the rectified canvas the user had already approved.
+          const previewAttempted = !!im.originalDataUrl;
           let embed;
-          if (autoRectify) {
+          if (autoRectify && !previewAttempted) {
+            // No preview was run for this image — apply rectify on the fly.
             const rectified = await rectifyImageEntry(im).catch(() => null);
             if (rectified) {
-              embed = await rectifiedToJpg(rectified.canvas);
+              im.originalDataUrl = im.dataUrl;
+              im.dataUrl = rectified.canvas.toDataURL('image/jpeg', 0.85);
+              try { render(); } catch (e) {}
               rectifiedCount++;
-              // Update the UI thumbnail too so the user can see what landed
-              // in the PDF after rectification.
-              try {
-                if (!im.originalDataUrl) im.originalDataUrl = im.dataUrl;
-                im.dataUrl = rectified.canvas.toDataURL('image/jpeg', 0.85);
-                render();
-              } catch (e) {}
+              embed = await rectifiedToJpg(rectified.canvas);
             } else {
               rectifySkipped++;
+              const bytes = await fileToBytes(im.file);
               try {
                 if (im.file.type === 'image/png' || /\.png$/i.test(im.file.name)) {
                   embed = await doc.embedPng(bytes);
@@ -1013,7 +1019,17 @@
                 } else { embed = await reencodeAsJpg(im); }
               } catch (e) { embed = await reencodeAsJpg(im); }
             }
+          } else if (previewAttempted) {
+            // Preview ran. Whether it succeeded or fell back to original,
+            // im.dataUrl is the canvas the user is looking at — use it.
+            // Also captures any post-preview ✎ editor edits.
+            embed = await reencodeAsJpg(im);
+            if (im.dataUrl !== im.originalDataUrl) rectifiedCount++;
+            else rectifySkipped++;
           } else {
+            // No preview, no autoRectify — embed the original file directly
+            // for maximum fidelity (no canvas re-encode round-trip).
+            const bytes = await fileToBytes(im.file);
             try {
               if (im.file.type === 'image/png' || /\.png$/i.test(im.file.name)) {
                 embed = await doc.embedPng(bytes);
