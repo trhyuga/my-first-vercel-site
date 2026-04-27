@@ -307,6 +307,256 @@
       return target;
     }
 
+    // ========================================================================
+    // PaddleOCR via ONNX Runtime Web. Optional — runs only if the local
+    // model files are committed under ./paddle-ocr-*.onnx + ./paddle-ocr-dict
+    // .txt (see update-paddle-ocr.sh in this folder for fetch instructions).
+    // When present, every page is OCR'd by Paddle on BOTH the raw and the
+    // rectified canvas; results are merged with the Tesseract output by
+    // mean-confidence and the winning text per page is what the user sees.
+    //
+    // Implementation overview:
+    //   - PP-OCRv4 mobile pipeline: detection (DBNet) → recognition (CRNN+CTC).
+    //   - Detection input  [1,3,H,W] (H,W multiples of 32, capped at 960)
+    //               output [1,1,H,W] sigmoid probability map. We threshold,
+    //               run cv.findContours, fit min-area boxes, project boxes
+    //               back to source coords.
+    //   - Recognition input [1,3,48,W] (W rounded up to multiple of 8)
+    //                output [1,T,C] softmax. Argmax per timestep, collapse
+    //                repeats, drop blanks (idx 0), look up via dict.
+    //   - The dict is a UTF-8 line-per-char file. Token 0 is reserved blank.
+    // ========================================================================
+    let ortReady = null;
+    async function ensureOrt() {
+      if (ortReady) return ortReady;
+      ortReady = (async () => {
+        if (typeof ort === 'undefined') {
+          // Try same-origin first (won't usually exist), then jsdelivr.
+          try {
+            await loadScript('./onnxruntime-web.min.js');
+          } catch (_) {
+            await loadScript('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js');
+          }
+        }
+        // Tell ORT where to find its own .wasm files (some hosts misroute).
+        try {
+          ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/';
+        } catch (_) {}
+      })();
+      return ortReady;
+    }
+
+    let paddleState = { det: null, rec: null, dict: null, error: null };
+    async function ensurePaddle(onProgress) {
+      if (paddleState.det && paddleState.rec && paddleState.dict) return paddleState;
+      if (paddleState.error) throw paddleState.error;
+      await ensureOrt();
+      try {
+        if (!paddleState.dict) {
+          const dictRes = await fetch('./paddle-ocr-dict.txt');
+          if (!dictRes.ok) throw new Error('paddle-ocr-dict.txt not found (run ./update-paddle-ocr.sh)');
+          const text = await dictRes.text();
+          // Token 0 is the CTC blank — prepend an empty placeholder so dict
+          // index 1 maps to the first real char (PaddleOCR convention).
+          paddleState.dict = ['<blank>', ...text.split(/\r?\n/).filter(s => s.length > 0)];
+        }
+        if (!paddleState.det) {
+          if (onProgress) onProgress(0, 'PaddleOCR 検出モデル読み込み中…');
+          paddleState.det = await ort.InferenceSession.create('./paddle-ocr-det.onnx', {
+            executionProviders: ['wasm'],
+            graphOptimizationLevel: 'all',
+          });
+        }
+        if (!paddleState.rec) {
+          if (onProgress) onProgress(0.5, 'PaddleOCR 認識モデル読み込み中…');
+          paddleState.rec = await ort.InferenceSession.create('./paddle-ocr-rec.onnx', {
+            executionProviders: ['wasm'],
+            graphOptimizationLevel: 'all',
+          });
+        }
+        if (onProgress) onProgress(1, 'PaddleOCR 起動完了');
+        return paddleState;
+      } catch (e) {
+        paddleState.error = e;
+        throw e;
+      }
+    }
+
+    // Convert a canvas / drawable to a Float32 NCHW tensor at (outW, outH)
+    // with ImageNet-style normalisation (mean [0.485,0.456,0.406], std
+    // [0.229,0.224,0.225]). PaddleOCR's training pipeline used this exact
+    // normalisation so anything else degrades both det and rec accuracy.
+    function canvasToOcrTensor(srcCanvas, outW, outH) {
+      const off = document.createElement('canvas');
+      off.width = outW; off.height = outH;
+      const ctx = off.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, outW, outH);
+      ctx.drawImage(srcCanvas, 0, 0, outW, outH);
+      const imgData = ctx.getImageData(0, 0, outW, outH).data;
+      const N = outW * outH;
+      const data = new Float32Array(3 * N);
+      const m = [0.485, 0.456, 0.406], s = [0.229, 0.224, 0.225];
+      // CHW layout: plane 0 = R, plane 1 = G, plane 2 = B
+      for (let i = 0; i < N; i++) {
+        const r = imgData[i * 4]     / 255;
+        const g = imgData[i * 4 + 1] / 255;
+        const b = imgData[i * 4 + 2] / 255;
+        data[i]         = (r - m[0]) / s[0];
+        data[N + i]     = (g - m[1]) / s[1];
+        data[2 * N + i] = (b - m[2]) / s[2];
+      }
+      return new ort.Tensor('float32', data, [1, 3, outH, outW]);
+    }
+
+    // Run DBNet detection. Returns an array of axis-aligned source-coord
+    // bboxes [{x0,y0,x1,y1}, ...]. Uses cv.findContours on the binarised
+    // probability map — we already have OpenCV loaded for rectify so we
+    // don't need a separate CV impl.
+    async function paddleDetect(srcCanvas) {
+      const session = paddleState.det;
+      const inputName = session.inputNames[0];
+      const outputName = session.outputNames[0];
+      // Resize so max side ≤ 960 and both dims are multiples of 32.
+      const MAX_SIDE = 960;
+      let scale = 1;
+      const longest = Math.max(srcCanvas.width, srcCanvas.height);
+      if (longest > MAX_SIDE) scale = MAX_SIDE / longest;
+      const round32 = (x) => Math.max(32, Math.round(x / 32) * 32);
+      const inW = round32(srcCanvas.width  * scale);
+      const inH = round32(srcCanvas.height * scale);
+      const tensor = canvasToOcrTensor(srcCanvas, inW, inH);
+      const result = await session.run({ [inputName]: tensor });
+      const probMap = result[outputName];           // [1, 1, inH, inW]
+      const data = probMap.data;                    // Float32Array
+      // Binarise + find contours via OpenCV.
+      let mask = null, contours = null, hierarchy = null;
+      const boxes = [];
+      try {
+        mask = new cv.Mat(inH, inW, cv.CV_8UC1);
+        for (let i = 0; i < inH * inW; i++) {
+          mask.data[i] = data[i] > 0.30 ? 255 : 0;
+        }
+        contours = new cv.MatVector();
+        hierarchy = new cv.Mat();
+        cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        const sx = srcCanvas.width  / inW;
+        const sy = srcCanvas.height / inH;
+        const MIN_BOX_PX = 8;          // drop noise specks
+        for (let i = 0; i < contours.size(); i++) {
+          const c = contours.get(i);
+          const r = cv.boundingRect(c);
+          c.delete();
+          if (r.width < MIN_BOX_PX || r.height < MIN_BOX_PX) continue;
+          // Pad ~3 px around each box (in inference coords) before
+          // projecting back, otherwise rec sometimes clips ascenders /
+          // descenders.
+          const pad = 3;
+          const x0 = Math.max(0, (r.x - pad) * sx);
+          const y0 = Math.max(0, (r.y - pad) * sy);
+          const x1 = Math.min(srcCanvas.width,  (r.x + r.width  + pad) * sx);
+          const y1 = Math.min(srcCanvas.height, (r.y + r.height + pad) * sy);
+          if (x1 - x0 < 4 || y1 - y0 < 4) continue;
+          boxes.push({ x0, y0, x1, y1 });
+        }
+        // Sort top-to-bottom then left-to-right so the output reads in
+        // natural document order.
+        boxes.sort((a, b) => {
+          if (Math.abs(a.y0 - b.y0) > 8) return a.y0 - b.y0;
+          return a.x0 - b.x0;
+        });
+      } finally {
+        if (mask)      try { mask.delete(); }      catch (_) {}
+        if (contours)  try { contours.delete(); }  catch (_) {}
+        if (hierarchy) try { hierarchy.delete(); } catch (_) {}
+      }
+      return boxes;
+    }
+
+    // Crop a region of a source canvas, scale to (outW, outH), return the
+    // resulting canvas. Used to feed a single text region to the rec model.
+    function cropToCanvas(srcCanvas, x0, y0, x1, y1, outW, outH) {
+      const out = document.createElement('canvas');
+      out.width = outW; out.height = outH;
+      const ctx = out.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, outW, outH);
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(srcCanvas, x0, y0, x1 - x0, y1 - y0, 0, 0, outW, outH);
+      return out;
+    }
+
+    // CTC decode a [T, C] log-prob (or prob) buffer: per timestep argmax,
+    // skip blanks (token 0 in our dict), collapse consecutive repeats.
+    // Returns { text, conf } where conf is the mean of selected timestep
+    // probabilities (a noisy proxy for line confidence — good enough for
+    // mean-confidence merging across engines).
+    function ctcDecode(buf, dims, dict) {
+      // dims is typically [1, T, C] or [T, C]
+      let T, C;
+      if (dims.length === 3) { T = dims[1]; C = dims[2]; }
+      else                   { T = dims[0]; C = dims[1]; }
+      const indices = [];
+      const confs = [];
+      let last = -1;
+      for (let t = 0; t < T; t++) {
+        let bestIdx = 0, bestVal = -Infinity;
+        for (let c = 0; c < C; c++) {
+          const v = buf[t * C + c];
+          if (v > bestVal) { bestVal = v; bestIdx = c; }
+        }
+        if (bestIdx !== 0 && bestIdx !== last) {
+          indices.push(bestIdx);
+          confs.push(bestVal);
+        }
+        last = bestIdx;
+      }
+      const chars = indices.map(i => (dict[i] != null ? dict[i] : '')).join('');
+      const meanConf = confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : 0;
+      return { text: chars, conf: meanConf };
+    }
+
+    // Recognition pass on a list of bbox crops. Returns { text, meanConf }.
+    async function paddleRecognize(srcCanvas, boxes) {
+      const session = paddleState.rec;
+      const inputName = session.inputNames[0];
+      const outputName = session.outputNames[0];
+      const lines = [];
+      const allConf = [];
+      const REC_H = 48;
+      const REC_W_MAX = 320;
+      for (const box of boxes) {
+        const w = box.x1 - box.x0, h = box.y1 - box.y0;
+        const aspect = w / h;
+        let recW = Math.ceil(REC_H * aspect / 8) * 8;
+        if (recW > REC_W_MAX) recW = REC_W_MAX;
+        if (recW < 16) recW = 16;
+        const crop = cropToCanvas(srcCanvas, box.x0, box.y0, box.x1, box.y1, recW, REC_H);
+        const tensor = canvasToOcrTensor(crop, recW, REC_H);
+        try {
+          const out = await session.run({ [inputName]: tensor });
+          const probs = out[outputName];
+          const decoded = ctcDecode(probs.data, probs.dims, paddleState.dict);
+          if (decoded.text) {
+            lines.push(decoded.text);
+            allConf.push(decoded.conf);
+          }
+        } catch (e) { /* skip box on error */ }
+      }
+      // Convert PaddleOCR conf (0..1 ish probability) to 0..100 to match
+      // Tesseract's scale so the merge step compares apples to apples.
+      const meanConf = allConf.length
+        ? (allConf.reduce((a, b) => a + b, 0) / allConf.length) * 100
+        : 0;
+      return { text: cleanupOcrText(lines.join('\n')), meanConf, corrections: 0 };
+    }
+
+    async function paddleOcrCanvas(canvas) {
+      const boxes = await paddleDetect(canvas);
+      if (!boxes.length) return { text: '', meanConf: 0, corrections: 0 };
+      return paddleRecognize(canvas, boxes);
+    }
+
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -592,43 +842,80 @@
           },
         });
 
+        // Try to load PaddleOCR. Optional — if model files aren't
+        // committed, we keep going with Tesseract-only and skip the
+        // Paddle variants of the merge. The page is fine either way.
+        let paddleAvailable = false;
+        try {
+          await ensurePaddle((p, label) => {
+            setProgress(22, label || `PaddleOCR 起動中… ${Math.round(p * 100)}%`);
+          });
+          paddleAvailable = true;
+        } catch (e) {
+          console.warn('PaddleOCR unavailable — Tesseract only:', e && e.message);
+        }
+
         let totalCorrections = 0;
         const total = canvases.length;
         const parts = [];
         try {
           for (let i = 0; i < total; i++) {
-            // Each page is OCR'd up to TWICE: once on the raw canvas, once
-            // on the prep'd version. We measure mean per-word confidence
-            // (Tesseract returns 0–100 per word) on each result and emit
-            // the winner. Falling back to original alone is fine if the
-            // prep canvas isn't available.
-            const variants = [{ canvas: canvases[i], label: '元画像' }];
-            if (enhanced[i]) variants.push({ canvas: enhanced[i], label: '補正画像' });
+            // Each page can be OCR'd up to FOUR times now:
+            //   - Tesseract on raw          (元画像 / Tesseract)
+            //   - Tesseract on rectified    (補正 / Tesseract)
+            //   - Paddle on raw             (元画像 / Paddle)
+            //   - Paddle on rectified       (補正 / Paddle)
+            // The variant with highest mean per-word confidence wins.
+            // Ties go to "Paddle on rectified" first, then "Tesseract
+            // on rectified" — empirically those have the best floor on
+            // typical phone-camera scans.
+            const variants = [
+              { canvas: canvases[i],  label: '元画像',   engine: 'tesseract' },
+            ];
+            if (enhanced[i]) variants.push({ canvas: enhanced[i], label: '補正画像', engine: 'tesseract' });
+            if (paddleAvailable) {
+              variants.push({ canvas: canvases[i], label: '元画像',   engine: 'paddle' });
+              if (enhanced[i]) variants.push({ canvas: enhanced[i], label: '補正画像', engine: 'paddle' });
+            }
             const pageStart = 25 + (i / total) * 70;
             const slotWidth = 70 / total / variants.length;
             const results = [];
             for (let v = 0; v < variants.length; v++) {
               const slotBase = pageStart + slotWidth * v;
+              const variantName = `${variants[v].engine === 'paddle' ? 'Paddle' : 'Tesseract'} / ${variants[v].label}`;
+              if (variants[v].engine === 'paddle') {
+                setProgress(slotBase, total > 1
+                  ? `${variantName} 解析中… ${i + 1}/${total} ページ`
+                  : `${variantName} 解析中…`);
+                try {
+                  const r = await paddleOcrCanvas(variants[v].canvas);
+                  results.push({ ...r, label: variants[v].label, engine: 'paddle' });
+                } catch (e) {
+                  console.warn('paddle pass failed', e);
+                }
+                continue;
+              }
               const onProg = (stage, p) => {
                 const label = total > 1
-                  ? `${variants[v].label} 解析中 (${stage === 'verify' ? '再検査' : '初回'})… ${i + 1}/${total} ページ`
-                  : `${variants[v].label} 解析中… (${stage === 'verify' ? '再検査' : '初回'})`;
+                  ? `${variantName} 解析中 (${stage === 'verify' ? '再検査' : '初回'})… ${i + 1}/${total} ページ`
+                  : `${variantName} 解析中… (${stage === 'verify' ? '再検査' : '初回'})`;
                 const stageBase = stage === 'verify' ? 0.7 : 0;
                 const stageWeight = stage === 'verify' ? 0.3 : 0.7;
                 setProgress(slotBase + (stageBase + stageWeight * p) * slotWidth, label);
               };
               const r = await recognizeAndVerify(worker, variants[v].canvas, psm, onProg);
-              results.push({ ...r, label: variants[v].label });
+              results.push({ ...r, label: variants[v].label, engine: 'tesseract' });
             }
-            // Pick the variant whose Tesseract reported a higher mean
-            // confidence. Ties go to the corrected variant (it's usually
-            // the cleaner image in practice).
+            const TIE_BREAK_BONUS = (engine, label) =>
+              (engine === 'paddle'    ? 1.0 : 0) +
+              (label  === '補正画像'  ? 0.5 : 0);
             const best = results.reduce((acc, r) => {
               if (!acc) return r;
-              if (r.meanConf > acc.meanConf + 0.5) return r;
-              return acc;
+              const aScore = acc.meanConf + TIE_BREAK_BONUS(acc.engine, acc.label);
+              const rScore = r.meanConf   + TIE_BREAK_BONUS(r.engine,   r.label);
+              return rScore > aScore ? r : acc;
             }, null) || results[0];
-            totalCorrections += best.corrections;
+            totalCorrections += (best.corrections || 0);
             parts.push(total > 1 ? `--- ページ ${i + 1} ---\n${best.text.trim()}\n` : best.text);
           }
         } finally {
