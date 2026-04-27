@@ -49,16 +49,6 @@
         <span class="size" id="srcSize"></span>
       </div>
       <div class="field">
-        <label style="display:flex;align-items:center;gap:0.55rem;cursor:pointer;font-weight:600;">
-          <input type="checkbox" id="ocrPrep" checked style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
-          <span>📐 OCR前に画像を補正 (歪み補正・濃度UP・推奨)</span>
-        </label>
-        <div class="info-hint" style="margin:0.2rem 0 0 1.5rem;">
-          紙の四隅検出で台形補正してから、グレースケール化 + CLAHE で文字を濃く + アンシャープでエッジを引き立たせます。<br>
-          初回のみ画像処理エンジン (約9MB) のダウンロードあり。端末内処理。
-        </div>
-      </div>
-      <div class="field">
         <label>言語</label>
         <div class="radio-row">
           <label><input type="radio" name="lang" value="jpn+eng" checked><span>🇯🇵🇺🇸 日本語+英語 (推奨)</span></label>
@@ -513,7 +503,13 @@
       // Restore the user-requested PSM for the next page
       await worker.setParameters({ tessedit_pageseg_mode: psm });
 
-      return { text: cleanupOcrText(text), corrections };
+      // Mean per-word confidence — reported back so the caller can pick
+      // the higher-quality variant when it's run OCR on multiple
+      // versions of the same page (raw vs prep'd, Tesseract vs Paddle).
+      const meanConf = words.length
+        ? words.reduce((s, w) => s + (w.confidence || 0), 0) / words.length
+        : 0;
+      return { text: cleanupOcrText(text), corrections, meanConf };
     }
 
     document.getElementById('run').addEventListener('click', async () => {
@@ -556,31 +552,29 @@
           canvases = [await imageFileToCanvas(currentFile)];
         }
 
-        // Pre-OCR enhancement: rectify (perspective correct) + grayscale
-        // + CLAHE + unsharp. Runs in-place on each canvas before
-        // Tesseract sees it so the OCR works on a cleaner, sharper,
-        // more evenly-contrasted image.
-        const ocrPrep = document.getElementById('ocrPrep').checked;
-        if (ocrPrep) {
-          setProgress(18, '画像処理エンジンを準備中…');
-          try {
-            await ensureCv((p) => {
-              setProgress(18, `画像処理エンジンを準備中… ${Math.round(p * 100)}%`);
-            });
-            for (let i = 0; i < canvases.length; i++) {
-              setProgress(18, `画像補正中… ${i + 1}/${canvases.length}`);
-              try { canvases[i] = await prepareForOcr(canvases[i]); }
-              catch (e) { console.warn('prepareForOcr failed for page', i + 1, e); }
-            }
-          } catch (e) {
-            // Engine load failed — surface a non-blocking warning and
-            // let Tesseract run on the raw canvases.
-            console.warn('OCR pre-prep skipped', e);
-            const warn = document.createElement('div');
-            warn.className = 'info';
-            warn.textContent = '⚠ 画像補正エンジンの読込に失敗 — 補正なしで続行します';
-            msg.appendChild(warn);
+        // Pre-OCR enhancement is now always-on (no UI toggle). We keep
+        // BOTH the originals AND the corrected canvases so each page gets
+        // OCR'd twice and the higher-confidence reading wins. The user
+        // doesn't need to know — they just see the better merged result.
+        const enhanced = canvases.map(c => null);
+        setProgress(18, '画像処理エンジンを準備中…');
+        try {
+          await ensureCv((p) => {
+            setProgress(18, `画像処理エンジンを準備中… ${Math.round(p * 100)}%`);
+          });
+          for (let i = 0; i < canvases.length; i++) {
+            setProgress(18, `画像補正中… ${i + 1}/${canvases.length}`);
+            try {
+              // prepareForOcr may rectify into a different geometry; we
+              // KEEP canvases[i] as the untouched original so it can be
+              // OCR'd separately and merged.
+              enhanced[i] = await prepareForOcr(canvases[i]);
+            } catch (e) { console.warn('prepareForOcr failed for page', i + 1, e); }
           }
+        } catch (e) {
+          // Engine load failed — surface a non-blocking warning and let
+          // Tesseract run on just the raw canvases (single-pass fallback).
+          console.warn('OCR pre-prep skipped', e);
         }
 
         // Spin a single Tesseract worker so re-OCR of low-confidence words
@@ -603,19 +597,39 @@
         const parts = [];
         try {
           for (let i = 0; i < total; i++) {
+            // Each page is OCR'd up to TWICE: once on the raw canvas, once
+            // on the prep'd version. We measure mean per-word confidence
+            // (Tesseract returns 0–100 per word) on each result and emit
+            // the winner. Falling back to original alone is fine if the
+            // prep canvas isn't available.
+            const variants = [{ canvas: canvases[i], label: '元画像' }];
+            if (enhanced[i]) variants.push({ canvas: enhanced[i], label: '補正画像' });
             const pageStart = 25 + (i / total) * 70;
-            const pageInitial = pageStart + (0.7 / total) * 70 * 0;
-            const onProg = (stage, p) => {
-              const label = total > 1
-                ? `${stage === 'verify' ? '低信頼度の語を再検査中' : '文字を解析中'}… ${i + 1}/${total} ページ`
-                : (stage === 'verify' ? '低信頼度の語を再検査中…' : '文字を解析中…');
-              const stageBase = stage === 'verify' ? 0.7 : 0;
-              const stageWeight = stage === 'verify' ? 0.3 : 0.7;
-              setProgress(pageStart + (stageBase + stageWeight * p) * (70 / total), label);
-            };
-            const { text, corrections } = await recognizeAndVerify(worker, canvases[i], psm, onProg);
-            totalCorrections += corrections;
-            parts.push(total > 1 ? `--- ページ ${i + 1} ---\n${text.trim()}\n` : text);
+            const slotWidth = 70 / total / variants.length;
+            const results = [];
+            for (let v = 0; v < variants.length; v++) {
+              const slotBase = pageStart + slotWidth * v;
+              const onProg = (stage, p) => {
+                const label = total > 1
+                  ? `${variants[v].label} 解析中 (${stage === 'verify' ? '再検査' : '初回'})… ${i + 1}/${total} ページ`
+                  : `${variants[v].label} 解析中… (${stage === 'verify' ? '再検査' : '初回'})`;
+                const stageBase = stage === 'verify' ? 0.7 : 0;
+                const stageWeight = stage === 'verify' ? 0.3 : 0.7;
+                setProgress(slotBase + (stageBase + stageWeight * p) * slotWidth, label);
+              };
+              const r = await recognizeAndVerify(worker, variants[v].canvas, psm, onProg);
+              results.push({ ...r, label: variants[v].label });
+            }
+            // Pick the variant whose Tesseract reported a higher mean
+            // confidence. Ties go to the corrected variant (it's usually
+            // the cleaner image in practice).
+            const best = results.reduce((acc, r) => {
+              if (!acc) return r;
+              if (r.meanConf > acc.meanConf + 0.5) return r;
+              return acc;
+            }, null) || results[0];
+            totalCorrections += best.corrections;
+            parts.push(total > 1 ? `--- ページ ${i + 1} ---\n${best.text.trim()}\n` : best.text);
           }
         } finally {
           try { await worker.terminate(); } catch (e) {}
