@@ -842,17 +842,28 @@
           },
         });
 
-        // Try to load PaddleOCR. Optional — if model files aren't
-        // committed, we keep going with Tesseract-only and skip the
-        // Paddle variants of the merge. The page is fine either way.
+        // PaddleOCR is desktop-only for now. iOS Safari kills the tab
+        // (no recoverable error — the WebContent process is just gone)
+        // when it sees ONNX Runtime + OpenCV + Tesseract + the rec
+        // model's working set together: per-tab limit is ~250-384 MB
+        // and we'd peak past that. Detect iOS and skip Paddle entirely;
+        // the dual Tesseract pass on raw + corrected is the fallback.
+        function isIOS() {
+          return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+            (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        }
         let paddleAvailable = false;
-        try {
-          await ensurePaddle((p, label) => {
-            setProgress(22, label || `PaddleOCR 起動中… ${Math.round(p * 100)}%`);
-          });
-          paddleAvailable = true;
-        } catch (e) {
-          console.warn('PaddleOCR unavailable — Tesseract only:', e && e.message);
+        if (!isIOS()) {
+          try {
+            await ensurePaddle((p, label) => {
+              setProgress(22, label || `PaddleOCR 起動中… ${Math.round(p * 100)}%`);
+            });
+            paddleAvailable = true;
+          } catch (e) {
+            console.warn('PaddleOCR unavailable — Tesseract only:', e && e.message);
+          }
+        } else {
+          console.info('iOS detected — skipping PaddleOCR to avoid tab OOM. Tesseract dual-pass still runs.');
         }
 
         let totalCorrections = 0;
@@ -917,6 +928,14 @@
             }, null) || results[0];
             totalCorrections += (best.corrections || 0);
             parts.push(total > 1 ? `--- ページ ${i + 1} ---\n${best.text.trim()}\n` : best.text);
+            // Drop the canvases for this page now that OCR is done so
+            // multi-page PDFs don't keep every page's pixel buffer in
+            // memory until the whole job finishes. Each page is ~8-14 MB
+            // raw + same again for the corrected version, so a 10-page
+            // PDF was holding ~250 MB of canvas data simultaneously
+            // before this — over the iOS Safari per-tab budget by itself.
+            canvases[i] = null;
+            if (enhanced[i]) enhanced[i] = null;
           }
         } finally {
           try { await worker.terminate(); } catch (e) {}
