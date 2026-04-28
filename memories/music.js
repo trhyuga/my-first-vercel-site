@@ -44,6 +44,21 @@ window.MUSIC_CATALOG = [
     artist: 'asset', url: './assets/music/Where_the_Memories_Rest.mp3',
     durationSec: 30.77, tags: ['memorial', 'calm', 'short', 'reflective'],
   },
+  {
+    id: 'steps-toward-morning', title: '朝へ向かう足音',
+    artist: 'asset', url: './assets/music/Steps_Toward_Morning.mp3',
+    durationSec: 30.07, tags: ['calm', 'gentle', 'short', 'tender'],
+  },
+  {
+    id: 'last-morning-in-june', title: '6月最後の朝',
+    artist: 'asset', url: './assets/music/The_Last_Morning_in_June.mp3',
+    durationSec: 29.49, tags: ['nostalgic', 'tender', 'short', 'warm'],
+  },
+  {
+    id: 'porch-light-waltz', title: '玄関灯のワルツ',
+    artist: 'asset', url: './assets/music/The_Porch_Light_Waltz.mp3',
+    durationSec: 30.77, tags: ['warm', 'gentle', 'short', 'tender'],
+  },
 
   // --- ~55-90s mid-length ---
   {
@@ -100,6 +115,58 @@ window.MUSIC_CATALOG = [
     id: 'last-corner', title: '最後の角を曲がって',
     artist: 'asset', url: './assets/music/Turning_the_Last_Corner.mp3',
     durationSec: 88.79, tags: ['nostalgic', 'memorial', 'tender'],
+  },
+  {
+    id: 'after-final-bell', title: '終業の鐘の後で',
+    artist: 'asset', url: './assets/music/After_the_Final_Bell.mp3',
+    durationSec: 87.46, tags: ['nostalgic', 'memorial', 'reflective'],
+  },
+  {
+    id: 'seven-summers-later', title: '七つの夏の後',
+    artist: 'asset', url: './assets/music/Seven_Summers_Later.mp3',
+    durationSec: 86.65, tags: ['nostalgic', 'reflective', 'emotional'],
+  },
+  {
+    id: 'turning-last-page', title: '最後のページをめくる時',
+    artist: 'asset', url: './assets/music/Turning_the_Last_Page.mp3',
+    durationSec: 87.38, tags: ['memorial', 'emotional', 'reflective'],
+  },
+  {
+    id: 'yesterday-sunlight', title: '昨日の陽だまり',
+    artist: 'asset', url: './assets/music/Yesterday_s_Sunlight.mp3',
+    durationSec: 86.65, tags: ['nostalgic', 'warm', 'reflective'],
+  },
+
+  // --- ~115s upper-mid (graduation / memorial themes) ---
+  {
+    id: 'before-tassels-turn', title: '房を返す前に',
+    artist: 'asset', url: './assets/music/Before_The_Tassels_Turn.mp3',
+    durationSec: 116.66, tags: ['uplifting', 'memorial', 'cheerful'],
+  },
+  {
+    id: 'confetti-under-sun', title: '陽射しの紙吹雪',
+    artist: 'asset', url: './assets/music/Confetti_Under_the_Sun.mp3',
+    durationSec: 116.45, tags: ['uplifting', 'cheerful', 'warm'],
+  },
+  {
+    id: 'gilded-afternoon', title: '黄金色の午後',
+    artist: 'asset', url: './assets/music/Gilded_Afternoon.mp3',
+    durationSec: 117.24, tags: ['warm', 'nostalgic', 'reflective'],
+  },
+  {
+    id: 'september-last-light', title: '9月最後の光',
+    artist: 'asset', url: './assets/music/September_s_Last_Light.mp3',
+    durationSec: 117.60, tags: ['nostalgic', 'tender', 'memorial'],
+  },
+  {
+    id: 'the-last-bell', title: '最後の鐘が鳴る',
+    artist: 'asset', url: './assets/music/The_Last_Bell_Rings.mp3',
+    durationSec: 114.02, tags: ['memorial', 'emotional', 'reflective'],
+  },
+  {
+    id: 'caps-against-sky', title: '空に放った帽子',
+    artist: 'asset', url: './assets/music/Caps_Against_the_Sky.mp3',
+    durationSec: 145.27, tags: ['uplifting', 'cheerful', 'memorial'],
   },
 
   // --- ~150-175s long-form ---
