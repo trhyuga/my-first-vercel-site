@@ -49,7 +49,8 @@
         <label for="fname">ファイル名(連番が付与されます)</label>
         <input type="text" id="fname" value="page" />
       </div>
-      <button class="btn-primary blue" id="run">📦 ZIPでダウンロード</button>
+      <button class="btn-primary blue" id="runImg">📷 画像で保存 (写真 / ファイル)</button>
+      <button class="btn-secondary" id="runZip">📦 ZIPでまとめてダウンロード</button>
       <button class="btn-secondary" id="clear">別のPDFを選ぶ</button>
       <div class="progress" id="prog" style="display:none;">
         <span id="progText">準備中...</span>
@@ -106,56 +107,130 @@
       progBar.style.width = pct + '%';
     }
 
-    document.getElementById('run').addEventListener('click', async () => {
+    // Render every page of the loaded PDF to a {blob, name} array.
+    // Used by both action buttons (image-share and zip-download), so the
+    // PDF only gets parsed and rasterised once even if the user wants
+    // both outputs.
+    async function renderAllPages() {
+      const dpi = parseInt(document.getElementById('dpi').value, 10);
+      const format = document.getElementById('format').value;
+      const mime = format === 'png' ? 'image/png' : 'image/jpeg';
+      const ext = format === 'png' ? 'png' : 'jpg';
+      const scale = dpi / 72;
+      const base = safeFilename(fname.value, 'page');
+      let pdf;
+      try {
+        pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+      } catch (e) {
+        if (e && (e.name === 'PasswordException' || /password/i.test(String(e.message || e)))) {
+          throw new Error('このPDFはパスワードで保護されています。「🔓 パスワード解除」で解錠してから再度お試しください。');
+        }
+        throw e;
+      }
+      const pages = [];
+      for (let i = 1; i <= pdf.numPages; i++) {
+        setProgress(Math.round((i - 1) / pdf.numPages * 90), `ページ ${i}/${pdf.numPages} をレンダリング中...`);
+        const page = await pdf.getPage(i);
+        const vp = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(vp.width);
+        canvas.height = Math.ceil(vp.height);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        const blob = await new Promise(r => canvas.toBlob(r, mime, 0.92));
+        const name = `${base}_${String(i).padStart(3, '0')}.${ext}`;
+        pages.push({ blob, name, mime });
+      }
+      return { pages, base, ext, mime };
+    }
+
+    // Image-save path. Web Share API on iOS / Android opens the system
+    // share sheet with both "写真に保存" and "ファイルに保存" entries —
+    // perfect for "save these JPGs as actual photos in the camera roll".
+    // Desktop browsers (no canShare for files) fall back to triggering
+    // N sequential anchor downloads, which lands the JPGs in the user's
+    // download folder one by one.
+    async function shareImages(pages) {
+      const files = pages.map(p => new File([p.blob], p.name, { type: p.mime }));
+      if (navigator.canShare && files.length && navigator.canShare({ files })) {
+        try {
+          await navigator.share({ files });
+          return;
+        } catch (e) {
+          if (e && e.name !== 'AbortError') {
+            // share() failed for a non-cancel reason — fall through to
+            // the legacy multi-anchor download so the user still gets
+            // the files.
+            console.warn('share failed, falling back to anchor download', e);
+          } else {
+            return;  // user cancelled — that's fine, don't double-fire
+          }
+        }
+      }
+      for (const f of files) {
+        const url = URL.createObjectURL(f);
+        const a = document.createElement('a');
+        a.href = url; a.download = f.name; a.target = '_blank'; a.rel = 'noopener';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        // 100 ms gap so the browser doesn't coalesce the downloads.
+        await new Promise(r => setTimeout(r, 120));
+      }
+    }
+
+    async function buildAndDownloadZip(pages, base) {
+      const zip = new JSZip();
+      for (const p of pages) zip.file(p.name, p.blob);
+      setProgress(95, 'ZIPを生成中...');
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const zipName = safeFilename(fname.value, originalName || 'pdf-to-images');
+      download(zipBlob, zipName + '.zip');
+    }
+
+    function disableRunButtons(disabled) {
+      document.getElementById('runImg').disabled = disabled;
+      document.getElementById('runZip').disabled = disabled;
+    }
+
+    document.getElementById('runImg').addEventListener('click', async () => {
       if (!bytes) return;
-      const runBtn = document.getElementById('run');
-      runBtn.disabled = true;
-      const origLabel = runBtn.textContent;
-      runBtn.textContent = '処理中...';
+      const btn = document.getElementById('runImg');
+      const orig = btn.textContent;
+      disableRunButtons(true);
+      btn.textContent = '処理中...';
       clearBox(msg);
       try {
-        const dpi = parseInt(document.getElementById('dpi').value, 10);
-        const format = document.getElementById('format').value;
-        const mime = format === 'png' ? 'image/png' : 'image/jpeg';
-        const ext = format === 'png' ? 'png' : 'jpg';
-        const scale = dpi / 72;
-        const base = safeFilename(fname.value, 'page');
-
-        let pdf;
-        try {
-          pdf = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
-        } catch (e) {
-          if (e && (e.name === 'PasswordException' || /password/i.test(String(e.message || e)))) {
-            throw new Error('このPDFはパスワードで保護されています。「🔓 パスワード解除」で解錠してから再度お試しください。');
-          }
-          throw e;
-        }
-        const zip = new JSZip();
-        for (let i = 1; i <= pdf.numPages; i++) {
-          setProgress(Math.round((i - 1) / pdf.numPages * 100), `ページ ${i}/${pdf.numPages} をレンダリング中...`);
-          const page = await pdf.getPage(i);
-          const vp = page.getViewport({ scale });
-          const canvas = document.createElement('canvas');
-          canvas.width = Math.ceil(vp.width);
-          canvas.height = Math.ceil(vp.height);
-          const ctx = canvas.getContext('2d');
-          ctx.fillStyle = '#fff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          await page.render({ canvasContext: ctx, viewport: vp }).promise;
-          const blob = await new Promise(r => canvas.toBlob(r, mime, 0.92));
-          zip.file(`${base}_${String(i).padStart(3, '0')}.${ext}`, blob);
-        }
-        setProgress(100, 'ZIPを生成中...');
-        const zipBlob = await zip.generateAsync({ type: 'blob' });
-        // Use the user's filename input as the zip name too (it was previously
-        // ignored — only the per-page prefix). Fall back to the source name.
-        const zipName = safeFilename(fname.value, originalName || 'pdf-to-images');
-        download(zipBlob, zipName + '.zip');
+        const { pages } = await renderAllPages();
+        setProgress(95, '保存先を選択中...');
+        await shareImages(pages);
+        setProgress(100, '✅ 保存完了');
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
       } finally {
-        runBtn.disabled = false;
-        runBtn.textContent = origLabel;
+        disableRunButtons(false);
+        btn.textContent = orig;
+        setTimeout(() => prog.style.display = 'none', 800);
+      }
+    });
+
+    document.getElementById('runZip').addEventListener('click', async () => {
+      if (!bytes) return;
+      const btn = document.getElementById('runZip');
+      const orig = btn.textContent;
+      disableRunButtons(true);
+      btn.textContent = '処理中...';
+      clearBox(msg);
+      try {
+        const { pages, base } = await renderAllPages();
+        await buildAndDownloadZip(pages, base);
+        setProgress(100, '✅ ZIP保存完了');
+      } catch (e) {
+        showError(msg, '失敗: ' + (e.message || e));
+      } finally {
+        disableRunButtons(false);
+        btn.textContent = orig;
         setTimeout(() => prog.style.display = 'none', 800);
       }
     });
