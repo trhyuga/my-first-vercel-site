@@ -551,34 +551,10 @@
       <div class="field">
         <label for="title">収録タイトル (ファイル名)</label>
         <input type="text" id="title" placeholder="例: 企画会議 2026-04-23" />
-      </div>
-      <div class="field">
-        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-weight:500;">
-          <input type="checkbox" id="rotateEnable" style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
-          <span>📂 長時間録音 (自動分割) を使う</span>
-        </label>
-        <div style="font-size:0.72rem;color:#64748b;padding:0.2rem 0.25rem 0;line-height:1.55;">
-          設定した分量を超えたら、文の切れ目を待って自動でファイルを切り、メモリを解放します。<br>
-          切れ目の前後で <b>1文重複</b> させて保存するので、後でファイルを並べて読んでも文脈が途切れません。
-        </div>
-      </div>
-      <div id="rotateOptions" class="hidden" style="margin-left:1.5rem;border-left:2px solid #e2e8f0;padding-left:0.85rem;">
-        <div class="field">
-          <label for="rotateInterval">分割サイズ目安</label>
-          <select id="rotateInterval">
-            <option value="300">5 分ごと</option>
-            <option value="600" selected>10 分ごと</option>
-            <option value="900">15 分ごと</option>
-            <option value="1800">30 分ごと</option>
-            <option value="3600">60 分ごと</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="rotatePrefix">ファイル名プレフィックス (連番が自動付与)</label>
-          <input type="text" id="rotatePrefix" value="recording" />
-          <div style="font-size:0.72rem;color:#64748b;padding:0.25rem 0.25rem 0;">
-            例: <code>recording-001.mp3</code> / <code>recording-001.txt</code> / <code>recording-002.mp3</code> ...
-          </div>
+        <div style="font-size:0.72rem;color:#64748b;padding:0.25rem 0.25rem 0;line-height:1.55;">
+          長時間の録音は端末メモリを守るため <b>約20分ごと</b> に自動でファイル分割します。<br>
+          切れ目は文末で取り、前後で <b>1文重複</b> させて文脈をつなぎます。<br>
+          保存ファイル名は <code>タイトル-001.webm</code> / <code>タイトル-001.txt</code> のように連番が付きます。
         </div>
       </div>
       <div id="capsMsg"></div>
@@ -1187,23 +1163,24 @@
         onRecordingStopped();
       };
       recorder.start(1000);
-      // If the user enabled "長時間録音", set up rotation state. Reading
-      // the form fields once at startRecording time freezes the choice
-      // for this session — toggling mid-recording would be confusing.
-      const rotEnable = document.getElementById('rotateEnable');
-      if (rotEnable && rotEnable.checked) {
-        rotateCfg = {
-          enabled: true,
-          intervalSec: parseInt(document.getElementById('rotateInterval').value, 10) || 600,
-          prefix: (document.getElementById('rotatePrefix').value || 'recording').trim() || 'recording',
-          counter: 1,                  // current chunk's 1-based index
-          segStartT: 0,                // elapsed-seconds anchor for current chunk
-          completedFiles: [],          // [{ idx, blob, mime, text }]
-          pendingOverlapText: null,    // last sentence carried over for next file's TXT
-        };
-      } else {
-        rotateCfg = null;
-      }
+      // Auto-rotation is always on. The interval is auto-picked, not
+      // user-configurable: 1200 s (20 min) keeps each chunk's worst-case
+      // PCM-decode peak ≈ 76 MB (16 kHz × mono × 4 byte × 1200 s),
+      // comfortably under the ~225 MB practical budget on iOS Safari
+      // (≈10 % margin from the per-tab cap of 250-384 MB across devices).
+      // Larger intervals invite OOM on older iPhones; smaller intervals
+      // make too many tiny files. The prefix is the user's recording
+      // title — that's already the filename they expect, just numbered.
+      const rotPrefix = (titleEl.value || '').trim() || 'recording';
+      rotateCfg = {
+        enabled: true,
+        intervalSec: 1200,
+        prefix: rotPrefix,
+        counter: 1,                  // current chunk's 1-based index
+        segStartT: 0,                // elapsed-seconds anchor for current chunk
+        completedFiles: [],          // [{ idx, blob, mime, text }]
+        pendingOverlapText: null,    // last sentence carried over for next file's TXT
+      };
       startedAt = performance.now();
       timerHandle = setInterval(updateTimer, 250);
       recordArea.classList.add('rec');
@@ -2224,16 +2201,6 @@
       hideStopConfirm();
       stopRecording();
     });
-
-    // Reveal / hide the rotation interval+prefix block based on toggle.
-    (function bindRotateToggle() {
-      const cb = document.getElementById('rotateEnable');
-      const opts = document.getElementById('rotateOptions');
-      if (!cb || !opts) return;
-      const sync = () => opts.classList.toggle('hidden', !cb.checked);
-      cb.addEventListener('change', sync);
-      sync();
-    })();
   </script>
 </body>
 </html>
