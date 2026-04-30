@@ -557,6 +557,15 @@
           保存ファイル名は <code>タイトル-001.webm</code> / <code>タイトル-001.txt</code> のように連番が付きます。
         </div>
       </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-weight:500;">
+          <input type="checkbox" id="convertMp3" style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
+          <span>🎵 分割ファイルを MP3 に変換して保存する</span>
+        </label>
+        <div style="font-size:0.72rem;color:#64748b;padding:0.2rem 0.25rem 0;line-height:1.55;">
+          オフだと recorder ネイティブ (webm / m4a) で高速保存。オンだと NotebookLM や標準音声プレーヤーで開きやすい <b>MP3</b> にエンコード (録音1本につき数秒〜十数秒の追加処理)。
+        </div>
+      </div>
       <div id="capsMsg"></div>
     </div>
 
@@ -1081,12 +1090,31 @@
       } catch (e) { return; }
       speechRec.continuous = true;
       speechRec.interimResults = true;
+      // Ask the engine for up to 3 alternatives per utterance and pick
+      // the most likely one. Web Speech often returns 2-3 plausible
+      // hypotheses with subtly different homophones (e.g.
+      // 「変更」vs「弁護」); the default API path takes index 0
+      // unconditionally, so this swap reduces homophone errors at no
+      // extra processing cost.
+      speechRec.maxAlternatives = 3;
       speechRec.lang = document.getElementById('lang').value || 'ja-JP';
       speechRec.onresult = (ev) => {
         let interim = '';
         for (let i = ev.resultIndex; i < ev.results.length; i++) {
           const r = ev.results[i];
-          const text = r[0] && r[0].transcript ? r[0].transcript : '';
+          // Pick the alternative with the highest confidence; tie-break
+          // toward the longer transcript (a longer alt is usually more
+          // complete than a clipped one when scores tie at 0).
+          let best = r[0];
+          for (let k = 1; k < r.length; k++) {
+            const a = r[k];
+            if (!a || !a.transcript) continue;
+            const aConf = a.confidence || 0;
+            const bConf = best.confidence || 0;
+            if (aConf > bConf + 0.001) best = a;
+            else if (Math.abs(aConf - bConf) < 0.001 && a.transcript.length > best.transcript.length) best = a;
+          }
+          const text = best && best.transcript ? best.transcript : '';
           if (r.isFinal) {
             const sec = (performance.now() - startedAt) / 1000;
             appendSegment(text, currentSpeaker, sec);
@@ -1097,8 +1125,11 @@
         if (interim) renderLive(interim);
       };
       speechRec.onerror = (ev) => {
-        // "no-speech" just means silence; "network" is transient; auto-restart
-        if (ev.error === 'no-speech' || ev.error === 'network') return;
+        // 'no-speech' just means silence; 'network' is transient. The
+        // 'aborted' fires when we restart on purpose. All of these get
+        // ignored — the onend handler picks the session back up.
+        // 'audio-capture' / 'not-allowed' = user-side, surface to log.
+        if (ev.error === 'no-speech' || ev.error === 'network' || ev.error === 'aborted') return;
         console.warn('SR error:', ev.error);
       };
       speechRec.onend = () => {
@@ -1268,22 +1299,6 @@
       if (finalBlob.size > 0 || finalText.trim().length > 0) {
         all.push({ idx: finalIdx, blob: finalBlob, mime: finalMime, text: finalText });
       }
-      // Build File objects. For audio, transcode happens later if the
-      // user hits saveMp3 — for the rotation batch we ship the native
-      // recorder format (typically webm/mp4) since it's already on
-      // disk; transcoding 30 chunks here would peak memory again.
-      const ext = (m) => /mp4|aac/i.test(m) ? 'm4a' : /ogg/i.test(m) ? 'ogg' : 'webm';
-      const prefix = rotateCfg.prefix || 'recording';
-      const files = [];
-      for (const r of all) {
-        const num = String(r.idx).padStart(3, '0');
-        files.push(new File([r.blob], `${prefix}-${num}.${ext(r.mime)}`, { type: r.mime }));
-        files.push(new File(
-          [new Blob([r.text || ''], { type: 'text/plain;charset=utf-8' })],
-          `${prefix}-${num}.txt`,
-          { type: 'text/plain;charset=utf-8' }
-        ));
-      }
       const status = document.getElementById('saveStatus') || (() => {
         // Status node hasn't been created yet (we skipped showEditor).
         // Drop a transient block above the record area instead.
@@ -1293,6 +1308,45 @@
         recordArea.parentNode.insertBefore(d, recordArea.nextSibling);
         return d;
       })();
+      // Build File objects. Two paths:
+      //   - convertMp3 OFF (default): ship the recorder's native blob
+      //     (webm / m4a). Fast, lossless re-mux, no extra memory.
+      //   - convertMp3 ON: decode each chunk to mono PCM + lamejs MP3
+      //     encode. Done sequentially so worst-case memory is one
+      //     chunk's PCM (~76 MB at 20 min) plus the MP3 buffer, well
+      //     within the iOS budget.
+      const wantMp3 = !!document.getElementById('convertMp3')?.checked;
+      const ext = (m) => /mp4|aac/i.test(m) ? 'm4a' : /ogg/i.test(m) ? 'ogg' : 'webm';
+      const prefix = rotateCfg.prefix || 'recording';
+      const files = [];
+      const bps = parseInt(bitrateEl.value, 10) || 24000;
+      const kbps = Math.max(16, Math.min(128, Math.round(bps / 1000)));
+      for (let i = 0; i < all.length; i++) {
+        const r = all[i];
+        const num = String(r.idx).padStart(3, '0');
+        let audioFile;
+        if (wantMp3) {
+          status.innerHTML = `<div class="alert info">🎵 MP3 変換中… ${i + 1}/${all.length} (${num})</div>`;
+          try {
+            const { samples, sampleRate } = await decodeToMono(r.blob);
+            const mp3Blob = await encodeMP3(samples, sampleRate, kbps);
+            audioFile = new File([mp3Blob], `${prefix}-${num}.mp3`, { type: 'audio/mpeg' });
+          } catch (encErr) {
+            // Encode failure on this chunk — fall back to native so the
+            // user still gets the audio for this chunk.
+            console.warn('MP3 encode failed for chunk', num, encErr);
+            audioFile = new File([r.blob], `${prefix}-${num}.${ext(r.mime)}`, { type: r.mime });
+          }
+        } else {
+          audioFile = new File([r.blob], `${prefix}-${num}.${ext(r.mime)}`, { type: r.mime });
+        }
+        files.push(audioFile);
+        files.push(new File(
+          [new Blob([r.text || ''], { type: 'text/plain;charset=utf-8' })],
+          `${prefix}-${num}.txt`,
+          { type: 'text/plain;charset=utf-8' }
+        ));
+      }
       status.innerHTML = `<div class="alert info">📤 ${files.length}個のファイル (音声+TXT × ${all.length}本) を共有/保存します…</div>`;
       // Web Share with file array — iOS surfaces the share sheet and
       // "ファイルに保存" lands every entry into the chosen folder in
