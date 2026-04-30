@@ -552,6 +552,35 @@
         <label for="title">収録タイトル (ファイル名)</label>
         <input type="text" id="title" placeholder="例: 企画会議 2026-04-23" />
       </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-weight:500;">
+          <input type="checkbox" id="rotateEnable" style="width:18px;height:18px;accent-color:#0ea5e9;flex:0 0 auto;" />
+          <span>📂 長時間録音 (自動分割) を使う</span>
+        </label>
+        <div style="font-size:0.72rem;color:#64748b;padding:0.2rem 0.25rem 0;line-height:1.55;">
+          設定した分量を超えたら、文の切れ目を待って自動でファイルを切り、メモリを解放します。<br>
+          切れ目の前後で <b>1文重複</b> させて保存するので、後でファイルを並べて読んでも文脈が途切れません。
+        </div>
+      </div>
+      <div id="rotateOptions" class="hidden" style="margin-left:1.5rem;border-left:2px solid #e2e8f0;padding-left:0.85rem;">
+        <div class="field">
+          <label for="rotateInterval">分割サイズ目安</label>
+          <select id="rotateInterval">
+            <option value="300">5 分ごと</option>
+            <option value="600" selected>10 分ごと</option>
+            <option value="900">15 分ごと</option>
+            <option value="1800">30 分ごと</option>
+            <option value="3600">60 分ごと</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="rotatePrefix">ファイル名プレフィックス (連番が自動付与)</label>
+          <input type="text" id="rotatePrefix" value="recording" />
+          <div style="font-size:0.72rem;color:#64748b;padding:0.25rem 0.25rem 0;">
+            例: <code>recording-001.mp3</code> / <code>recording-001.txt</code> / <code>recording-002.mp3</code> ...
+          </div>
+        </div>
+      </div>
       <div id="capsMsg"></div>
     </div>
 
@@ -723,6 +752,21 @@
     let chunks = [];
     let startedAt = 0;
     let timerHandle = null;
+    // Long-recording auto-rotation state. Populated when the user enables
+    // "長時間録音" before pressing 録音開始. While active:
+    //   - completedFiles[]      collects { idx, blob, mime, text } for
+    //                           every chunk we've already cut, so the
+    //                           final stop can hand them all to the
+    //                           Web Share sheet at once.
+    //   - segStartT             elapsed-seconds anchor for the *current*
+    //                           chunk so we can ask "have we recorded
+    //                           more than intervalSec into this file?"
+    //   - pendingOverlapText    last sentence of the previous chunk, so
+    //                           the next chunk's TXT begins with the
+    //                           same sentence (1-sentence overlap).
+    let rotateCfg = null;
+    let isRotating = false;        // re-entrancy guard around rotateNow()
+    let rotationToastTimer = null;
     let recordedBlob = null;
     let recordedMime = '';
     let audioCtx = null;
@@ -889,6 +933,149 @@
         feat,
       });
       renderLive();
+      // Long-recording auto-rotation: once we're past the user's chosen
+      // interval AND the just-finalised segment ended on a sentence
+      // boundary, snip the recording and start a fresh chunk. Sentence
+      // boundary check covers both Japanese (。！？) and Latin (.!?)
+      // punctuation. Re-entrancy guard prevents two near-simultaneous
+      // segments from triggering parallel rotations.
+      if (rotateCfg && rotateCfg.enabled && !isRotating) {
+        const segDur = elapsedSec - rotateCfg.segStartT;
+        if (segDur >= rotateCfg.intervalSec && /[。！？.!?]\s*$/.test(text.trim())) {
+          rotateNow().catch(err => console.warn('rotateNow failed', err));
+        }
+      }
+    }
+
+    // Build the TXT payload for one chunk. Mirrors buildTranscriptText()
+    // but uses an explicit segments array so we can slice out a single
+    // chunk's text instead of the whole session. fillerStrip + format
+    // are read live from the editor controls so the user's preference
+    // applies to in-flight chunks too.
+    function buildChunkText(segs, headerNote) {
+      const fmtSel = document.getElementById('txtFormat');
+      const stripFillers = document.getElementById('stripFillers');
+      const format = fmtSel ? fmtSel.value : 'clean';
+      const strip = !!(stripFillers && stripFillers.checked);
+      const lines = [];
+      if (headerNote) lines.push(headerNote, '');
+      for (const s of segs) {
+        const speakerLabel = speakers[s.speaker] || '話者?';
+        let txt = s.text;
+        if (strip) txt = txt.replace(/\b(あー|えー|えーと|えっと|あの|um|uh|er)\b/gi, '').replace(/\s{2,}/g, ' ').trim();
+        if (!txt) continue;
+        if (format === 'timestamped') {
+          lines.push(`[${fmtHMS(s.t)}] ${speakerLabel}: ${txt}`);
+        } else if (format === 'dialog') {
+          lines.push(`${speakerLabel}: ${txt}`, '');
+        } else {
+          lines.push(`${speakerLabel}: ${txt}`);
+        }
+      }
+      return lines.join('\n').trim() + '\n';
+    }
+
+    // Toast above the record button so the user knows a chunk just got
+    // saved + memory was released. Auto-clears after 4 s.
+    function showRotationToast(idx) {
+      const host = document.getElementById('liveTranscript');
+      if (!host) return;
+      const div = document.createElement('div');
+      div.className = 'seg';
+      div.style.cssText = 'background:#dcfce7;color:#166534;border-left:3px solid #16a34a;padding:0.4rem 0.6rem;border-radius:6px;margin:0.4rem 0;';
+      div.textContent = `💾 ファイル ${String(idx).padStart(3, '0')} を保存待ちに追加 — メモリ解放しました`;
+      host.appendChild(div);
+      host.scrollTop = host.scrollHeight;
+      if (rotationToastTimer) clearTimeout(rotationToastTimer);
+      rotationToastTimer = setTimeout(() => {
+        try { div.remove(); } catch (_) {}
+      }, 4000);
+    }
+
+    // Stop the current MediaRecorder, snapshot its chunks as one finished
+    // file in rotateCfg.completedFiles, free chunks/segments, then start a
+    // fresh MediaRecorder (and SR) on the same media stream so recording
+    // continues without the user having to do anything.
+    async function rotateNow() {
+      if (isRotating || !rotateCfg || !recorder) return;
+      isRotating = true;
+      try {
+        const idx = rotateCfg.counter;
+        const endT = (performance.now() - startedAt) / 1000;
+        // Snapshot the segments + last-sentence text BEFORE we touch state,
+        // so the txt build below has a stable input.
+        const segCopy = segments.slice();
+        const lastSeg = segCopy[segCopy.length - 1] || null;
+        const oldRec = recorder;
+        const oldChunks = chunks;
+        const oldMime = oldRec.mimeType || recordedMime || 'audio/webm';
+        // 1) Stop SR (its onend would auto-restart, which we don't want
+        //    here — the new MediaRecorder's startSpeechRecognition will
+        //    spin up a fresh one).
+        const wasSR = srActive;
+        if (speechRec) {
+          try { speechRec.onend = null; speechRec.stop(); } catch (_) {}
+        }
+        srActive = false;
+        // 2) Stop the old MediaRecorder + wait for the final
+        //    ondataavailable so chunks contains every byte.
+        await new Promise((res) => {
+          oldRec.addEventListener('stop', res, { once: true });
+          try { oldRec.requestData(); } catch (_) {}
+          try { oldRec.stop(); } catch (_) { res(); }
+        });
+        const oldBlob = new Blob(oldChunks, { type: oldMime });
+        // 3) Build this chunk's TXT. If the previous chunk left an overlap
+        //    sentence, prepend it as the first line so reading file N+1
+        //    starts with the same sentence file N ended on.
+        const headerNote = rotateCfg.pendingOverlapText
+          ? `[前のファイル (${String(idx - 1).padStart(3, '0')}) からの続き] ${rotateCfg.pendingOverlapText}`
+          : null;
+        const txtPayload = buildChunkText(segCopy, headerNote);
+        // 4) Stash for later batch save.
+        rotateCfg.completedFiles.push({
+          idx, blob: oldBlob, mime: oldMime,
+          text: txtPayload,
+        });
+        // 5) Free in-flight buffers — this is the whole point of the
+        //    rotation: chunks (raw audio) and segments (per-utterance
+        //    feature data) reset to empty so memory pressure stays
+        //    bounded regardless of total recording length.
+        chunks = [];
+        segments.length = 0;
+        // 6) Carry over: last sentence's TEXT will be the seed for the
+        //    NEXT chunk's TXT header. Audio is NOT overlapped (would
+        //    require a parallel tail-buffer + Web Audio splice).
+        rotateCfg.pendingOverlapText = lastSeg ? lastSeg.text : null;
+        rotateCfg.counter = idx + 1;
+        rotateCfg.segStartT = endT;
+        // 7) Spin up a new MediaRecorder on the SAME stream. The mic
+        //    track is still live, so the gap is just the time it takes
+        //    to construct the new recorder (~few hundred ms).
+        const bps = parseInt(bitrateEl.value, 10);
+        const newMime = recordedMime || pickAudioMime();
+        recorder = new MediaRecorder(mediaStream, newMime
+          ? { mimeType: newMime, audioBitsPerSecond: bps }
+          : { audioBitsPerSecond: bps });
+        recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+        recorder.onstop = () => {
+          if (isRotating) return;
+          const type = recorder.mimeType || newMime || 'audio/webm';
+          recordedBlob = new Blob(chunks, { type });
+          recordedMime = type;
+          onRecordingStopped();
+        };
+        recorder.start(1000);
+        // 8) Restart speech recognition so the new chunk gets transcribed.
+        if (wasSR && hasSR) {
+          // Tiny delay so the platform has finished tearing down the old
+          // recogniser before we start a new one.
+          setTimeout(startSpeechRecognition, 100);
+        }
+        showRotationToast(idx);
+      } finally {
+        isRotating = false;
+      }
     }
     function renderLive(interim) {
       if (!segments.length && !interim) {
@@ -990,12 +1177,33 @@
       chunks = [];
       recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       recorder.onstop = () => {
+        // During mid-recording rotation we re-create the recorder, and
+        // the OLD recorder's 'stop' shouldn't end the whole session —
+        // rotateNow() handles its own bookkeeping.
+        if (isRotating) return;
         const type = recorder.mimeType || mime || 'audio/webm';
         recordedBlob = new Blob(chunks, { type });
         recordedMime = type;
         onRecordingStopped();
       };
       recorder.start(1000);
+      // If the user enabled "長時間録音", set up rotation state. Reading
+      // the form fields once at startRecording time freezes the choice
+      // for this session — toggling mid-recording would be confusing.
+      const rotEnable = document.getElementById('rotateEnable');
+      if (rotEnable && rotEnable.checked) {
+        rotateCfg = {
+          enabled: true,
+          intervalSec: parseInt(document.getElementById('rotateInterval').value, 10) || 600,
+          prefix: (document.getElementById('rotatePrefix').value || 'recording').trim() || 'recording',
+          counter: 1,                  // current chunk's 1-based index
+          segStartT: 0,                // elapsed-seconds anchor for current chunk
+          completedFiles: [],          // [{ idx, blob, mime, text }]
+          pendingOverlapText: null,    // last sentence carried over for next file's TXT
+        };
+      } else {
+        rotateCfg = null;
+      }
       startedAt = performance.now();
       timerHandle = setInterval(updateTimer, 250);
       recordArea.classList.add('rec');
@@ -1046,7 +1254,106 @@
       recordArea.classList.remove('rec');
       document.getElementById('speakers').classList.add('hidden');
       document.getElementById('liveTranscript').classList.add('hidden');
+      // Long-recording rotation: if any chunks were rotated out during
+      // the session, fold the FINAL chunk in and offer the whole batch
+      // as one Web Share invocation (so iOS gets a single share-sheet
+      // pop with every file in it). Skip the regular editor for this
+      // path — saving 30 individual files via the editor would be
+      // tedious and the batch save handles audio + TXT pairs together.
+      if (rotateCfg && rotateCfg.enabled && (rotateCfg.completedFiles.length > 0 || segments.length > 0)) {
+        finaliseRotationBatch().catch(err => {
+          console.warn('finaliseRotationBatch failed', err);
+          showEditor();
+        });
+        return;
+      }
       showEditor();
+    }
+
+    // Fold the final in-flight chunk into rotateCfg.completedFiles, then
+    // hand the whole list (audio + TXT pairs, sequentially numbered) to
+    // the Web Share API. Files-only share (no `title`) so iOS doesn't
+    // route to a text-app and lose the binaries. Falls back to per-file
+    // anchor downloads when Share isn't available (desktop).
+    async function finaliseRotationBatch() {
+      if (!rotateCfg) return;
+      // Snapshot final chunk in the same shape as completedFiles.
+      const finalIdx = rotateCfg.counter;
+      const finalBlob = recordedBlob || new Blob(chunks, { type: recordedMime || 'audio/webm' });
+      const finalMime = finalBlob.type || recordedMime || 'audio/webm';
+      const headerNote = rotateCfg.pendingOverlapText
+        ? `[前のファイル (${String(finalIdx - 1).padStart(3, '0')}) からの続き] ${rotateCfg.pendingOverlapText}`
+        : null;
+      const finalText = buildChunkText(segments.slice(), headerNote);
+      const all = rotateCfg.completedFiles.slice();
+      // Only include the final chunk if it's non-empty (skip when the
+      // user pressed stop right after a rotation cleared everything).
+      if (finalBlob.size > 0 || finalText.trim().length > 0) {
+        all.push({ idx: finalIdx, blob: finalBlob, mime: finalMime, text: finalText });
+      }
+      // Build File objects. For audio, transcode happens later if the
+      // user hits saveMp3 — for the rotation batch we ship the native
+      // recorder format (typically webm/mp4) since it's already on
+      // disk; transcoding 30 chunks here would peak memory again.
+      const ext = (m) => /mp4|aac/i.test(m) ? 'm4a' : /ogg/i.test(m) ? 'ogg' : 'webm';
+      const prefix = rotateCfg.prefix || 'recording';
+      const files = [];
+      for (const r of all) {
+        const num = String(r.idx).padStart(3, '0');
+        files.push(new File([r.blob], `${prefix}-${num}.${ext(r.mime)}`, { type: r.mime }));
+        files.push(new File(
+          [new Blob([r.text || ''], { type: 'text/plain;charset=utf-8' })],
+          `${prefix}-${num}.txt`,
+          { type: 'text/plain;charset=utf-8' }
+        ));
+      }
+      const status = document.getElementById('saveStatus') || (() => {
+        // Status node hasn't been created yet (we skipped showEditor).
+        // Drop a transient block above the record area instead.
+        const d = document.createElement('div');
+        d.id = 'saveStatus';
+        d.style.cssText = 'margin:0.6rem 0;';
+        recordArea.parentNode.insertBefore(d, recordArea.nextSibling);
+        return d;
+      })();
+      status.innerHTML = `<div class="alert info">📤 ${files.length}個のファイル (音声+TXT × ${all.length}本) を共有/保存します…</div>`;
+      // Web Share with file array — iOS surfaces the share sheet and
+      // "ファイルに保存" lands every entry into the chosen folder in
+      // one go. AbortError = user cancelled, that's fine.
+      let sharedOk = false;
+      if (navigator.canShare && files.length && navigator.canShare({ files })) {
+        try {
+          await navigator.share({ files });
+          sharedOk = true;
+        } catch (e) {
+          if (e && e.name === 'AbortError') {
+            status.innerHTML = `<div class="alert warn">共有をキャンセルしました。下のボタンで再試行できます。</div>`;
+          }
+        }
+      }
+      if (!sharedOk && (!navigator.canShare || !files.length || !navigator.canShare({ files }))) {
+        // Desktop / non-Share-capable browsers: trigger N anchor
+        // downloads sequentially.
+        for (const f of files) {
+          const url = URL.createObjectURL(f);
+          const a = document.createElement('a');
+          a.href = url; a.download = f.name; a.target = '_blank'; a.rel = 'noopener';
+          document.body.appendChild(a); a.click(); document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+          await new Promise(r => setTimeout(r, 120));
+        }
+        sharedOk = true;
+      }
+      if (sharedOk) {
+        status.innerHTML = `<div class="alert success">✅ ${all.length}本 (音声+TXT) を保存しました。</div>`;
+      }
+      // Don't show the editor — rotation mode bypasses the per-file
+      // post-processing UI. Reset state so a fresh "🎙️ 続けて録音" tap
+      // starts a clean session.
+      rotateCfg = null;
+      segments.length = 0;
+      chunks = [];
+      recordedBlob = null;
     }
 
     // ---- Post-recording editor ----
@@ -1917,6 +2224,16 @@
       hideStopConfirm();
       stopRecording();
     });
+
+    // Reveal / hide the rotation interval+prefix block based on toggle.
+    (function bindRotateToggle() {
+      const cb = document.getElementById('rotateEnable');
+      const opts = document.getElementById('rotateOptions');
+      if (!cb || !opts) return;
+      const sync = () => opts.classList.toggle('hidden', !cb.checked);
+      cb.addEventListener('change', sync);
+      sync();
+    })();
   </script>
 </body>
 </html>
