@@ -716,6 +716,7 @@
       // ロスター情報は HP も最大に回復してステージ開始 (途中再開でない場合)
       const u = {
         ...r,
+        side: 'player',
         x: sp.x, y: sp.y,
         hp: r.maxHp,
         alive: true,
