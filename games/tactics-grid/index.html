@@ -1,0 +1,1409 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <title>戦術バトル | 試作</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; padding: 0;
+      background: #f8fafc; color: #0f172a;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      min-height: 100vh;
+      min-height: 100dvh;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    header {
+      display: flex; align-items: center; gap: 0.6rem;
+      padding: 0.7rem 1rem;
+      background: #fff;
+      border-bottom: 1px solid #e2e8f0;
+      position: sticky; top: env(safe-area-inset-top); z-index: 5;
+    }
+    header h1 { font-size: 1rem; margin: 0; font-weight: 700; }
+    header .back { color: #0f172a; text-decoration: none; font-size: 0.95rem; }
+    main {
+      max-width: 480px;
+      margin: 0 auto;
+      padding: 0.75rem;
+      display: flex; flex-direction: column; gap: 0.7rem;
+    }
+    /* status bar */
+    #status {
+      display: flex; flex-wrap: wrap; gap: 0.45rem 0.8rem;
+      align-items: center;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 0.55rem 0.7rem;
+      font-size: 0.8rem;
+    }
+    #status .turn { font-weight: 700; }
+    #status .phase {
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      background: #e0f2fe; color: #0369a1;
+      font-size: 0.72rem; font-weight: 600;
+    }
+    #status .phase.enemy { background: #fee2e2; color: #991b1b; }
+    /* board */
+    #board {
+      --cell: clamp(36px, 11.5vw, 64px);
+      display: grid;
+      grid-template-columns: repeat(var(--board-w), var(--cell));
+      grid-auto-rows: var(--cell);
+      gap: 2px;
+      background: #cbd5e1;
+      padding: 2px;
+      border-radius: 10px;
+      width: max-content;
+      margin: 0 auto;
+      position: relative;
+      touch-action: manipulation;
+    }
+    .cell {
+      position: relative;
+      background: #f1f5f9;
+      border-radius: 4px;
+      transition: background 0.12s, box-shadow 0.12s;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      font-size: calc(var(--cell) * 0.62);
+      line-height: 1;
+      user-select: none;
+    }
+    .cell:nth-child(odd) { background: #e2e8f0; }
+    .cell.move-target {
+      background: #cffafe;
+      box-shadow: inset 0 0 0 2px #0ea5e9;
+    }
+    .cell.aim-target {
+      background: #fef3c7;
+      box-shadow: inset 0 0 0 2px #f59e0b;
+    }
+    .cell.selected {
+      box-shadow: inset 0 0 0 3px #0284c7;
+    }
+    .cell.flash-hit {
+      animation: flash-red 0.4s ease-out;
+    }
+    @keyframes flash-red {
+      0% { background: #fecaca; }
+      100% { background: inherit; }
+    }
+    .unit {
+      position: absolute; inset: 2px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      pointer-events: none;
+    }
+    .unit .glyph {
+      font-size: calc(var(--cell) * 0.52);
+      filter: drop-shadow(0 1px 1px rgba(0,0,0,0.2));
+    }
+    .unit.enemy .glyph { filter: drop-shadow(0 1px 1px rgba(220,38,38,0.45)); }
+    .unit .hpbar {
+      position: absolute; left: 4px; right: 4px; bottom: 2px;
+      height: 4px; background: rgba(15,23,42,0.18); border-radius: 2px; overflow: hidden;
+    }
+    .unit .hpbar > i {
+      display: block; height: 100%;
+      background: #16a34a;
+    }
+    .unit.enemy .hpbar > i { background: #dc2626; }
+    .obstacle {
+      position: absolute; inset: 2px;
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
+    }
+    .obstacle .glyph {
+      font-size: calc(var(--cell) * 0.55);
+      filter: drop-shadow(0 1px 1px rgba(0,0,0,0.18));
+    }
+    .obstacle .hpbar {
+      position: absolute; left: 4px; right: 4px; bottom: 2px;
+      height: 3px; background: rgba(15,23,42,0.18); border-radius: 2px; overflow: hidden;
+    }
+    .obstacle .hpbar > i { display: block; height: 100%; background: #b45309; }
+    .obstacle.wall { /* indestructible — slightly tinted bg in cell via class */ }
+    .ending-roster {
+      display: flex; flex-direction: column; gap: 0.3rem;
+      max-height: 38vh; overflow-y: auto;
+      background: #f1f5f9; border-radius: 8px;
+      padding: 0.5rem; margin: 0.4rem 0;
+    }
+    .ending-row {
+      display: flex; align-items: center; gap: 0.4rem;
+      font-size: 0.82rem;
+    }
+    .ending-row .glyph { font-size: 1.05rem; }
+    .ending-row .lv {
+      background: #0284c7; color: #fff; font-size: 0.65rem; font-weight: 700;
+      padding: 1px 6px; border-radius: 6px;
+    }
+    .ending-row .stats { color: #475569; font-size: 0.72rem; margin-left: auto; }
+    .cell.has-wall { background: #94a3b8; }
+    .cell.has-wall:nth-child(odd) { background: #94a3b8; }
+    .unit .lvl {
+      position: absolute; top: -3px; right: -3px;
+      background: #0284c7; color: #fff;
+      font-size: 0.55rem; font-weight: 700;
+      padding: 0 3px; border-radius: 5px;
+      line-height: 1.4;
+    }
+    .ball {
+      position: absolute; inset: 0;
+      display: flex; align-items: flex-start; justify-content: center;
+      padding-top: 1px;
+      pointer-events: none;
+      animation: pop 0.18s ease-out;
+    }
+    .ball .dot {
+      font-size: calc(var(--cell) * 0.28);
+      filter: drop-shadow(0 1px 1px rgba(0,0,0,0.3));
+    }
+    @keyframes pop { from { transform: scale(0.6); } to { transform: scale(1); } }
+    /* roster + active panels */
+    .panel {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 0.6rem 0.7rem;
+    }
+    .panel h2 {
+      margin: 0 0 0.45rem 0;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #475569;
+    }
+    .roster-row {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.35rem 0;
+      border-top: 1px solid #f1f5f9;
+      font-size: 0.78rem;
+    }
+    .roster-row:first-child { border-top: 0; }
+    .roster-row.dead { opacity: 0.4; text-decoration: line-through; }
+    .roster-row .glyph { font-size: 1.2rem; }
+    .roster-row .name { font-weight: 600; min-width: 4rem; }
+    .roster-row .stats { color: #64748b; font-size: 0.7rem; flex: 1; }
+    .roster-row .hp { font-variant-numeric: tabular-nums; min-width: 3.5rem; text-align: right; font-weight: 600; }
+    .roster-row.enemy .name { color: #b91c1c; }
+    .lvbar {
+      width: 100%;
+      height: 3px; background: #e2e8f0; border-radius: 2px; overflow: hidden;
+      margin-top: 2px;
+    }
+    .lvbar > i {
+      display: block; height: 100%;
+      background: linear-gradient(90deg, #38bdf8, #0ea5e9);
+    }
+    /* actions */
+    #actions {
+      display: flex; flex-wrap: wrap; gap: 0.5rem;
+    }
+    .btn {
+      flex: 1 1 auto;
+      min-height: 44px;
+      padding: 0.55rem 0.85rem;
+      border-radius: 10px;
+      border: none;
+      font-family: inherit; font-size: 0.85rem; font-weight: 700;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: transform 0.08s;
+    }
+    .btn:active:not(:disabled) { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary {
+      background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+      color: #fff;
+    }
+    .btn-secondary {
+      background: #f1f5f9; color: #0f172a;
+      border: 1px solid #e2e8f0;
+    }
+    .btn-danger {
+      background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
+    }
+    /* log */
+    #log {
+      font-size: 0.74rem;
+      color: #475569;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 0.5rem 0.7rem;
+      max-height: 7em;
+      overflow-y: auto;
+    }
+    #log .row { padding: 0.15rem 0; border-top: 1px dashed #f1f5f9; }
+    #log .row:first-child { border-top: 0; }
+    /* toast */
+    #toast-host {
+      position: fixed;
+      left: 0; right: 0;
+      top: calc(env(safe-area-inset-top) + 56px);
+      display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
+      pointer-events: none;
+      z-index: 20;
+    }
+    .toast {
+      background: rgba(15,23,42,0.92); color: #fff;
+      padding: 0.5rem 0.85rem;
+      border-radius: 999px;
+      font-size: 0.85rem; font-weight: 600;
+      animation: toast-in 0.25s ease-out, toast-out 0.4s ease-in 2.6s forwards;
+      max-width: 92%;
+    }
+    .toast.success { background: rgba(22,101,52,0.94); }
+    .toast.warn { background: rgba(180,83,9,0.94); }
+    @keyframes toast-in { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+    @keyframes toast-out { to { transform: translateY(-12px); opacity: 0; } }
+    /* overlay (stage clear / game over) */
+    #overlay {
+      position: fixed; inset: 0;
+      background: rgba(15,23,42,0.78);
+      display: none; align-items: center; justify-content: center;
+      padding: 1rem;
+      z-index: 30;
+    }
+    #overlay.show { display: flex; }
+    #overlay .card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 1.1rem 1rem 0.85rem;
+      max-width: 360px; width: 100%;
+      text-align: center;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+    }
+    #overlay h2 { margin: 0 0 0.5rem 0; font-size: 1.1rem; }
+    #overlay p { margin: 0.25rem 0; font-size: 0.85rem; color: #475569; line-height: 1.55; }
+    #overlay .btn-row { margin-top: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="back" href="../" aria-label="戻る">← games</a>
+    <h1>⚔️ 戦術バトル (試作)</h1>
+  </header>
+  <main>
+    <div id="status"></div>
+    <div id="board"></div>
+    <div class="panel" id="panel-active"></div>
+    <div class="panel" id="panel-units"></div>
+    <div id="actions"></div>
+    <div id="log"></div>
+  </main>
+  <div id="toast-host"></div>
+  <div id="overlay"><div class="card" id="overlay-card"></div></div>
+  <script>
+  /* ============================================================
+   * 戦術バトル — グリッド戦術プロトタイプ
+   *
+   * state を唯一の真実の源として、render() で innerHTML を再構築する
+   * 同期方式。盤面が小さい (最大数十マス) ので per-frame 仮想 DOM は
+   * 不要。
+   * ============================================================ */
+
+  // ----- Config -----------------------------------------------
+  const SAVE_KEY = 'games.tactics-grid.v1';
+  const RECRUIT_PROB = { melee: 0.5, ball: 0.25 };
+  const LV_CAP = 20;
+  const xpToNext = (lv) => 12 + 8 * (lv - 1);   // 12, 20, 28, 36, ...
+  const ARCH_WEIGHTS = {                        // レベルアップ時のステ分配重み
+    tank:    { hp: 4, atk: 2, def: 3, spd: 1 },
+    striker: { hp: 2, atk: 4, def: 1, spd: 3 },
+    archer:  { hp: 2, atk: 3, def: 1, spd: 4 },
+    rogue:   { hp: 1, atk: 3, def: 1, spd: 5 },
+    balanced:{ hp: 2, atk: 2, def: 2, spd: 2 },
+  };
+
+  // ----- Stages ----------------------------------------------
+  // 全 10 ステージ。グリッドサイズ・敵タイプ・敵数を段階的に上げる。
+  // 最終ステージは大魔王 + 取り巻き 5 体のクライマックス。
+  const STAGES = [
+    {
+      name: '森のはじまり',
+      w: 3, h: 8,
+      enemies: [
+        { name: '盗賊', glyph: '👹', x: 1, y: 0, hp: 16, atk: 4, def: 1, spd: 4, ballAtk: 3, archetype: 'striker' },
+      ],
+      playerSpawns: [{ x: 1, y: 7 }, { x: 0, y: 7 }, { x: 2, y: 7 }],
+    },
+    {
+      name: '岩場の門',
+      w: 4, h: 8,
+      enemies: [
+        { name: '盗賊', glyph: '👹', x: 0, y: 1, hp: 16, atk: 4, def: 1, spd: 4, ballAtk: 3, archetype: 'striker' },
+        { name: '弓兵', glyph: '🏹', x: 3, y: 1, hp: 14, atk: 3, def: 0, spd: 5, ballAtk: 4, archetype: 'archer' },
+      ],
+      playerSpawns: [{ x: 0, y: 7 }, { x: 1, y: 7 }, { x: 2, y: 7 }, { x: 3, y: 7 }],
+    },
+    {
+      name: '崩れた塔',
+      w: 4, h: 10,
+      enemies: [
+        { name: '盗賊', glyph: '👹', x: 0, y: 0, hp: 16, atk: 4, def: 1, spd: 4, ballAtk: 3, archetype: 'striker' },
+        { name: '弓兵', glyph: '🏹', x: 3, y: 0, hp: 14, atk: 3, def: 0, spd: 5, ballAtk: 4, archetype: 'archer' },
+        { name: '番兵', glyph: '🛡️', x: 1, y: 1, hp: 22, atk: 5, def: 3, spd: 2, ballAtk: 3, archetype: 'tank' },
+      ],
+      playerSpawns: [{ x: 0, y: 9 }, { x: 1, y: 9 }, { x: 2, y: 9 }, { x: 3, y: 9 }],
+    },
+    {
+      name: '森の隠れ里',
+      w: 5, h: 10,
+      enemies: [
+        { name: '盗賊', glyph: '👹', x: 0, y: 1, hp: 18, atk: 5, def: 1, spd: 4, ballAtk: 4, archetype: 'striker' },
+        { name: '弓兵', glyph: '🏹', x: 2, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
+        { name: '狼',   glyph: '🐺', x: 4, y: 1, hp: 16, atk: 5, def: 1, spd: 7, ballAtk: 2, archetype: 'rogue' },
+      ],
+      // 木 (壊せる) で射線を分断
+      obstacles: [
+        { kind: 'breakable', glyph: '🌳', x: 1, y: 4, hp: 8 },
+        { kind: 'breakable', glyph: '🌳', x: 3, y: 5, hp: 8 },
+        { kind: 'breakable', glyph: '🌳', x: 2, y: 6, hp: 8 },
+      ],
+      playerSpawns: [{ x: 0, y: 9 }, { x: 1, y: 9 }, { x: 2, y: 9 }, { x: 3, y: 9 }, { x: 4, y: 9 }],
+    },
+    {
+      name: '古の遺跡',
+      w: 5, h: 10,
+      enemies: [
+        { name: '番兵', glyph: '🛡️', x: 2, y: 0, hp: 24, atk: 5, def: 3, spd: 2, ballAtk: 3, archetype: 'tank' },
+        { name: '弓兵', glyph: '🏹', x: 0, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
+        { name: '弓兵', glyph: '🏹', x: 4, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
+        { name: '狼',   glyph: '🐺', x: 1, y: 2, hp: 16, atk: 5, def: 1, spd: 7, ballAtk: 2, archetype: 'rogue' },
+      ],
+      // 石柱 (壊れない) + 崩れた壁 (壊せる)
+      obstacles: [
+        { kind: 'wall',      glyph: '🗿', x: 0, y: 4 },
+        { kind: 'wall',      glyph: '🗿', x: 4, y: 4 },
+        { kind: 'breakable', glyph: '🪨', x: 2, y: 5, hp: 12 },
+        { kind: 'breakable', glyph: '🪨', x: 1, y: 6, hp: 12 },
+        { kind: 'breakable', glyph: '🪨', x: 3, y: 6, hp: 12 },
+      ],
+      playerSpawns: [{ x: 0, y: 9 }, { x: 1, y: 9 }, { x: 2, y: 9 }, { x: 3, y: 9 }, { x: 4, y: 9 }],
+    },
+    {
+      name: '雪の峠',
+      w: 6, h: 10,
+      enemies: [
+        { name: '騎士',   glyph: '⚔️', x: 2, y: 0, hp: 26, atk: 6, def: 3, spd: 4, ballAtk: 4, archetype: 'balanced' },
+        { name: '番兵',   glyph: '🛡️', x: 3, y: 0, hp: 24, atk: 5, def: 3, spd: 2, ballAtk: 3, archetype: 'tank' },
+        { name: '弓兵',   glyph: '🏹', x: 5, y: 1, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
+        { name: '狼',     glyph: '🐺', x: 0, y: 1, hp: 16, atk: 5, def: 1, spd: 7, ballAtk: 2, archetype: 'rogue' },
+      ],
+      // 氷塊 (壊せる) で峠の中央を分断
+      obstacles: [
+        { kind: 'breakable', glyph: '🧊', x: 1, y: 4, hp: 10 },
+        { kind: 'breakable', glyph: '🧊', x: 2, y: 4, hp: 10 },
+        { kind: 'breakable', glyph: '🧊', x: 3, y: 4, hp: 10 },
+        { kind: 'breakable', glyph: '🧊', x: 4, y: 4, hp: 10 },
+        { kind: 'wall',      glyph: '⛰️', x: 0, y: 5 },
+        { kind: 'wall',      glyph: '⛰️', x: 5, y: 5 },
+      ],
+      playerSpawns: [{ x: 0, y: 9 }, { x: 1, y: 9 }, { x: 2, y: 9 }, { x: 3, y: 9 }, { x: 4, y: 9 }, { x: 5, y: 9 }],
+    },
+    {
+      name: '影の城門',
+      w: 6, h: 12,
+      enemies: [
+        { name: '騎士',   glyph: '⚔️', x: 2, y: 0, hp: 28, atk: 6, def: 3, spd: 4, ballAtk: 4, archetype: 'balanced' },
+        { name: '魔導士', glyph: '🧙', x: 3, y: 1, hp: 18, atk: 3, def: 1, spd: 5, ballAtk: 7, archetype: 'archer' },
+        { name: '弓兵',   glyph: '🏹', x: 0, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
+        { name: '弓兵',   glyph: '🏹', x: 5, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
+        { name: '狼',     glyph: '🐺', x: 1, y: 2, hp: 16, atk: 5, def: 1, spd: 7, ballAtk: 2, archetype: 'rogue' },
+      ],
+      // 城壁 (壊れない) + 木箱 (壊せる)
+      obstacles: [
+        { kind: 'wall',      glyph: '🟫', x: 0, y: 6 },
+        { kind: 'wall',      glyph: '🟫', x: 1, y: 6 },
+        { kind: 'wall',      glyph: '🟫', x: 4, y: 6 },
+        { kind: 'wall',      glyph: '🟫', x: 5, y: 6 },
+        { kind: 'breakable', glyph: '📦', x: 2, y: 7, hp: 8 },
+        { kind: 'breakable', glyph: '📦', x: 3, y: 7, hp: 8 },
+      ],
+      playerSpawns: [{ x: 0, y: 11 }, { x: 1, y: 11 }, { x: 2, y: 11 }, { x: 3, y: 11 }, { x: 4, y: 11 }, { x: 5, y: 11 }],
+    },
+    {
+      name: '闇の塔',
+      w: 7, h: 12,
+      enemies: [
+        { name: '騎士',   glyph: '⚔️', x: 2, y: 0, hp: 28, atk: 6, def: 3, spd: 4, ballAtk: 4, archetype: 'balanced' },
+        { name: '騎士',   glyph: '⚔️', x: 4, y: 0, hp: 28, atk: 6, def: 3, spd: 4, ballAtk: 4, archetype: 'balanced' },
+        { name: '魔導士', glyph: '🧙', x: 3, y: 1, hp: 18, atk: 3, def: 1, spd: 5, ballAtk: 8, archetype: 'archer' },
+        { name: '弓兵',   glyph: '🏹', x: 0, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
+        { name: '番兵',   glyph: '🛡️', x: 6, y: 0, hp: 28, atk: 6, def: 4, spd: 2, ballAtk: 3, archetype: 'tank' },
+      ],
+      // 塔の柱 (壊れない) + 木箱
+      obstacles: [
+        { kind: 'wall',      glyph: '🟫', x: 1, y: 5 },
+        { kind: 'wall',      glyph: '🟫', x: 5, y: 5 },
+        { kind: 'wall',      glyph: '🟫', x: 3, y: 6 },
+        { kind: 'breakable', glyph: '📦', x: 0, y: 7, hp: 10 },
+        { kind: 'breakable', glyph: '📦', x: 6, y: 7, hp: 10 },
+        { kind: 'breakable', glyph: '🪵', x: 2, y: 8, hp: 10 },
+        { kind: 'breakable', glyph: '🪵', x: 4, y: 8, hp: 10 },
+      ],
+      playerSpawns: [{ x: 0, y: 11 }, { x: 1, y: 11 }, { x: 2, y: 11 }, { x: 3, y: 11 }, { x: 4, y: 11 }, { x: 5, y: 11 }, { x: 6, y: 11 }],
+    },
+    {
+      name: '王の間前',
+      w: 7, h: 12,
+      enemies: [
+        { name: '上位騎士', glyph: '🤺', x: 3, y: 0, hp: 34, atk: 7, def: 4, spd: 5, ballAtk: 5, archetype: 'balanced' },
+        { name: '魔導士',   glyph: '🧙', x: 1, y: 1, hp: 20, atk: 3, def: 1, spd: 5, ballAtk: 8, archetype: 'archer' },
+        { name: '魔導士',   glyph: '🧙', x: 5, y: 1, hp: 20, atk: 3, def: 1, spd: 5, ballAtk: 8, archetype: 'archer' },
+        { name: '弓兵',     glyph: '🏹', x: 0, y: 0, hp: 18, atk: 3, def: 0, spd: 6, ballAtk: 6, archetype: 'archer' },
+        { name: '弓兵',     glyph: '🏹', x: 6, y: 0, hp: 18, atk: 3, def: 0, spd: 6, ballAtk: 6, archetype: 'archer' },
+        { name: '狼',       glyph: '🐺', x: 2, y: 2, hp: 18, atk: 5, def: 1, spd: 8, ballAtk: 2, archetype: 'rogue' },
+      ],
+      // 大広間風の柱
+      obstacles: [
+        { kind: 'wall', glyph: '🗿', x: 1, y: 5 },
+        { kind: 'wall', glyph: '🗿', x: 5, y: 5 },
+        { kind: 'wall', glyph: '🗿', x: 3, y: 7 },
+        { kind: 'breakable', glyph: '🪵', x: 0, y: 8, hp: 12 },
+        { kind: 'breakable', glyph: '🪵', x: 6, y: 8, hp: 12 },
+        { kind: 'breakable', glyph: '🪵', x: 2, y: 9, hp: 12 },
+        { kind: 'breakable', glyph: '🪵', x: 4, y: 9, hp: 12 },
+      ],
+      playerSpawns: [{ x: 0, y: 11 }, { x: 1, y: 11 }, { x: 2, y: 11 }, { x: 3, y: 11 }, { x: 4, y: 11 }, { x: 5, y: 11 }, { x: 6, y: 11 }],
+    },
+    {
+      name: '魔王の玉座',
+      w: 8, h: 12,
+      enemies: [
+        { name: '大魔王',   glyph: '😈', x: 3, y: 0, hp: 70, atk: 9, def: 5, spd: 6, ballAtk: 10, archetype: 'balanced' },
+        { name: '上位騎士', glyph: '🤺', x: 1, y: 1, hp: 32, atk: 7, def: 4, spd: 5, ballAtk: 5, archetype: 'balanced' },
+        { name: '上位騎士', glyph: '🤺', x: 6, y: 1, hp: 32, atk: 7, def: 4, spd: 5, ballAtk: 5, archetype: 'balanced' },
+        { name: '魔導士',   glyph: '🧙', x: 0, y: 0, hp: 22, atk: 3, def: 1, spd: 5, ballAtk: 9, archetype: 'archer' },
+        { name: '魔導士',   glyph: '🧙', x: 7, y: 0, hp: 22, atk: 3, def: 1, spd: 5, ballAtk: 9, archetype: 'archer' },
+        { name: '番兵',     glyph: '🛡️', x: 4, y: 1, hp: 30, atk: 6, def: 4, spd: 2, ballAtk: 3, archetype: 'tank' },
+      ],
+      // 玉座の間 — 中央に魔王の祭壇 (壊れない) + 周囲に瓦礫
+      obstacles: [
+        { kind: 'wall', glyph: '🟪', x: 2, y: 4 },
+        { kind: 'wall', glyph: '🟪', x: 5, y: 4 },
+        { kind: 'wall', glyph: '🟪', x: 0, y: 5 },
+        { kind: 'wall', glyph: '🟪', x: 7, y: 5 },
+        { kind: 'wall', glyph: '🟪', x: 3, y: 6 },
+        { kind: 'wall', glyph: '🟪', x: 4, y: 6 },
+        { kind: 'breakable', glyph: '🪨', x: 1, y: 7, hp: 16 },
+        { kind: 'breakable', glyph: '🪨', x: 6, y: 7, hp: 16 },
+        { kind: 'breakable', glyph: '🪨', x: 2, y: 8, hp: 16 },
+        { kind: 'breakable', glyph: '🪨', x: 5, y: 8, hp: 16 },
+      ],
+      playerSpawns: [{ x: 0, y: 11 }, { x: 1, y: 11 }, { x: 2, y: 11 }, { x: 3, y: 11 }, { x: 4, y: 11 }, { x: 5, y: 11 }, { x: 6, y: 11 }, { x: 7, y: 11 }],
+    },
+  ];
+
+  // ----- Helpers ---------------------------------------------
+  const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+  function nextId(prefix) {
+    nextId._n = (nextId._n || 0) + 1;
+    return prefix + '-' + nextId._n;
+  }
+  function weightedPick(weights, rand = Math.random) {
+    const total = Object.values(weights).reduce((a, b) => a + b, 0);
+    let r = rand() * total;
+    for (const k of Object.keys(weights)) {
+      r -= weights[k];
+      if (r <= 0) return k;
+    }
+    return Object.keys(weights)[0];
+  }
+  // 8 方向の単位ベクトル候補
+  const DIR8 = [
+    { vx: 0, vy: -1 }, { vx: 1, vy: -1 }, { vx: 1, vy: 0 }, { vx: 1, vy: 1 },
+    { vx: 0, vy: 1  }, { vx: -1, vy: 1 }, { vx: -1, vy: 0 }, { vx: -1, vy: -1 },
+  ];
+  // 始点 → 終点の最寄り 8-vector
+  function dirTo(fromX, fromY, toX, toY) {
+    const dx = toX - fromX, dy = toY - fromY;
+    if (dx === 0 && dy === 0) return null;
+    const ang = Math.atan2(dy, dx);                              // -π..π
+    const idx = Math.round((ang + Math.PI) / (Math.PI / 4)) % 8; // 0..7
+    // idx 0 が「左」(π or -π) になるので回転を直す
+    // 簡単のため候補を直に総当たりで最も内積最大のベクトルを選ぶ
+    let bestIdx = 0, bestScore = -Infinity;
+    const norm = Math.hypot(dx, dy) || 1;
+    for (let i = 0; i < DIR8.length; i++) {
+      const d = DIR8[i];
+      const score = (d.vx * dx + d.vy * dy) / (norm);
+      if (score > bestScore) { bestScore = score; bestIdx = i; }
+    }
+    return DIR8[bestIdx];
+  }
+  // BFS で start から step マス以内の到達セルを返す
+  // ユニット & 障害物 (壊れない / 残 HP のある壊せる) はブロック扱い
+  function reachable(state, sx, sy, steps) {
+    const w = state.boardW, h = state.boardH;
+    const blocked = new Set(
+      state.units.filter(u => u.alive && !(u.x === sx && u.y === sy))
+                 .map(u => u.x + ',' + u.y)
+    );
+    if (state.obstacles) {
+      for (const o of state.obstacles) {
+        if (o.kind === 'wall' || (o.kind === 'breakable' && o.hp > 0)) {
+          blocked.add(o.x + ',' + o.y);
+        }
+      }
+    }
+    const dist = new Map();
+    dist.set(sx + ',' + sy, 0);
+    const queue = [[sx, sy, 0]];
+    const out = [];
+    while (queue.length) {
+      const [x, y, d] = queue.shift();
+      if (d > 0) out.push({ x, y, d });
+      if (d >= steps) continue;
+      // 4近傍 + 4斜め (移動も 8方向許可)
+      for (const v of DIR8) {
+        const nx = x + v.vx, ny = y + v.vy;
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+        const k = nx + ',' + ny;
+        if (blocked.has(k)) continue;
+        if (dist.has(k)) continue;
+        dist.set(k, d + 1);
+        queue.push([nx, ny, d + 1]);
+      }
+    }
+    return out;
+  }
+  function unitAt(state, x, y) {
+    return state.units.find(u => u.alive && u.x === x && u.y === y) || null;
+  }
+  function obstacleAt(state, x, y) {
+    if (!state.obstacles) return null;
+    for (const o of state.obstacles) {
+      if (o.x === x && o.y === y && (o.kind === 'wall' || o.hp > 0)) return o;
+    }
+    return null;
+  }
+  function moveBudget(unit) {
+    return clamp(Math.ceil(unit.spd / 3), 1, 3);
+  }
+
+  // ----- State construction ----------------------------------
+  function makeUnit(spec, side, opts = {}) {
+    const u = {
+      id: opts.id || nextId(side === 'player' ? 'P' : 'E'),
+      side,
+      name: spec.name, glyph: spec.glyph,
+      x: spec.x, y: spec.y,
+      hp: spec.hp, maxHp: spec.hp,
+      atk: spec.atk, def: spec.def, spd: spec.spd,
+      ballAtk: spec.ballAtk,
+      archetype: spec.archetype || 'balanced',
+      alive: true,
+      acted: false,
+    };
+    if (side === 'player') {
+      u.lv = opts.lv ?? 1;
+      u.xp = opts.xp ?? 0;
+    }
+    return u;
+  }
+  // STAGE def → state
+  function buildStageState(stageIdx, roster, prevSave) {
+    const stage = STAGES[stageIdx];
+    const units = [];
+    // プレイヤー: roster をそのまま並べ、空き枠に配置
+    let spawnI = 0;
+    for (const r of roster) {
+      const sp = stage.playerSpawns[spawnI++ % stage.playerSpawns.length];
+      // ロスター情報は HP も最大に回復してステージ開始 (途中再開でない場合)
+      const u = {
+        ...r,
+        x: sp.x, y: sp.y,
+        hp: r.maxHp,
+        alive: true,
+        acted: false,
+      };
+      units.push(u);
+    }
+    // 敵
+    for (const e of stage.enemies) {
+      units.push(makeUnit(e, 'enemy'));
+    }
+    // 障害物 (ステージ定義から実体を作る)
+    const obstacles = (stage.obstacles || []).map((o, i) => ({
+      id: 'O' + stageIdx + '-' + i,
+      kind: o.kind,           // 'wall' | 'breakable'
+      glyph: o.glyph || (o.kind === 'wall' ? '🟫' : '🪵'),
+      x: o.x, y: o.y,
+      hp: o.kind === 'breakable' ? (o.hp || 10) : Infinity,
+      maxHp: o.kind === 'breakable' ? (o.hp || 10) : Infinity,
+    }));
+    return {
+      stageIdx,
+      stageName: stage.name,
+      boardW: stage.w, boardH: stage.h,
+      units,
+      balls: [],
+      obstacles,
+      turn: 1,
+      orderIdx: 0,
+      phase: 'turn-start', // → 'select' / 'move' / 'aim' / 'enemy-act' / 'resolve' / 'end'
+      sel: null,           // 選択中のプレイヤーユニット ID
+      moved: false,        // 選択中ユニットが既に移動済みか
+      log: [],
+    };
+  }
+  function buildOrder(state) {
+    return state.units
+      .filter(u => u.alive && !u.acted)
+      .slice()
+      .sort((a, b) => {
+        if (b.spd !== a.spd) return b.spd - a.spd;
+        if (a.side !== b.side) return a.side === 'player' ? -1 : 1;
+        return a.id.localeCompare(b.id);
+      })
+      .map(u => u.id);
+  }
+  function activeUnit(state) {
+    if (!state.order || state.orderIdx >= state.order.length) return null;
+    return state.units.find(u => u.id === state.order[state.orderIdx] && u.alive);
+  }
+
+  // ----- Save / Load -----------------------------------------
+  function loadSave() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (_) { return null; }
+  }
+  function saveAll() {
+    if (!state) return;
+    const save = {
+      clearedStageIdx: cleared,
+      roster: rosterToSave(state.units.filter(u => u.side === 'player')),
+      currentStage: {
+        stageIdx: state.stageIdx,
+        units: state.units.map(serializeUnit),
+        balls: state.balls.slice(),
+        obstacles: (state.obstacles || []).map(o => ({
+          id: o.id, kind: o.kind, glyph: o.glyph,
+          x: o.x, y: o.y,
+          hp: o.hp === Infinity ? null : o.hp,
+          maxHp: o.maxHp === Infinity ? null : o.maxHp,
+        })),
+        turn: state.turn,
+        orderIdx: state.orderIdx,
+        order: state.order,
+        phase: state.phase,
+        sel: state.sel,
+        moved: state.moved,
+        log: state.log.slice(-20),
+      },
+    };
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (_) {}
+  }
+  function rosterToSave(playerUnits) {
+    return playerUnits.map(u => ({
+      id: u.id, name: u.name, glyph: u.glyph,
+      maxHp: u.maxHp, atk: u.atk, def: u.def, spd: u.spd, ballAtk: u.ballAtk,
+      archetype: u.archetype,
+      lv: u.lv, xp: u.xp,
+    }));
+  }
+  function serializeUnit(u) {
+    return {
+      id: u.id, side: u.side, name: u.name, glyph: u.glyph,
+      x: u.x, y: u.y, hp: u.hp, maxHp: u.maxHp,
+      atk: u.atk, def: u.def, spd: u.spd, ballAtk: u.ballAtk,
+      archetype: u.archetype,
+      lv: u.lv, xp: u.xp,
+      alive: u.alive, acted: u.acted,
+    };
+  }
+
+  // ----- Movement / Combat -----------------------------------
+  function legalMoveCells(state, unit) {
+    return reachable(state, unit.x, unit.y, moveBudget(unit));
+  }
+  function moveUnit(unit, x, y) {
+    unit.x = x; unit.y = y;
+  }
+  function fireBall(state, shooter, targetX, targetY) {
+    const v = dirTo(shooter.x, shooter.y, targetX, targetY);
+    if (!v) return null;
+    const ball = {
+      id: nextId('B'),
+      ownerId: shooter.id,
+      side: shooter.side,
+      // 球は射手のいるマスから開始 (全ユニット行動後に1マス前進)
+      x: shooter.x, y: shooter.y,
+      vx: v.vx, vy: v.vy,
+      atk: shooter.ballAtk,
+    };
+    state.balls.push(ball);
+    return ball;
+  }
+  // 球を全部 1 マス前進、衝突判定
+  function advanceBalls(state) {
+    const survived = [];
+    for (const b of state.balls) {
+      const nx = b.x + b.vx, ny = b.y + b.vy;
+      if (nx < 0 || nx >= state.boardW || ny < 0 || ny >= state.boardH) {
+        log(state, `⊘ 球が盤外へ消えた`);
+        continue;
+      }
+      b.x = nx; b.y = ny;
+      // 障害物との衝突 (壊れない / 壊せる) を先に判定
+      const obs = obstacleAt(state, nx, ny);
+      if (obs) {
+        if (obs.kind === 'wall') {
+          log(state, `球が壁に弾かれた`);
+          flashHit(nx, ny);
+          continue; // 球は消滅
+        }
+        // breakable: ダメージを与えて球は消滅 (穴があけば次以降の球が通る)
+        obs.hp = Math.max(0, obs.hp - b.atk);
+        flashHit(nx, ny);
+        if (obs.hp === 0) {
+          log(state, `${obs.glyph || '障害物'} を破壊した!`);
+          // XP も少し進呈 (撃った側がプレイヤーなら)
+          const shooter = state.units.find(u => u.id === b.ownerId);
+          if (shooter && shooter.side === 'player') awardXP(state, shooter, 2);
+        } else {
+          log(state, `${obs.glyph || '障害物'} に命中 (残 HP ${obs.hp})`);
+        }
+        continue;
+      }
+      const target = unitAt(state, nx, ny);
+      if (target && target.id !== b.ownerId) {
+        const dmg = Math.max(1, b.atk - target.def);
+        target.hp = Math.max(0, target.hp - dmg);
+        log(state, `${target.name} に球が命中! −${dmg}`);
+        flashHit(nx, ny);
+        // 撃った側がプレイヤーならXP
+        const shooter = state.units.find(u => u.id === b.ownerId);
+        if (shooter && shooter.side === 'player' && target.side === 'enemy') {
+          awardXP(state, shooter, dmg);
+        }
+        if (target.hp === 0) {
+          target.alive = false;
+          log(state, `💥 ${target.name} 撃破!`);
+          if (shooter && shooter.side === 'player' && target.side === 'enemy') {
+            // 撃破ボーナス
+            awardXP(state, shooter, Math.ceil(target.maxHp / 2));
+            // リクルート抽選
+            tryRecruit(state, target, 'ball');
+          }
+        }
+        // 球は消費
+        continue;
+      }
+      survived.push(b);
+    }
+    state.balls = survived;
+  }
+  // 隣接 (4 近傍) の敵対ペアに同時ダメージ
+  function resolveMelee(state) {
+    const seen = new Set();
+    const dirs4 = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
+    const events = [];
+    for (const u of state.units) {
+      if (!u.alive) continue;
+      for (const d of dirs4) {
+        const nx = u.x + d.x, ny = u.y + d.y;
+        const v = unitAt(state, nx, ny);
+        if (!v) continue;
+        if (v.side === u.side) continue;
+        const key = [u.id, v.id].sort().join('|');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        events.push([u, v]);
+      }
+    }
+    for (const [a, b] of events) {
+      const dmgA = Math.max(1, a.atk - b.def);
+      const dmgB = Math.max(1, b.atk - a.def);
+      b.hp = Math.max(0, b.hp - dmgA);
+      a.hp = Math.max(0, a.hp - dmgB);
+      log(state, `⚔ ${a.name} ↔ ${b.name} (${a.name}→${dmgA} / ${b.name}→${dmgB})`);
+      flashHit(a.x, a.y);
+      flashHit(b.x, b.y);
+      // XP
+      if (a.side === 'player') awardXP(state, a, dmgA);
+      if (b.side === 'player') awardXP(state, b, dmgB);
+      const aDead = a.hp === 0, bDead = b.hp === 0;
+      if (aDead) { a.alive = false; log(state, `💥 ${a.name} 撃破!`); }
+      if (bDead) { b.alive = false; log(state, `💥 ${b.name} 撃破!`); }
+      // KO ボーナス + リクルート
+      if (bDead && a.side === 'player') {
+        awardXP(state, a, Math.ceil(b.maxHp / 2));
+        tryRecruit(state, b, 'melee');
+      }
+      if (aDead && b.side === 'player') {
+        awardXP(state, b, Math.ceil(a.maxHp / 2));
+        tryRecruit(state, a, 'melee');
+      }
+    }
+  }
+
+  // ----- Recruit ---------------------------------------------
+  // 倒した敵をプレイヤー側として未来のステージに加える
+  // (state には積まず、グローバル recruitedQueue に積んで次ステージ開始時に投入)
+  const recruitedQueue = [];
+  function tryRecruit(state, deadEnemy, killCause) {
+    const p = RECRUIT_PROB[killCause] ?? 0;
+    if (Math.random() >= p) return;
+    // ベースステ (敵のスペック) を Lv.1 として再生成
+    const baseSpec = STAGES[state.stageIdx].enemies.find(e => e.name === deadEnemy.name) || {
+      name: deadEnemy.name, glyph: deadEnemy.glyph,
+      hp: deadEnemy.maxHp, atk: deadEnemy.atk, def: deadEnemy.def,
+      spd: deadEnemy.spd, ballAtk: deadEnemy.ballAtk,
+      archetype: deadEnemy.archetype,
+    };
+    const recruit = {
+      id: nextId('R'),
+      name: baseSpec.name, glyph: baseSpec.glyph,
+      maxHp: baseSpec.hp, atk: baseSpec.atk, def: baseSpec.def,
+      spd: baseSpec.spd, ballAtk: baseSpec.ballAtk,
+      archetype: baseSpec.archetype || 'balanced',
+      lv: 1, xp: 0,
+      side: 'player',
+    };
+    recruitedQueue.push(recruit);
+    toast(`♻ ${recruit.name} が仲間になった!`, 'success');
+    log(state, `♻ ${recruit.name} が仲間に加わった (次のステージから)`);
+  }
+
+  // ----- XP / Level -----------------------------------------
+  function awardXP(state, unit, amount) {
+    if (unit.side !== 'player' || !unit.alive) return;
+    if (unit.lv >= LV_CAP) return;
+    unit.xp += amount;
+    while (unit.lv < LV_CAP && unit.xp >= xpToNext(unit.lv)) {
+      unit.xp -= xpToNext(unit.lv);
+      levelUp(state, unit);
+    }
+  }
+  function levelUp(state, unit) {
+    unit.lv += 1;
+    const weights = ARCH_WEIGHTS[unit.archetype] || ARCH_WEIGHTS.balanced;
+    // +3 ポイントを重み付きランダム分配
+    const gains = { hp: 0, atk: 0, def: 0, spd: 0 };
+    for (let i = 0; i < 3; i++) {
+      const k = weightedPick(weights);
+      gains[k] += 1;
+    }
+    // HP は実数で +2 / pt (体感値)
+    const hpInc = gains.hp * 2;
+    unit.maxHp += hpInc;
+    unit.hp = Math.min(unit.maxHp, unit.hp + hpInc);
+    unit.atk += gains.atk;
+    unit.def += gains.def;
+    unit.spd += gains.spd;
+    const parts = [];
+    if (gains.hp)  parts.push(`HP+${hpInc}`);
+    if (gains.atk) parts.push(`攻+${gains.atk}`);
+    if (gains.def) parts.push(`守+${gains.def}`);
+    if (gains.spd) parts.push(`速+${gains.spd}`);
+    toast(`🆙 ${unit.name} Lv.${unit.lv}!  ${parts.join(' / ')}`, 'success');
+    log(state, `🆙 ${unit.name} Lv.${unit.lv} (${parts.join(', ')})`);
+  }
+
+  // ----- AI --------------------------------------------------
+  function aiAct(state, unit) {
+    // 1. 射撃: 全プレイヤーのうち、8-vector 上で射線 (障害無し) が通る最寄りを選ぶ
+    const players = state.units.filter(u => u.alive && u.side === 'player');
+    let target = null, bestDist = Infinity;
+    for (const p of players) {
+      const dist = Math.max(Math.abs(p.x - unit.x), Math.abs(p.y - unit.y));
+      if (dist === 0) continue;
+      // 射線判定: dirTo() の方向で 1 マスずつ進めて、間にユニットが居なければ通る
+      const v = dirTo(unit.x, unit.y, p.x, p.y);
+      if (!v) continue;
+      let cx = unit.x + v.vx, cy = unit.y + v.vy;
+      let blocked = false;
+      while (cx !== p.x || cy !== p.y) {
+        if (cx < 0 || cx >= state.boardW || cy < 0 || cy >= state.boardH) { blocked = true; break; }
+        if (unitAt(state, cx, cy)) { blocked = true; break; }
+        if (obstacleAt(state, cx, cy)) { blocked = true; break; }
+        cx += v.vx; cy += v.vy;
+      }
+      if (blocked) continue;
+      if (dist < bestDist) { bestDist = dist; target = p; }
+    }
+    if (target) {
+      fireBall(state, unit, target.x, target.y);
+      log(state, `${unit.name} が ${target.name} に向けて発射`);
+    }
+    // 2. 移動: 1 マス、最寄りプレイヤー (target が居れば優先) に近づく
+    const goal = target || players.reduce((a, b) =>
+      !a ? b : (Math.hypot(b.x - unit.x, b.y - unit.y) < Math.hypot(a.x - unit.x, a.y - unit.y) ? b : a), null);
+    if (goal) {
+      // 1 マス分の移動候補から、goal に最も近づくマスへ
+      const cells = reachable(state, unit.x, unit.y, 1);
+      let best = null, bestD = Math.hypot(goal.x - unit.x, goal.y - unit.y);
+      for (const c of cells) {
+        const d = Math.hypot(goal.x - c.x, goal.y - c.y);
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      if (best) moveUnit(unit, best.x, best.y);
+    }
+  }
+
+  // ----- Turn machine ----------------------------------------
+  function startTurn(state) {
+    for (const u of state.units) u.acted = false;
+    state.order = buildOrder(state);
+    state.orderIdx = 0;
+    state.sel = null;
+    state.moved = false;
+    advanceToNext(state);
+  }
+  function advanceToNext(state) {
+    state.sel = null;
+    state.moved = false;
+    while (state.orderIdx < state.order.length) {
+      const u = activeUnit(state);
+      if (!u) { state.orderIdx++; continue; }
+      if (u.side === 'player') {
+        state.phase = 'select';
+        render();
+        return;
+      }
+      // 敵 AI
+      state.phase = 'enemy-act';
+      render();
+      setTimeout(() => {
+        aiAct(state, u);
+        u.acted = true;
+        state.orderIdx++;
+        saveAll();
+        advanceToNext(state);
+      }, 320);
+      return;
+    }
+    // 全員行動完了 → 球 & 接近戦
+    state.phase = 'resolve';
+    render();
+    setTimeout(() => {
+      advanceBalls(state);
+      resolveMelee(state);
+      saveAll();
+      const enemyAlive = state.units.some(u => u.alive && u.side === 'enemy');
+      const playerAlive = state.units.some(u => u.alive && u.side === 'player');
+      if (!enemyAlive) return clearStage();
+      if (!playerAlive) return gameOver();
+      state.turn += 1;
+      startTurn(state);
+    }, 380);
+  }
+  function endActiveUnit() {
+    const u = activeUnit(state);
+    if (u) u.acted = true;
+    state.orderIdx++;
+    saveAll();
+    advanceToNext(state);
+  }
+
+  // ----- Stage transitions -----------------------------------
+  function clearStage() {
+    cleared = Math.max(cleared, state.stageIdx + 1);
+    saveAll();
+    const next = state.stageIdx + 1;
+    const card = document.getElementById('overlay-card');
+    if (next < STAGES.length) {
+      card.innerHTML = `
+        <h2>🏆 ${state.stageName} クリア!</h2>
+        <p>仲間: ${recruitedQueue.length}人 加入待ち</p>
+        <p>次のステージ: ${STAGES[next].name} (${STAGES[next].w}×${STAGES[next].h})</p>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="next-stage">次のステージへ</button>
+          <button class="btn btn-secondary" id="back-title">タイトルへ</button>
+        </div>`;
+      document.getElementById('overlay').classList.add('show');
+      document.getElementById('next-stage').onclick = () => {
+        document.getElementById('overlay').classList.remove('show');
+        loadStage(next);
+      };
+      document.getElementById('back-title').onclick = () => {
+        document.getElementById('overlay').classList.remove('show');
+        showTitle();
+      };
+    } else {
+      const survivors = state.units.filter(u => u.side === 'player' && u.alive);
+      const survivorRows = survivors.map(u =>
+        `<div class="ending-row"><span class="glyph">${u.glyph}</span> ${u.name} <span class="lv">Lv.${u.lv}</span> <span class="stats">攻${u.atk}/守${u.def}/速${u.spd}</span></div>`
+      ).join('');
+      const totalLv = survivors.reduce((s, u) => s + u.lv, 0);
+      card.innerHTML = `
+        <h2>🎊 全10ステージ制覇!</h2>
+        <p style="margin:0.4rem 0;">大魔王を倒し、世界に平和が戻った。</p>
+        <p style="font-size:0.82rem; color:#475569; margin:0.2rem 0 0.6rem;">
+          生還者 ${survivors.length}人 ・ 合計レベル ${totalLv}
+        </p>
+        <div class="ending-roster">${survivorRows}</div>
+        <p style="font-size:0.78rem; color:#64748b; margin:0.6rem 0 0.2rem;">
+          〜 おわり 〜
+        </p>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="ending-restart">最初からもう一度</button>
+          <button class="btn btn-secondary" id="back-title">タイトルへ</button>
+        </div>`;
+      document.getElementById('overlay').classList.add('show');
+      document.getElementById('ending-restart').onclick = () => {
+        if (!confirm('セーブを消して最初からやり直しますか?')) return;
+        try { localStorage.removeItem(SAVE_KEY); } catch (_) {}
+        cleared = 0;
+        recruitedQueue.length = 0;
+        const roster = initialRoster();
+        stageEntryRoster = JSON.parse(JSON.stringify(roster));
+        state = buildStageState(0, roster);
+        state.order = buildOrder(state);
+        state.orderIdx = 0;
+        saveAll();
+        document.getElementById('overlay').classList.remove('show');
+        advanceToNext(state);
+      };
+      document.getElementById('back-title').onclick = () => {
+        document.getElementById('overlay').classList.remove('show');
+        showTitle();
+      };
+    }
+  }
+  function gameOver() {
+    const card = document.getElementById('overlay-card');
+    card.innerHTML = `
+      <h2>💀 全滅...</h2>
+      <p>${state.stageName} 失敗</p>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="retry">リトライ</button>
+        <button class="btn btn-secondary" id="back-title">タイトルへ</button>
+      </div>`;
+    document.getElementById('overlay').classList.add('show');
+    document.getElementById('retry').onclick = () => {
+      document.getElementById('overlay').classList.remove('show');
+      // ステージ進入時のロスターから再開 (このステージの開始時 snapshot)
+      loadStage(state.stageIdx, /*useStash*/ true);
+    };
+    document.getElementById('back-title').onclick = () => {
+      document.getElementById('overlay').classList.remove('show');
+      showTitle();
+    };
+  }
+
+  function loadStage(idx, useStash = false) {
+    const baseRoster = useStash ? stageEntryRoster : currentRoster();
+    // recruitedQueue を消化して baseRoster に合流
+    const newAllies = recruitedQueue.splice(0);
+    const roster = baseRoster.concat(newAllies.map(r => ({ ...r })));
+    state = buildStageState(idx, roster);
+    state.order = buildOrder(state);
+    state.orderIdx = 0;
+    stageEntryRoster = JSON.parse(JSON.stringify(roster)); // ステージ開始時のロスター snapshot (リトライ用)
+    saveAll();
+    advanceToNext(state);
+  }
+  function currentRoster() {
+    if (!state) return [];
+    return state.units
+      .filter(u => u.side === 'player' && u.alive)
+      .map(u => ({
+        id: u.id, name: u.name, glyph: u.glyph,
+        maxHp: u.maxHp, atk: u.atk, def: u.def, spd: u.spd, ballAtk: u.ballAtk,
+        archetype: u.archetype, lv: u.lv, xp: u.xp,
+      }));
+  }
+  function showTitle() {
+    const card = document.getElementById('overlay-card');
+    const stagesDone = cleared;
+    card.innerHTML = `
+      <h2>⚔️ 戦術バトル</h2>
+      <p>クリア: ${stagesDone} / ${STAGES.length}</p>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="ttl-continue">${stagesDone > 0 ? '続きから' : 'ステージ1から'}</button>
+        <button class="btn btn-secondary" id="ttl-restart">最初からやり直す</button>
+      </div>`;
+    document.getElementById('overlay').classList.add('show');
+    document.getElementById('ttl-continue').onclick = () => {
+      document.getElementById('overlay').classList.remove('show');
+      const idx = Math.min(stagesDone, STAGES.length - 1);
+      // 続きから = 既存 roster を維持してそのステージへ
+      const roster = (loadSave() && loadSave().roster) || initialRoster();
+      stageEntryRoster = JSON.parse(JSON.stringify(roster));
+      state = buildStageState(idx, roster);
+      state.order = buildOrder(state);
+      state.orderIdx = 0;
+      advanceToNext(state);
+    };
+    document.getElementById('ttl-restart').onclick = () => {
+      if (!confirm('セーブを消して最初からやり直しますか?')) return;
+      try { localStorage.removeItem(SAVE_KEY); } catch (_) {}
+      cleared = 0;
+      recruitedQueue.length = 0;
+      const roster = initialRoster();
+      stageEntryRoster = JSON.parse(JSON.stringify(roster));
+      state = buildStageState(0, roster);
+      state.order = buildOrder(state);
+      state.orderIdx = 0;
+      saveAll();
+      document.getElementById('overlay').classList.remove('show');
+      advanceToNext(state);
+    };
+  }
+  function initialRoster() {
+    return [{
+      id: 'P-hero', name: '勇者', glyph: '🛡️',
+      maxHp: 22, atk: 6, def: 2, spd: 5, ballAtk: 4,
+      archetype: 'balanced', lv: 1, xp: 0,
+    }];
+  }
+
+  // ----- Render ----------------------------------------------
+  let state = null;
+  let stageEntryRoster = null;        // 現ステージ突入時のロスター (リトライ用)
+  let cleared = 0;                    // クリア済ステージ数
+  const boardEl = document.getElementById('board');
+  const statusEl = document.getElementById('status');
+  const activeEl = document.getElementById('panel-active');
+  const unitsEl = document.getElementById('panel-units');
+  const actionsEl = document.getElementById('actions');
+  const logEl = document.getElementById('log');
+  const toastHost = document.getElementById('toast-host');
+
+  function render() {
+    if (!state) return;
+    boardEl.style.setProperty('--board-w', state.boardW);
+    boardEl.style.setProperty('--board-h', state.boardH);
+    // status
+    const u = activeUnit(state);
+    let phaseLabel = '...';
+    if (state.phase === 'select') phaseLabel = `${u ? u.name : ''} の手番 — 移動するマスをタップ`;
+    else if (state.phase === 'aim') phaseLabel = `${u ? u.name : ''} の手番 — 射撃先のマスをタップ (or 射撃キャンセル)`;
+    else if (state.phase === 'enemy-act') phaseLabel = `${u ? u.name : ''} (敵) 行動中…`;
+    else if (state.phase === 'resolve') phaseLabel = `球と接近戦の解決中…`;
+    else if (state.phase === 'turn-start') phaseLabel = `次のターン開始`;
+    statusEl.innerHTML = `
+      <span class="turn">ステージ ${state.stageIdx + 1} / 「${state.stageName}」</span>
+      <span>T${state.turn}</span>
+      <span class="phase ${u && u.side === 'enemy' ? 'enemy' : ''}">${phaseLabel}</span>`;
+    // board
+    boardEl.innerHTML = '';
+    const moveSet = new Set();
+    const aimSet = new Set();
+    if (state.phase === 'select' && u && u.side === 'player' && !state.moved) {
+      // 自分のセル + 移動可能セル
+      moveSet.add(u.x + ',' + u.y);
+      for (const c of legalMoveCells(state, u)) moveSet.add(c.x + ',' + c.y);
+    }
+    if (state.phase === 'aim' && u && u.side === 'player') {
+      // 射撃可能 = 全マス (盤外を除く)
+      for (let y = 0; y < state.boardH; y++) {
+        for (let x = 0; x < state.boardW; x++) {
+          if (!(x === u.x && y === u.y)) aimSet.add(x + ',' + y);
+        }
+      }
+    }
+    for (let y = 0; y < state.boardH; y++) {
+      for (let x = 0; x < state.boardW; x++) {
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        cell.dataset.x = x; cell.dataset.y = y;
+        const k = x + ',' + y;
+        if (moveSet.has(k)) cell.classList.add('move-target');
+        if (aimSet.has(k)) cell.classList.add('aim-target');
+        if (u && u.side === 'player' && state.sel === u.id && u.x === x && u.y === y) cell.classList.add('selected');
+        const obsHere = obstacleAt(state, x, y);
+        if (obsHere) {
+          if (obsHere.kind === 'wall') cell.classList.add('has-wall');
+          const od = document.createElement('div');
+          od.className = 'obstacle ' + obsHere.kind;
+          const hpBar = obsHere.kind === 'breakable' && obsHere.maxHp !== Infinity
+            ? `<span class="hpbar"><i style="width:${Math.max(0, (obsHere.hp / obsHere.maxHp) * 100)}%"></i></span>`
+            : '';
+          od.innerHTML = `<span class="glyph">${obsHere.glyph}</span>${hpBar}`;
+          cell.appendChild(od);
+        }
+        const onCell = unitAt(state, x, y);
+        if (onCell) {
+          const div = document.createElement('div');
+          div.className = 'unit ' + onCell.side;
+          const lvTag = onCell.side === 'player' ? `<span class="lvl">L${onCell.lv}</span>` : '';
+          div.innerHTML = `
+            <span class="glyph">${onCell.glyph}</span>
+            ${lvTag}
+            <span class="hpbar"><i style="width:${(onCell.hp / onCell.maxHp) * 100}%"></i></span>`;
+          cell.appendChild(div);
+        }
+        // ball overlay
+        const ballHere = state.balls.find(b => b.x === x && b.y === y);
+        if (ballHere) {
+          const b = document.createElement('div');
+          b.className = 'ball';
+          b.innerHTML = `<span class="dot">${ballHere.side === 'player' ? '🔵' : '🔴'}</span>`;
+          cell.appendChild(b);
+        }
+        boardEl.appendChild(cell);
+      }
+    }
+    // active panel
+    if (u) {
+      activeEl.innerHTML = `
+        <h2>${u.side === 'player' ? '🟦 あなた' : '🟥 敵'}: ${u.name}</h2>
+        <div style="font-size:0.78rem; color:#475569;">
+          HP ${u.hp}/${u.maxHp} ・ 攻 ${u.atk} ・ 守 ${u.def} ・ 速 ${u.spd} ・ 球攻 ${u.ballAtk}
+          ${u.lv ? ` ・ Lv.${u.lv}` : ''}
+        </div>`;
+    } else {
+      activeEl.innerHTML = '';
+    }
+    // roster
+    unitsEl.innerHTML = '<h2>ユニット一覧</h2>' +
+      state.units.map(uu => {
+        const cls = ['roster-row'];
+        if (!uu.alive) cls.push('dead');
+        if (uu.side === 'enemy') cls.push('enemy');
+        const hpFrac = (uu.hp / uu.maxHp) * 100;
+        const lvBar = uu.side === 'player'
+          ? `<div class="lvbar"><i style="width:${(uu.xp / xpToNext(uu.lv)) * 100}%"></i></div>`
+          : '';
+        return `<div class="${cls.join(' ')}">
+          <span class="glyph">${uu.glyph}</span>
+          <div style="flex:1;">
+            <div style="display:flex; gap:0.3rem; align-items:baseline;">
+              <span class="name">${uu.name}</span>
+              <span class="stats">攻${uu.atk}/守${uu.def}/速${uu.spd}${uu.lv ? ` Lv${uu.lv}` : ''}</span>
+            </div>
+            ${lvBar}
+          </div>
+          <span class="hp">${uu.hp}/${uu.maxHp}</span>
+        </div>`;
+      }).join('');
+    // actions
+    actionsEl.innerHTML = '';
+    if (state.phase === 'aim') {
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-secondary';
+      cancel.textContent = '射撃キャンセル';
+      cancel.onclick = () => { endActiveUnit(); };
+      actionsEl.appendChild(cancel);
+    }
+    if (state.phase === 'select' && u && u.side === 'player') {
+      const skip = document.createElement('button');
+      skip.className = 'btn btn-secondary';
+      skip.textContent = '行動スキップ';
+      skip.onclick = () => { endActiveUnit(); };
+      actionsEl.appendChild(skip);
+    }
+    const titleBtn = document.createElement('button');
+    titleBtn.className = 'btn btn-danger';
+    titleBtn.textContent = 'タイトルへ';
+    titleBtn.onclick = () => showTitle();
+    actionsEl.appendChild(titleBtn);
+    // log
+    logEl.innerHTML = state.log.slice(-6).reverse()
+      .map(l => `<div class="row">${l}</div>`).join('') || '<div class="row" style="color:#94a3b8;">— 戦闘ログ —</div>';
+  }
+  function flashHit(x, y) {
+    // 次の render の直前まで CSS animation を当てる
+    const el = boardEl.querySelector(`.cell[data-x="${x}"][data-y="${y}"]`);
+    if (!el) return;
+    el.classList.add('flash-hit');
+    setTimeout(() => el && el.classList.remove('flash-hit'), 400);
+  }
+  function log(state, msg) {
+    state.log.push(msg);
+    if (state.log.length > 40) state.log.shift();
+  }
+  function toast(text, kind) {
+    const t = document.createElement('div');
+    t.className = 'toast' + (kind ? ' ' + kind : '');
+    t.textContent = text;
+    toastHost.appendChild(t);
+    setTimeout(() => { try { t.remove(); } catch (_) {} }, 3200);
+  }
+
+  // ----- Input ----------------------------------------------
+  boardEl.addEventListener('click', (ev) => {
+    const cellEl = ev.target.closest('.cell');
+    if (!cellEl) return;
+    const x = parseInt(cellEl.dataset.x, 10);
+    const y = parseInt(cellEl.dataset.y, 10);
+    const u = activeUnit(state);
+    if (!u || u.side !== 'player') return;
+    if (state.phase === 'select') {
+      // 自分自身 → 選択ハイライト維持 / 解除トグル
+      if (u.x === x && u.y === y) {
+        // 移動キャンセルして射撃へ進む
+        if (!state.moved) {
+          state.phase = 'aim';
+          render();
+        }
+        return;
+      }
+      // 移動可能セルなら移動 → aim へ
+      const cells = legalMoveCells(state, u);
+      const target = cells.find(c => c.x === x && c.y === y);
+      if (target) {
+        moveUnit(u, x, y);
+        state.moved = true;
+        state.phase = 'aim';
+        render();
+      }
+      return;
+    }
+    if (state.phase === 'aim') {
+      // 自分自身は無効 (キャンセルはボタン)
+      if (u.x === x && u.y === y) return;
+      fireBall(state, u, x, y);
+      log(state, `${u.name} → (${x},${y}) に発射`);
+      endActiveUnit();
+      return;
+    }
+  });
+
+  // ----- Boot -----------------------------------------------
+  function init() {
+    const save = loadSave();
+    if (save && save.currentStage) {
+      cleared = save.clearedStageIdx || 0;
+      // 既存の進行中ステージから復元
+      const cs = save.currentStage;
+      const reUnits = cs.units.map(u => ({ ...u }));
+      const reObstacles = (cs.obstacles || []).map(o => ({
+        ...o,
+        hp: o.hp === null ? Infinity : o.hp,
+        maxHp: o.maxHp === null ? Infinity : o.maxHp,
+      }));
+      state = {
+        stageIdx: cs.stageIdx,
+        stageName: STAGES[cs.stageIdx].name,
+        boardW: STAGES[cs.stageIdx].w, boardH: STAGES[cs.stageIdx].h,
+        units: reUnits,
+        balls: cs.balls.slice(),
+        obstacles: reObstacles,
+        turn: cs.turn,
+        order: cs.order || buildOrder({ units: reUnits }),
+        orderIdx: cs.orderIdx || 0,
+        phase: cs.phase || 'select',
+        sel: cs.sel || null,
+        moved: !!cs.moved,
+        log: cs.log || [],
+      };
+      stageEntryRoster = save.roster || rosterToSave(reUnits.filter(u => u.side === 'player'));
+      // 進行中の phase が enemy-act / resolve だと続行しないので、安全に select に戻す
+      if (state.phase === 'enemy-act' || state.phase === 'resolve' || state.phase === 'turn-start') {
+        advanceToNext(state);
+      } else {
+        render();
+      }
+    } else {
+      // 新規開始 → タイトル
+      showTitle();
+    }
+  }
+  init();
+  </script>
+</body>
+</html>
