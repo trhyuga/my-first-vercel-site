@@ -422,177 +422,201 @@
   // 全 10 ステージ。グリッドサイズ・敵タイプ・敵数を段階的に上げる。
   // 最終ステージは大魔王 + 取り巻き 5 体のクライマックス。
   const STAGES = [
+    // S1: 1 マス移動チュートリアル — 全員 spd 3。射線は通るが、距離があるので
+    // 撃ち合いだけでは消耗する。1 体に集中砲火 → 接近戦のリズムを覚える面。
     {
       name: '森のはじまり',
       w: 3, h: 8,
       enemies: [
-        { name: '盗賊', glyph: '👹', x: 1, y: 0, hp: 16, atk: 4, def: 1, spd: 4, ballAtk: 3, archetype: 'striker' },
+        { name: '盗賊', glyph: '👹', x: 0, y: 1, hp: 16, atk: 5, def: 1, spd: 3, ballAtk: 3, archetype: 'striker' },
+        { name: '弓兵', glyph: '🏹', x: 2, y: 1, hp: 12, atk: 3, def: 0, spd: 3, ballAtk: 4, archetype: 'archer' },
       ],
       playerSpawns: [{ x: 1, y: 7 }, { x: 0, y: 7 }, { x: 2, y: 7 }],
     },
+    // S2: 障害物導入 — 中央の岩で射線が遮られ、回り込まないと当てられない。
     {
       name: '岩場の門',
-      w: 4, h: 8,
+      w: 4, h: 9,
       enemies: [
-        { name: '盗賊', glyph: '👹', x: 0, y: 1, hp: 16, atk: 4, def: 1, spd: 4, ballAtk: 3, archetype: 'striker' },
-        { name: '弓兵', glyph: '🏹', x: 3, y: 1, hp: 14, atk: 3, def: 0, spd: 5, ballAtk: 4, archetype: 'archer' },
+        { name: '盗賊', glyph: '👹', x: 0, y: 1, hp: 18, atk: 6, def: 2, spd: 4, ballAtk: 4, archetype: 'striker' },
+        { name: '盗賊', glyph: '👹', x: 3, y: 1, hp: 18, atk: 6, def: 2, spd: 4, ballAtk: 4, archetype: 'striker' },
+        { name: '弓兵', glyph: '🏹', x: 1, y: 0, hp: 14, atk: 3, def: 1, spd: 5, ballAtk: 5, archetype: 'archer' },
       ],
-      playerSpawns: [{ x: 0, y: 7 }, { x: 1, y: 7 }, { x: 2, y: 7 }, { x: 3, y: 7 }],
+      obstacles: [
+        { kind: 'wall', glyph: '🪨', x: 1, y: 4 },
+        { kind: 'wall', glyph: '🪨', x: 2, y: 4 },
+      ],
+      playerSpawns: [{ x: 0, y: 8 }, { x: 1, y: 8 }, { x: 2, y: 8 }, { x: 3, y: 8 }],
     },
+    // S3: タンク登場。番兵を直接削るのは厳しいので、弓兵を先に処理。
     {
       name: '崩れた塔',
       w: 4, h: 10,
       enemies: [
-        { name: '盗賊', glyph: '👹', x: 0, y: 0, hp: 16, atk: 4, def: 1, spd: 4, ballAtk: 3, archetype: 'striker' },
-        { name: '弓兵', glyph: '🏹', x: 3, y: 0, hp: 14, atk: 3, def: 0, spd: 5, ballAtk: 4, archetype: 'archer' },
-        { name: '番兵', glyph: '🛡️', x: 1, y: 1, hp: 22, atk: 5, def: 3, spd: 2, ballAtk: 3, archetype: 'tank' },
+        { name: '盗賊', glyph: '👹', x: 0, y: 0, hp: 20, atk: 6, def: 2, spd: 4, ballAtk: 4, archetype: 'striker' },
+        { name: '弓兵', glyph: '🏹', x: 3, y: 0, hp: 16, atk: 3, def: 1, spd: 5, ballAtk: 6, archetype: 'archer' },
+        { name: '番兵', glyph: '🛡️', x: 1, y: 1, hp: 30, atk: 6, def: 4, spd: 3, ballAtk: 3, archetype: 'tank' },
+      ],
+      obstacles: [
+        { kind: 'wall', glyph: '🪨', x: 0, y: 4 },
+        { kind: 'wall', glyph: '🪨', x: 3, y: 4 },
+        { kind: 'breakable', glyph: '🌳', x: 1, y: 5, hp: 8 },
+        { kind: 'breakable', glyph: '🌳', x: 2, y: 5, hp: 8 },
       ],
       playerSpawns: [{ x: 0, y: 9 }, { x: 1, y: 9 }, { x: 2, y: 9 }, { x: 3, y: 9 }],
     },
+    // S4: 狼 (高速接近) 登場 — 接近される前に処理しないとロスター壊滅級の脅威。
     {
       name: '森の隠れ里',
       w: 5, h: 10,
       enemies: [
-        { name: '盗賊', glyph: '👹', x: 0, y: 1, hp: 18, atk: 5, def: 1, spd: 4, ballAtk: 4, archetype: 'striker' },
-        { name: '弓兵', glyph: '🏹', x: 2, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
-        { name: '狼',   glyph: '🐺', x: 4, y: 1, hp: 16, atk: 5, def: 1, spd: 7, ballAtk: 2, archetype: 'rogue' },
+        { name: '盗賊', glyph: '👹', x: 0, y: 1, hp: 22, atk: 7, def: 2, spd: 4, ballAtk: 4, archetype: 'striker' },
+        { name: '弓兵', glyph: '🏹', x: 4, y: 0, hp: 16, atk: 3, def: 1, spd: 5, ballAtk: 6, archetype: 'archer' },
+        { name: '弓兵', glyph: '🏹', x: 0, y: 0, hp: 16, atk: 3, def: 1, spd: 5, ballAtk: 6, archetype: 'archer' },
+        { name: '狼',   glyph: '🐺', x: 2, y: 1, hp: 18, atk: 7, def: 1, spd: 8, ballAtk: 2, archetype: 'rogue' },
       ],
-      // 木 (壊せる) で射線を分断
       obstacles: [
-        { kind: 'breakable', glyph: '🌳', x: 1, y: 4, hp: 8 },
-        { kind: 'breakable', glyph: '🌳', x: 3, y: 5, hp: 8 },
-        { kind: 'breakable', glyph: '🌳', x: 2, y: 6, hp: 8 },
+        { kind: 'wall', glyph: '🪨', x: 1, y: 4 },
+        { kind: 'wall', glyph: '🪨', x: 3, y: 4 },
+        { kind: 'breakable', glyph: '🌳', x: 2, y: 5, hp: 8 },
       ],
       playerSpawns: [{ x: 0, y: 9 }, { x: 1, y: 9 }, { x: 2, y: 9 }, { x: 3, y: 9 }, { x: 4, y: 9 }],
     },
+    // S5: 番兵中央 + 弓兵の十字火力 + 狼 2 — 障害物の裏を活用する必要あり。
     {
       name: '古の遺跡',
-      w: 5, h: 10,
+      w: 5, h: 11,
       enemies: [
-        { name: '番兵', glyph: '🛡️', x: 2, y: 0, hp: 24, atk: 5, def: 3, spd: 2, ballAtk: 3, archetype: 'tank' },
-        { name: '弓兵', glyph: '🏹', x: 0, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
-        { name: '弓兵', glyph: '🏹', x: 4, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
-        { name: '狼',   glyph: '🐺', x: 1, y: 2, hp: 16, atk: 5, def: 1, spd: 7, ballAtk: 2, archetype: 'rogue' },
+        { name: '番兵', glyph: '🛡️', x: 2, y: 0, hp: 36, atk: 7, def: 4, spd: 3, ballAtk: 3, archetype: 'tank' },
+        { name: '弓兵', glyph: '🏹', x: 0, y: 0, hp: 18, atk: 3, def: 1, spd: 6, ballAtk: 7, archetype: 'archer' },
+        { name: '弓兵', glyph: '🏹', x: 4, y: 0, hp: 18, atk: 3, def: 1, spd: 6, ballAtk: 7, archetype: 'archer' },
+        { name: '狼',   glyph: '🐺', x: 1, y: 2, hp: 20, atk: 8, def: 1, spd: 8, ballAtk: 2, archetype: 'rogue' },
+        { name: '狼',   glyph: '🐺', x: 3, y: 2, hp: 20, atk: 8, def: 1, spd: 8, ballAtk: 2, archetype: 'rogue' },
       ],
-      // 石柱 (壊れない) + 崩れた壁 (壊せる)
       obstacles: [
-        { kind: 'wall',      glyph: '🗿', x: 0, y: 4 },
-        { kind: 'wall',      glyph: '🗿', x: 4, y: 4 },
-        { kind: 'breakable', glyph: '🪨', x: 2, y: 5, hp: 12 },
-        { kind: 'breakable', glyph: '🪨', x: 1, y: 6, hp: 12 },
-        { kind: 'breakable', glyph: '🪨', x: 3, y: 6, hp: 12 },
+        { kind: 'wall',      glyph: '🗿', x: 0, y: 5 },
+        { kind: 'wall',      glyph: '🗿', x: 4, y: 5 },
+        { kind: 'breakable', glyph: '🪨', x: 2, y: 6, hp: 12 },
+        { kind: 'breakable', glyph: '🪨', x: 1, y: 7, hp: 12 },
+        { kind: 'breakable', glyph: '🪨', x: 3, y: 7, hp: 12 },
       ],
-      playerSpawns: [{ x: 0, y: 9 }, { x: 1, y: 9 }, { x: 2, y: 9 }, { x: 3, y: 9 }, { x: 4, y: 9 }],
+      playerSpawns: [{ x: 0, y: 10 }, { x: 1, y: 10 }, { x: 2, y: 10 }, { x: 3, y: 10 }, { x: 4, y: 10 }],
     },
+    // S6: 騎士 (高 atk + 中 def) 2 + 番兵で前衛を抜くのが大変。氷塊で射線封鎖。
     {
       name: '雪の峠',
-      w: 6, h: 10,
+      w: 6, h: 11,
       enemies: [
-        { name: '騎士',   glyph: '⚔️', x: 2, y: 0, hp: 26, atk: 6, def: 3, spd: 4, ballAtk: 4, archetype: 'balanced' },
-        { name: '番兵',   glyph: '🛡️', x: 3, y: 0, hp: 24, atk: 5, def: 3, spd: 2, ballAtk: 3, archetype: 'tank' },
-        { name: '弓兵',   glyph: '🏹', x: 5, y: 1, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
-        { name: '狼',     glyph: '🐺', x: 0, y: 1, hp: 16, atk: 5, def: 1, spd: 7, ballAtk: 2, archetype: 'rogue' },
+        { name: '騎士', glyph: '⚔️', x: 2, y: 0, hp: 36, atk: 8, def: 3, spd: 5, ballAtk: 5, archetype: 'balanced' },
+        { name: '騎士', glyph: '⚔️', x: 3, y: 0, hp: 36, atk: 8, def: 3, spd: 5, ballAtk: 5, archetype: 'balanced' },
+        { name: '番兵', glyph: '🛡️', x: 5, y: 1, hp: 36, atk: 7, def: 4, spd: 3, ballAtk: 3, archetype: 'tank' },
+        { name: '弓兵', glyph: '🏹', x: 0, y: 0, hp: 20, atk: 4, def: 1, spd: 6, ballAtk: 7, archetype: 'archer' },
+        { name: '狼',   glyph: '🐺', x: 0, y: 2, hp: 22, atk: 8, def: 1, spd: 8, ballAtk: 2, archetype: 'rogue' },
       ],
-      // 氷塊 (壊せる) で峠の中央を分断
       obstacles: [
-        { kind: 'breakable', glyph: '🧊', x: 1, y: 4, hp: 10 },
-        { kind: 'breakable', glyph: '🧊', x: 2, y: 4, hp: 10 },
-        { kind: 'breakable', glyph: '🧊', x: 3, y: 4, hp: 10 },
-        { kind: 'breakable', glyph: '🧊', x: 4, y: 4, hp: 10 },
-        { kind: 'wall',      glyph: '⛰️', x: 0, y: 5 },
-        { kind: 'wall',      glyph: '⛰️', x: 5, y: 5 },
+        { kind: 'breakable', glyph: '🧊', x: 1, y: 5, hp: 12 },
+        { kind: 'breakable', glyph: '🧊', x: 2, y: 5, hp: 12 },
+        { kind: 'breakable', glyph: '🧊', x: 3, y: 5, hp: 12 },
+        { kind: 'breakable', glyph: '🧊', x: 4, y: 5, hp: 12 },
+        { kind: 'wall',      glyph: '⛰️', x: 0, y: 6 },
+        { kind: 'wall',      glyph: '⛰️', x: 5, y: 6 },
       ],
-      playerSpawns: [{ x: 0, y: 9 }, { x: 1, y: 9 }, { x: 2, y: 9 }, { x: 3, y: 9 }, { x: 4, y: 9 }, { x: 5, y: 9 }],
+      playerSpawns: [{ x: 0, y: 10 }, { x: 1, y: 10 }, { x: 2, y: 10 }, { x: 3, y: 10 }, { x: 4, y: 10 }, { x: 5, y: 10 }],
     },
+    // S7: 魔導士 (低 HP / 高 ballAtk) 登場。優先撃破必須。狭い射線で迂回戦。
     {
       name: '影の城門',
       w: 6, h: 12,
       enemies: [
-        { name: '騎士',   glyph: '⚔️', x: 2, y: 0, hp: 28, atk: 6, def: 3, spd: 4, ballAtk: 4, archetype: 'balanced' },
-        { name: '魔導士', glyph: '🧙', x: 3, y: 1, hp: 18, atk: 3, def: 1, spd: 5, ballAtk: 7, archetype: 'archer' },
-        { name: '弓兵',   glyph: '🏹', x: 0, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
-        { name: '弓兵',   glyph: '🏹', x: 5, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
-        { name: '狼',     glyph: '🐺', x: 1, y: 2, hp: 16, atk: 5, def: 1, spd: 7, ballAtk: 2, archetype: 'rogue' },
+        { name: '騎士',   glyph: '⚔️', x: 2, y: 0, hp: 38, atk: 8, def: 3, spd: 5, ballAtk: 5, archetype: 'balanced' },
+        { name: '魔導士', glyph: '🧙', x: 3, y: 1, hp: 22, atk: 4, def: 1, spd: 5, ballAtk: 9, archetype: 'archer' },
+        { name: '弓兵',   glyph: '🏹', x: 0, y: 0, hp: 20, atk: 4, def: 1, spd: 6, ballAtk: 7, archetype: 'archer' },
+        { name: '弓兵',   glyph: '🏹', x: 5, y: 0, hp: 20, atk: 4, def: 1, spd: 6, ballAtk: 7, archetype: 'archer' },
+        { name: '狼',     glyph: '🐺', x: 1, y: 2, hp: 22, atk: 8, def: 1, spd: 8, ballAtk: 2, archetype: 'rogue' },
+        { name: '狼',     glyph: '🐺', x: 4, y: 2, hp: 22, atk: 8, def: 1, spd: 8, ballAtk: 2, archetype: 'rogue' },
       ],
-      // 城壁 (壊れない) + 木箱 (壊せる)
       obstacles: [
         { kind: 'wall',      glyph: '🟫', x: 0, y: 6 },
         { kind: 'wall',      glyph: '🟫', x: 1, y: 6 },
         { kind: 'wall',      glyph: '🟫', x: 4, y: 6 },
         { kind: 'wall',      glyph: '🟫', x: 5, y: 6 },
-        { kind: 'breakable', glyph: '📦', x: 2, y: 7, hp: 8 },
-        { kind: 'breakable', glyph: '📦', x: 3, y: 7, hp: 8 },
+        { kind: 'breakable', glyph: '📦', x: 2, y: 7, hp: 12 },
+        { kind: 'breakable', glyph: '📦', x: 3, y: 7, hp: 12 },
       ],
       playerSpawns: [{ x: 0, y: 11 }, { x: 1, y: 11 }, { x: 2, y: 11 }, { x: 3, y: 11 }, { x: 4, y: 11 }, { x: 5, y: 11 }],
     },
+    // S8: 騎士 2 + 魔導士 + 弓兵 + 番兵 — 中央突破は不可能、複数ルートが必須。
     {
       name: '闇の塔',
       w: 7, h: 12,
       enemies: [
-        { name: '騎士',   glyph: '⚔️', x: 2, y: 0, hp: 28, atk: 6, def: 3, spd: 4, ballAtk: 4, archetype: 'balanced' },
-        { name: '騎士',   glyph: '⚔️', x: 4, y: 0, hp: 28, atk: 6, def: 3, spd: 4, ballAtk: 4, archetype: 'balanced' },
-        { name: '魔導士', glyph: '🧙', x: 3, y: 1, hp: 18, atk: 3, def: 1, spd: 5, ballAtk: 8, archetype: 'archer' },
-        { name: '弓兵',   glyph: '🏹', x: 0, y: 0, hp: 16, atk: 3, def: 0, spd: 6, ballAtk: 5, archetype: 'archer' },
-        { name: '番兵',   glyph: '🛡️', x: 6, y: 0, hp: 28, atk: 6, def: 4, spd: 2, ballAtk: 3, archetype: 'tank' },
+        { name: '騎士',   glyph: '⚔️', x: 2, y: 0, hp: 40, atk: 9, def: 4, spd: 5, ballAtk: 6, archetype: 'balanced' },
+        { name: '騎士',   glyph: '⚔️', x: 4, y: 0, hp: 40, atk: 9, def: 4, spd: 5, ballAtk: 6, archetype: 'balanced' },
+        { name: '魔導士', glyph: '🧙', x: 3, y: 1, hp: 24, atk: 4, def: 1, spd: 5, ballAtk: 10, archetype: 'archer' },
+        { name: '弓兵',   glyph: '🏹', x: 0, y: 0, hp: 22, atk: 4, def: 1, spd: 7, ballAtk: 8, archetype: 'archer' },
+        { name: '弓兵',   glyph: '🏹', x: 6, y: 0, hp: 22, atk: 4, def: 1, spd: 7, ballAtk: 8, archetype: 'archer' },
+        { name: '番兵',   glyph: '🛡️', x: 1, y: 1, hp: 40, atk: 7, def: 5, spd: 3, ballAtk: 3, archetype: 'tank' },
       ],
-      // 塔の柱 (壊れない) + 木箱
       obstacles: [
-        { kind: 'wall',      glyph: '🟫', x: 1, y: 5 },
-        { kind: 'wall',      glyph: '🟫', x: 5, y: 5 },
-        { kind: 'wall',      glyph: '🟫', x: 3, y: 6 },
-        { kind: 'breakable', glyph: '📦', x: 0, y: 7, hp: 10 },
-        { kind: 'breakable', glyph: '📦', x: 6, y: 7, hp: 10 },
-        { kind: 'breakable', glyph: '🪵', x: 2, y: 8, hp: 10 },
-        { kind: 'breakable', glyph: '🪵', x: 4, y: 8, hp: 10 },
+        { kind: 'wall',      glyph: '🟪', x: 1, y: 5 },
+        { kind: 'wall',      glyph: '🟪', x: 5, y: 5 },
+        { kind: 'wall',      glyph: '🟪', x: 3, y: 6 },
+        { kind: 'breakable', glyph: '📦', x: 0, y: 7, hp: 14 },
+        { kind: 'breakable', glyph: '📦', x: 6, y: 7, hp: 14 },
+        { kind: 'breakable', glyph: '🪵', x: 2, y: 8, hp: 14 },
+        { kind: 'breakable', glyph: '🪵', x: 4, y: 8, hp: 14 },
       ],
       playerSpawns: [{ x: 0, y: 11 }, { x: 1, y: 11 }, { x: 2, y: 11 }, { x: 3, y: 11 }, { x: 4, y: 11 }, { x: 5, y: 11 }, { x: 6, y: 11 }],
     },
+    // S9: 上位騎士 + 魔導士 2 + 弓兵 2 + 狼 — 全員射程が長く、削られない位置取りが必須。
     {
       name: '王の間前',
       w: 7, h: 12,
       enemies: [
-        { name: '上位騎士', glyph: '🤺', x: 3, y: 0, hp: 34, atk: 7, def: 4, spd: 5, ballAtk: 5, archetype: 'balanced' },
-        { name: '魔導士',   glyph: '🧙', x: 1, y: 1, hp: 20, atk: 3, def: 1, spd: 5, ballAtk: 8, archetype: 'archer' },
-        { name: '魔導士',   glyph: '🧙', x: 5, y: 1, hp: 20, atk: 3, def: 1, spd: 5, ballAtk: 8, archetype: 'archer' },
-        { name: '弓兵',     glyph: '🏹', x: 0, y: 0, hp: 18, atk: 3, def: 0, spd: 6, ballAtk: 6, archetype: 'archer' },
-        { name: '弓兵',     glyph: '🏹', x: 6, y: 0, hp: 18, atk: 3, def: 0, spd: 6, ballAtk: 6, archetype: 'archer' },
-        { name: '狼',       glyph: '🐺', x: 2, y: 2, hp: 18, atk: 5, def: 1, spd: 8, ballAtk: 2, archetype: 'rogue' },
+        { name: '上位騎士', glyph: '🤺', x: 3, y: 0, hp: 50, atk: 10, def: 5, spd: 6, ballAtk: 7, archetype: 'balanced' },
+        { name: '魔導士',   glyph: '🧙', x: 1, y: 1, hp: 26, atk: 4, def: 2, spd: 5, ballAtk: 11, archetype: 'archer' },
+        { name: '魔導士',   glyph: '🧙', x: 5, y: 1, hp: 26, atk: 4, def: 2, spd: 5, ballAtk: 11, archetype: 'archer' },
+        { name: '弓兵',     glyph: '🏹', x: 0, y: 0, hp: 24, atk: 4, def: 1, spd: 7, ballAtk: 9, archetype: 'archer' },
+        { name: '弓兵',     glyph: '🏹', x: 6, y: 0, hp: 24, atk: 4, def: 1, spd: 7, ballAtk: 9, archetype: 'archer' },
+        { name: '狼',       glyph: '🐺', x: 2, y: 2, hp: 24, atk: 9, def: 2, spd: 9, ballAtk: 2, archetype: 'rogue' },
       ],
-      // 大広間風の柱
       obstacles: [
-        { kind: 'wall', glyph: '🗿', x: 1, y: 5 },
-        { kind: 'wall', glyph: '🗿', x: 5, y: 5 },
-        { kind: 'wall', glyph: '🗿', x: 3, y: 7 },
-        { kind: 'breakable', glyph: '🪵', x: 0, y: 8, hp: 12 },
-        { kind: 'breakable', glyph: '🪵', x: 6, y: 8, hp: 12 },
-        { kind: 'breakable', glyph: '🪵', x: 2, y: 9, hp: 12 },
-        { kind: 'breakable', glyph: '🪵', x: 4, y: 9, hp: 12 },
+        { kind: 'wall',      glyph: '🗿', x: 2, y: 5 },
+        { kind: 'wall',      glyph: '🗿', x: 4, y: 5 },
+        { kind: 'wall',      glyph: '🗿', x: 1, y: 7 },
+        { kind: 'wall',      glyph: '🗿', x: 5, y: 7 },
+        { kind: 'breakable', glyph: '🪵', x: 3, y: 6, hp: 16 },
+        { kind: 'breakable', glyph: '🪵', x: 0, y: 8, hp: 14 },
+        { kind: 'breakable', glyph: '🪵', x: 6, y: 8, hp: 14 },
       ],
       playerSpawns: [{ x: 0, y: 11 }, { x: 1, y: 11 }, { x: 2, y: 11 }, { x: 3, y: 11 }, { x: 4, y: 11 }, { x: 5, y: 11 }, { x: 6, y: 11 }],
     },
+    // S10: ボス戦 — 大魔王 (ballAtk 12) を中心とした 9 体陣営。長期戦覚悟。
     {
       name: '魔王の玉座',
       w: 8, h: 12,
       enemies: [
-        { name: '大魔王',   glyph: '😈', x: 3, y: 0, hp: 70, atk: 9, def: 5, spd: 6, ballAtk: 10, archetype: 'balanced' },
-        { name: '上位騎士', glyph: '🤺', x: 1, y: 1, hp: 32, atk: 7, def: 4, spd: 5, ballAtk: 5, archetype: 'balanced' },
-        { name: '上位騎士', glyph: '🤺', x: 6, y: 1, hp: 32, atk: 7, def: 4, spd: 5, ballAtk: 5, archetype: 'balanced' },
-        { name: '魔導士',   glyph: '🧙', x: 0, y: 0, hp: 22, atk: 3, def: 1, spd: 5, ballAtk: 9, archetype: 'archer' },
-        { name: '魔導士',   glyph: '🧙', x: 7, y: 0, hp: 22, atk: 3, def: 1, spd: 5, ballAtk: 9, archetype: 'archer' },
-        { name: '番兵',     glyph: '🛡️', x: 4, y: 1, hp: 30, atk: 6, def: 4, spd: 2, ballAtk: 3, archetype: 'tank' },
+        { name: '大魔王',   glyph: '😈', x: 3, y: 0, hp: 100, atk: 12, def: 6, spd: 7, ballAtk: 13, archetype: 'balanced' },
+        { name: '上位騎士', glyph: '🤺', x: 2, y: 1, hp: 48, atk: 10, def: 5, spd: 6, ballAtk: 7, archetype: 'balanced' },
+        { name: '上位騎士', glyph: '🤺', x: 5, y: 1, hp: 48, atk: 10, def: 5, spd: 6, ballAtk: 7, archetype: 'balanced' },
+        { name: '魔導士',   glyph: '🧙', x: 0, y: 0, hp: 28, atk: 4, def: 2, spd: 5, ballAtk: 12, archetype: 'archer' },
+        { name: '魔導士',   glyph: '🧙', x: 7, y: 0, hp: 28, atk: 4, def: 2, spd: 5, ballAtk: 12, archetype: 'archer' },
+        { name: '番兵',     glyph: '🛡️', x: 4, y: 1, hp: 38, atk: 8, def: 5, spd: 3, ballAtk: 3, archetype: 'tank' },
+        { name: '弓兵',     glyph: '🏹', x: 1, y: 0, hp: 26, atk: 4, def: 1, spd: 7, ballAtk: 9, archetype: 'archer' },
+        { name: '狼',       glyph: '🐺', x: 3, y: 3, hp: 26, atk: 9, def: 2, spd: 9, ballAtk: 2, archetype: 'rogue' },
+        { name: '狼',       glyph: '🐺', x: 4, y: 3, hp: 26, atk: 9, def: 2, spd: 9, ballAtk: 2, archetype: 'rogue' },
       ],
-      // 玉座の間 — 中央に魔王の祭壇 (壊れない) + 周囲に瓦礫
       obstacles: [
-        { kind: 'wall', glyph: '🟪', x: 2, y: 4 },
-        { kind: 'wall', glyph: '🟪', x: 5, y: 4 },
-        { kind: 'wall', glyph: '🟪', x: 0, y: 5 },
-        { kind: 'wall', glyph: '🟪', x: 7, y: 5 },
-        { kind: 'wall', glyph: '🟪', x: 3, y: 6 },
-        { kind: 'wall', glyph: '🟪', x: 4, y: 6 },
-        { kind: 'breakable', glyph: '🪨', x: 1, y: 7, hp: 16 },
-        { kind: 'breakable', glyph: '🪨', x: 6, y: 7, hp: 16 },
-        { kind: 'breakable', glyph: '🪨', x: 2, y: 8, hp: 16 },
-        { kind: 'breakable', glyph: '🪨', x: 5, y: 8, hp: 16 },
+        { kind: 'wall',      glyph: '🟪', x: 2, y: 4 },
+        { kind: 'wall',      glyph: '🟪', x: 5, y: 4 },
+        { kind: 'wall',      glyph: '🟪', x: 0, y: 5 },
+        { kind: 'wall',      glyph: '🟪', x: 7, y: 5 },
+        { kind: 'wall',      glyph: '🟪', x: 3, y: 6 },
+        { kind: 'wall',      glyph: '🟪', x: 4, y: 6 },
+        { kind: 'breakable', glyph: '🪨', x: 1, y: 7, hp: 18 },
+        { kind: 'breakable', glyph: '🪨', x: 6, y: 7, hp: 18 },
+        { kind: 'breakable', glyph: '🪨', x: 2, y: 8, hp: 18 },
+        { kind: 'breakable', glyph: '🪨', x: 5, y: 8, hp: 18 },
       ],
       playerSpawns: [{ x: 0, y: 11 }, { x: 1, y: 11 }, { x: 2, y: 11 }, { x: 3, y: 11 }, { x: 4, y: 11 }, { x: 5, y: 11 }, { x: 6, y: 11 }, { x: 7, y: 11 }],
     },
@@ -781,6 +805,8 @@
     const save = {
       clearedStageIdx: cleared,
       roster: rosterToSave(state.units.filter(u => u.side === 'player')),
+      // 失敗時に「1 ステージ戻る」ためのスナップショット (このステージ進入時のロスター)
+      stageEntryRoster: stageEntryRoster ? JSON.parse(JSON.stringify(stageEntryRoster)) : null,
       currentStage: {
         stageIdx: state.stageIdx,
         units: state.units.map(serializeUnit),
@@ -1182,23 +1208,51 @@
       }
     } catch (_) {}
     const card = document.getElementById('overlay-card');
+    const isFirst = state.stageIdx === 0;
+    const backName = isFirst ? null : STAGES[state.stageIdx - 1].name;
     card.innerHTML = `
       <h2>💀 全滅...</h2>
       <p>${state.stageName} 失敗</p>
+      ${isFirst
+        ? `<p style="font-size:0.78rem;color:#475569;line-height:1.55;">このステージをやり直します。<br/>(生存していたユニットの Lv は維持)</p>`
+        : `<p style="font-size:0.78rem;color:#475569;line-height:1.55;">1 ステージ戻ります → 「<b>${backName}</b>」<br/>倒れたユニットは復活しません。生存者の Lv は維持されます。</p>`}
       <div class="btn-row">
-        <button class="btn btn-primary" id="retry">リトライ</button>
+        <button class="btn btn-primary" id="rollback">${isFirst ? 'もう一度挑む' : '1 ステージ戻る'}</button>
         <button class="btn btn-secondary" id="back-title">タイトルへ</button>
       </div>`;
     document.getElementById('overlay').classList.add('show');
-    document.getElementById('retry').onclick = () => {
+    document.getElementById('rollback').onclick = () => {
       document.getElementById('overlay').classList.remove('show');
-      // ステージ進入時のロスターから再開 (このステージの開始時 snapshot)
-      loadStage(state.stageIdx, /*useStash*/ true);
+      rollbackOneStage();
     };
     document.getElementById('back-title').onclick = () => {
       document.getElementById('overlay').classList.remove('show');
       showTitle();
     };
+  }
+
+  // 失敗ステージのロスター (stageEntryRoster) で 1 ステージ戻る。
+  // 戻り先のステージは buildStageState が HP を maxHp に戻し alive=true に
+  // するので、「失敗ステージで死んだユニットは復活する (時間が巻き戻った扱い)。
+  // ただし 失敗ステージ進入時点で既に死んでいた = それ以前のステージで永久退場
+  // していたユニット は stageEntryRoster に居ないので戻ってこない」となる。
+  function rollbackOneStage() {
+    // 失敗ステージで仲間になった敵は失う
+    recruitedQueue.length = 0;
+    if (state.stageIdx === 0) {
+      // 戻り先がない → 同ステージを stageEntryRoster からリトライ
+      loadStage(0, /*useStash*/ true);
+      return;
+    }
+    const targetIdx = state.stageIdx - 1;
+    cleared = Math.max(0, cleared - 1); // 1 ステージ進捗を失う
+    const roster = JSON.parse(JSON.stringify(stageEntryRoster || []));
+    state = buildStageState(targetIdx, roster);
+    state.order = buildOrder(state);
+    state.orderIdx = 0;
+    stageEntryRoster = JSON.parse(JSON.stringify(roster));
+    saveAll();
+    advanceToNext(state);
   }
 
   function loadStage(idx, useStash = false) {
@@ -1316,7 +1370,11 @@
       moved: !!cs.moved,
       log: cs.log || [],
     };
-    stageEntryRoster = save.roster || rosterToSave(reUnits.filter(u => u.side === 'player'));
+    // ロールバック用スナップショットは独立フィールド優先 (旧 save との後方互換に
+    // save.roster / 現ロスターをフォールバック)
+    stageEntryRoster = save.stageEntryRoster
+      || save.roster
+      || rosterToSave(reUnits.filter(u => u.side === 'player'));
     if (state.phase === 'enemy-act' || state.phase === 'resolve' || state.phase === 'turn-start') {
       advanceToNext(state);
     } else {
@@ -1326,7 +1384,7 @@
   function initialRoster() {
     return [{
       id: 'P-hero', name: '勇者', glyph: '🛡️',
-      maxHp: 28, atk: 7, def: 3, spd: 6, ballAtk: 5,
+      maxHp: 24, atk: 6, def: 2, spd: 3, ballAtk: 4,
       archetype: 'balanced', lv: 1, xp: 0,
     }];
   }
