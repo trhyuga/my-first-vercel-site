@@ -191,6 +191,13 @@
     .roster-row .stats { color: #64748b; font-size: 0.7rem; flex: 1; }
     .roster-row .hp { font-variant-numeric: tabular-nums; min-width: 3.5rem; text-align: right; font-weight: 600; }
     .roster-row.enemy .name { color: #b91c1c; }
+    .roster-row .fresh {
+      display: inline-block;
+      background: #f59e0b; color: #fff;
+      font-size: 0.6rem; font-weight: 700;
+      padding: 1px 5px; border-radius: 5px;
+      vertical-align: 2px;
+    }
     .lvbar {
       width: 100%;
       height: 3px; background: #e2e8f0; border-radius: 2px; overflow: hidden;
@@ -447,7 +454,9 @@
   const SFX_MUTE_KEY = 'games.tactics-grid.mute';
   const RECRUIT_PROB = { melee: 0.30, ball: 0.20 };
   const LV_CAP = 20;
-  const xpToNext = (lv) => 12 + 8 * (lv - 1);   // 12, 20, 28, 36, ...
+  // 2次関数で「上がるほど上がりにくい」カーブ
+  // lv 1→2: 13, 2→3: 28, 3→4: 53, 4→5: 88, 5→6: 133, 6→7: 188, 7→8: 253, ...
+  const xpToNext = (lv) => 8 + 5 * lv * lv;
   const ARCH_WEIGHTS = {                        // レベルアップ時のステ分配重み
     tank:    { hp: 4, atk: 2, def: 3, spd: 1 },
     striker: { hp: 2, atk: 4, def: 1, spd: 3 },
@@ -839,15 +848,17 @@
       alive: true,
       acted: false,
     };
+    u.lv = opts.lv ?? 1;
     if (side === 'player') {
-      u.lv = opts.lv ?? 1;
       u.xp = opts.xp ?? 0;
     }
     return u;
   }
   // STAGE def → state
-  function buildStageState(stageIdx, roster, prevSave) {
+  // opts.enemyLv: 敵が獲得するレベル数 (味方古参の平均 Lv)。1 なら基本ステ。
+  function buildStageState(stageIdx, roster, opts = {}) {
     const stage = STAGES[stageIdx];
+    const enemyLv = Math.max(1, Math.floor(opts.enemyLv || 1));
     const units = [];
     // プレイヤー: roster をそのまま並べ、空き枠に配置
     let spawnI = 0;
@@ -888,7 +899,10 @@
       enemySpecs.push({ ...tmpl, x: placed.x, y: placed.y });
     }
     for (const e of enemySpecs) {
-      units.push(makeUnit(e, 'enemy'));
+      const u = makeUnit(e, 'enemy');
+      if (enemyLv > 1) levelUpTo(u, enemyLv);
+      else u.lv = 1;
+      units.push(u);
     }
     // 障害物 (ステージ定義から実体を作る)
     const obstacles = (stage.obstacles || []).map((o, i) => ({
@@ -947,6 +961,7 @@
       stageEntryRoster: stageEntryRoster ? JSON.parse(JSON.stringify(stageEntryRoster)) : null,
       currentStage: {
         stageIdx: state.stageIdx,
+        stageEnemyLv: state.stageEnemyLv || 1,
         units: state.units.map(serializeUnit),
         balls: state.balls.slice(),
         obstacles: (state.obstacles || []).map(o => ({
@@ -972,6 +987,7 @@
       maxHp: u.maxHp, atk: u.atk, def: u.def, spd: u.spd, ballAtk: u.ballAtk,
       archetype: u.archetype,
       lv: u.lv, xp: u.xp,
+      isFresh: !!u.isFresh,
     }));
   }
   function serializeUnit(u) {
@@ -981,6 +997,7 @@
       atk: u.atk, def: u.def, spd: u.spd, ballAtk: u.ballAtk,
       archetype: u.archetype,
       lv: u.lv, xp: u.xp,
+      isFresh: !!u.isFresh,
       alive: u.alive, acted: u.acted,
     };
   }
@@ -1158,30 +1175,41 @@
       levelUp(state, unit);
     }
   }
-  function levelUp(state, unit) {
-    unit.lv += 1;
+  // ステ反映だけ。UI 副作用は呼び出し側で。
+  function applyLevelUp(unit) {
+    unit.lv = (unit.lv || 1) + 1;
     const weights = ARCH_WEIGHTS[unit.archetype] || ARCH_WEIGHTS.balanced;
-    // +3 ポイントを重み付きランダム分配
     const gains = { hp: 0, atk: 0, def: 0, spd: 0 };
     for (let i = 0; i < 3; i++) {
       const k = weightedPick(weights);
       gains[k] += 1;
     }
-    // HP は実数で +2 / pt (体感値)
     const hpInc = gains.hp * 2;
     unit.maxHp += hpInc;
-    unit.hp = Math.min(unit.maxHp, unit.hp + hpInc);
+    unit.hp = Math.min(unit.maxHp, (unit.hp ?? unit.maxHp) + hpInc);
     unit.atk += gains.atk;
     unit.def += gains.def;
     unit.spd += gains.spd;
+    return gains;
+  }
+  // 戦闘中の通常レベルアップ (toast / log / SFX 付き)
+  function levelUp(state, unit) {
+    const gains = applyLevelUp(unit);
     const parts = [];
-    if (gains.hp)  parts.push(`HP+${hpInc}`);
+    if (gains.hp)  parts.push(`HP+${gains.hp * 2}`);
     if (gains.atk) parts.push(`攻+${gains.atk}`);
     if (gains.def) parts.push(`守+${gains.def}`);
     if (gains.spd) parts.push(`速+${gains.spd}`);
     SFX.lvUp();
     toast(`🆙 ${unit.name} Lv.${unit.lv}!  ${parts.join(' / ')}`, 'success');
     log(state, `🆙 ${unit.name} Lv.${unit.lv} (${parts.join(', ')})`);
+  }
+  // 指定レベルまで一気にレベルアップ (UI 通知なし)。リクルートや敵のステージレベル
+  // 合わせに使う。Lv.1 → targetLv に向かって (targetLv - unit.lv) 回適用。
+  function levelUpTo(unit, targetLv) {
+    const safe = Math.max(1, Math.min(LV_CAP, targetLv));
+    while ((unit.lv || 1) < safe) applyLevelUp(unit);
+    unit.hp = unit.maxHp; // フル回復
   }
 
   // ----- AI --------------------------------------------------
@@ -1330,17 +1358,8 @@
       document.getElementById('overlay').classList.add('show');
       document.getElementById('ending-restart').onclick = () => {
         if (!confirm('セーブを消して最初からやり直しますか?')) return;
-        try { localStorage.removeItem(SAVE_KEY); } catch (_) {}
-        cleared = 0;
-        recruitedQueue.length = 0;
-        const roster = initialRoster();
-        stageEntryRoster = JSON.parse(JSON.stringify(roster));
-        state = buildStageState(0, roster);
-        state.order = buildOrder(state);
-        state.orderIdx = 0;
-        saveAll();
         document.getElementById('overlay').classList.remove('show');
-        advanceToNext(state);
+        startFresh();
       };
       document.getElementById('back-title').onclick = () => {
         document.getElementById('overlay').classList.remove('show');
@@ -1399,24 +1418,43 @@
     }
     const targetIdx = state.stageIdx - 1;
     cleared = Math.max(0, cleared - 1); // 1 ステージ進捗を失う
-    const roster = JSON.parse(JSON.stringify(stageEntryRoster || []));
-    state = buildStageState(targetIdx, roster);
-    state.order = buildOrder(state);
-    state.orderIdx = 0;
-    stageEntryRoster = JSON.parse(JSON.stringify(roster));
-    saveAll();
-    advanceToNext(state);
+    // ステージ N の進入時 roster で N-1 をやり直す。stageEntryRoster は loadStage が
+    // useStash=true のときに参照する。
+    loadStage(targetIdx, /*useStash*/ true);
   }
 
   function loadStage(idx, useStash = false) {
-    const baseRoster = useStash ? stageEntryRoster : currentRoster();
-    // recruitedQueue を消化して baseRoster に合流
-    const newAllies = recruitedQueue.splice(0);
-    const roster = baseRoster.concat(newAllies.map(r => ({ ...r })));
-    state = buildStageState(idx, roster);
+    let baseRoster;
+    if (useStash) {
+      // ロールバック: スナップショットそのまま (isFresh の状態も保持)
+      baseRoster = JSON.parse(JSON.stringify(stageEntryRoster || []));
+    } else {
+      // 通常 (前ステージ突破): 持ち越したユニットは古参 (isFresh: false)
+      baseRoster = currentRoster().map(r => ({ ...r, isFresh: false }));
+    }
+    // 古参 (isFresh: false) の Lv 平均がこのステージの敵レベル + 新規加入の基準。
+    // 古参が居なければ baseRoster 全体を使う (新規ゲームで勇者しかいない場合など)。
+    const veterans = baseRoster.filter(r => !r.isFresh);
+    const lvPool = veterans.length ? veterans : baseRoster;
+    const avgPartyLv = lvPool.length
+      ? Math.max(1, Math.round(lvPool.reduce((a, r) => a + (r.lv || 1), 0) / lvPool.length))
+      : 1;
+    const enemyLv = avgPartyLv;
+    const recruitLv = Math.max(1, avgPartyLv - 1);
+    // 新規加入は recruitLv まで level-up を適用してから合流させる。
+    // この段階では isFresh: true。次ステージ開始時に古参化する。
+    const newAllies = recruitedQueue.splice(0).map(r => {
+      const u = { ...r, lv: 1, xp: 0, hp: r.maxHp };
+      if (recruitLv > 1) levelUpTo(u, recruitLv);
+      u.isFresh = true;
+      return u;
+    });
+    const roster = baseRoster.concat(newAllies);
+    state = buildStageState(idx, roster, { enemyLv });
+    state.stageEnemyLv = enemyLv;
     state.order = buildOrder(state);
     state.orderIdx = 0;
-    stageEntryRoster = JSON.parse(JSON.stringify(roster)); // ステージ開始時のロスター snapshot (リトライ用)
+    stageEntryRoster = JSON.parse(JSON.stringify(roster)); // ステージ突入時 snapshot (rollback 用)
     saveAll();
     advanceToNext(state);
   }
@@ -1428,6 +1466,7 @@
         id: u.id, name: u.name, glyph: u.glyph,
         maxHp: u.maxHp, atk: u.atk, def: u.def, spd: u.spd, ballAtk: u.ballAtk,
         archetype: u.archetype, lv: u.lv, xp: u.xp,
+        isFresh: !!u.isFresh,
       }));
   }
   function showTitle() {
@@ -1465,13 +1504,15 @@
     if ($('ttl-resume')) $('ttl-resume').onclick = () => { hideTitle(); resumeInProgress(); };
     if ($('ttl-next')) $('ttl-next').onclick = () => {
       hideTitle();
-      const roster = (save && save.roster) || initialRoster();
+      // セーブされていた roster を「全員古参」として stageEntryRoster に注入し、
+      // loadStage(useStash=true) を使うことで avgPartyLv 計算 / 敵レベル付与の
+      // 1 つの経路にまとめる。
+      const roster = ((save && save.roster) || initialRoster()).map(r => ({ ...r, isFresh: false }));
       stageEntryRoster = JSON.parse(JSON.stringify(roster));
-      state = buildStageState(nextIdx, roster);
-      state.order = buildOrder(state);
-      state.orderIdx = 0;
-      saveAll();
-      advanceToNext(state);
+      // recruitedQueue は基本ここでは空 (前ステージのクリア時にロードに溶ける) だが、
+      // 保険でクリア。
+      recruitedQueue.length = 0;
+      loadStage(nextIdx, /*useStash*/ true);
     };
     if ($('ttl-new')) $('ttl-new').onclick = () => { SFX.tap(); hideTitle(); startFresh(); };
     if ($('ttl-restart')) $('ttl-restart').onclick = () => {
@@ -1521,7 +1562,17 @@
         <li>球 / 接近戦で<b>与えたダメージ量</b> = XP</li>
         <li>敵を <b>とどめ</b> を刺すと <span class="kbd">敵 maxHP / 2</span> ボーナス</li>
         <li>レベルアップで +3 ステ (アーキタイプの重みで HP/攻/守/速 にランダム配分)</li>
+        <li>必要 XP は <span class="kbd">8 + 5 × Lv²</span> (Lv1→2: 13, 2→3: 28, 3→4: 53, 4→5: 88, 5→6: 133, 6→7: 188 …)</li>
         <li>レベル上限は 20</li>
+      </ul>
+
+      <h3 class="accent">敵レベル / 新規加入レベル</h3>
+      <ul>
+        <li><b>敵レベル</b>: そのステージは 味方の <b>古参</b> (新規加入以外) の <b>Lv 平均</b> に揃えられる</li>
+        <li>新規加入 (このステージから合流) は <b>古参計算に含めない</b></li>
+        <li>新規加入の開始レベル: <span class="accent">敵 Lv − 1</span> (最低 1)</li>
+        <li>新規加入は次のステージから <b>古参</b> 扱い (= 平均計算に組み込まれる)</li>
+        <li>ロスター行に <span class="kbd">新</span> バッジ表示</li>
       </ul>
 
       <h3 class="accent">リクルート (仲間化)</h3>
@@ -1565,13 +1616,10 @@
     try { localStorage.removeItem(SAVE_KEY); } catch (_) {}
     cleared = 0;
     recruitedQueue.length = 0;
-    const roster = initialRoster();
-    stageEntryRoster = JSON.parse(JSON.stringify(roster));
-    state = buildStageState(0, roster);
-    state.order = buildOrder(state);
-    state.orderIdx = 0;
-    saveAll();
-    advanceToNext(state);
+    // initialRoster の勇者を「即古参」として stageEntryRoster へ注入してから loadStage。
+    // こうすると loadStage 内の avgPartyLv 計算が hero.lv を採用できる (新規ゲーム=Lv1)。
+    stageEntryRoster = initialRoster().map(r => ({ ...r, isFresh: false }));
+    loadStage(0, /*useStash*/ true);
   }
 
   function resumeInProgress() {
@@ -1588,6 +1636,7 @@
     state = {
       stageIdx: cs.stageIdx,
       stageName: STAGES[cs.stageIdx].name,
+      stageEnemyLv: cs.stageEnemyLv || 1,
       boardW: STAGES[cs.stageIdx].w, boardH: STAGES[cs.stageIdx].h,
       units: reUnits,
       balls: cs.balls.slice(),
@@ -1614,7 +1663,7 @@
   function initialRoster() {
     return [{
       id: 'P-hero', name: '勇者', glyph: '🛡️',
-      maxHp: 24, atk: 6, def: 2, spd: 3, ballAtk: 4,
+      maxHp: 18, atk: 5, def: 1, spd: 3, ballAtk: 3,
       archetype: 'balanced', lv: 1, xp: 0,
     }];
   }
@@ -1645,10 +1694,11 @@
     else if (state.phase === 'turn-start') phaseLabel = `次のターン開始`;
     const playerN = state.units.filter(uu => uu.side === 'player' && uu.alive).length;
     const enemyN  = state.units.filter(uu => uu.side === 'enemy'  && uu.alive).length;
+    const eLv = state.stageEnemyLv || 1;
     statusEl.innerHTML = `
       <span class="turn">ステージ ${state.stageIdx + 1} / 「${state.stageName}」</span>
       <span>T${state.turn}</span>
-      <span>👤${playerN} / 👹${enemyN}</span>
+      <span>👤${playerN} / 👹${enemyN} (敵Lv${eLv})</span>
       <span class="phase ${u && u.side === 'enemy' ? 'enemy' : ''}">${phaseLabel}</span>`;
     // board
     boardEl.innerHTML = '';
@@ -1691,7 +1741,7 @@
         if (onCell) {
           const div = document.createElement('div');
           div.className = 'unit ' + onCell.side;
-          const lvTag = onCell.side === 'player' ? `<span class="lvl">L${onCell.lv}</span>` : '';
+          const lvTag = onCell.lv ? `<span class="lvl">L${onCell.lv}</span>` : '';
           div.innerHTML = `
             <span class="glyph">${onCell.glyph}</span>
             ${lvTag}
@@ -1730,11 +1780,12 @@
         const lvBar = uu.side === 'player'
           ? `<div class="lvbar"><i style="width:${(uu.xp / xpToNext(uu.lv)) * 100}%"></i></div>`
           : '';
+        const freshTag = uu.side === 'player' && uu.isFresh ? ' <span class="fresh">新</span>' : '';
         return `<div class="${cls.join(' ')}">
           <span class="glyph">${uu.glyph}</span>
           <div style="flex:1;">
             <div style="display:flex; gap:0.3rem; align-items:baseline;">
-              <span class="name">${uu.name}</span>
+              <span class="name">${uu.name}${freshTag}</span>
               <span class="stats">攻${uu.atk}/守${uu.def}/速${uu.spd}${uu.lv ? ` Lv${uu.lv}` : ''}</span>
             </div>
             ${lvBar}
