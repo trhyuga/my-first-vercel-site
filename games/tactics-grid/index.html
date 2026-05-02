@@ -87,6 +87,22 @@
     .cell.selected {
       box-shadow: inset 0 0 0 3px #0284c7;
     }
+    /* 行動中のプレイヤー (= activeUnit) を一目でわかる琥珀ハイライト + パルス */
+    .cell.active-unit {
+      background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+      box-shadow: inset 0 0 0 3px #f59e0b;
+      position: relative;
+      z-index: 1;
+      animation: active-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes active-pulse {
+      0%, 100% { filter: drop-shadow(0 0 0 rgba(245, 158, 11, 0.0)); }
+      50%      { filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.7)); }
+    }
+    .unit.active .glyph {
+      transform: scale(1.08);
+      filter: drop-shadow(0 1px 2px rgba(180,83,9,0.55));
+    }
     .cell.flash-hit {
       animation: flash-red 0.4s ease-out;
     }
@@ -153,18 +169,28 @@
       padding: 0 3px; border-radius: 5px;
       line-height: 1.4;
     }
+    /* 球: 進行方向を示す太字の矢印で表示 (色 = 陣営)。
+       Unicode の矢印を 強い text-shadow で縁取り、HP バーや絵文字に被っても
+       視認できるようにしている。 */
     .ball {
       position: absolute; inset: 0;
-      display: flex; align-items: flex-start; justify-content: center;
-      padding-top: 1px;
+      display: flex; align-items: center; justify-content: center;
       pointer-events: none;
       animation: pop 0.18s ease-out;
+      z-index: 2;
     }
-    .ball .dot {
-      font-size: calc(var(--cell) * 0.28);
-      filter: drop-shadow(0 1px 1px rgba(0,0,0,0.3));
+    .ball .arrow {
+      font-size: calc(var(--cell) * 0.55);
+      line-height: 1;
+      font-weight: 900;
+      text-shadow:
+        0 0 3px rgba(255,255,255,0.95),
+        0 0 6px rgba(255,255,255,0.85),
+        0 1px 2px rgba(0,0,0,0.35);
     }
-    @keyframes pop { from { transform: scale(0.6); } to { transform: scale(1); } }
+    .ball.player .arrow { color: #1d4ed8; }
+    .ball.enemy  .arrow { color: #dc2626; }
+    @keyframes pop { from { transform: scale(0.55); } to { transform: scale(1); } }
     /* roster + active panels */
     .panel {
       background: #fff;
@@ -763,6 +789,14 @@
     return Object.keys(weights)[0];
   }
   // 8 方向の単位ベクトル候補
+  // 球が向かっている 8 方向ベクトル → Unicode 矢印 (太字で着色して描画する)
+  const ARROW = {
+    '0,-1': '↑', '1,-1': '↗', '1,0': '→', '1,1': '↘',
+    '0,1':  '↓', '-1,1': '↙', '-1,0': '←', '-1,-1': '↖',
+  };
+  function arrowGlyph(vx, vy) {
+    return ARROW[`${vx},${vy}`] || '•';
+  }
   const DIR8 = [
     { vx: 0, vy: -1 }, { vx: 1, vy: -1 }, { vx: 1, vy: 0 }, { vx: 1, vy: 1 },
     { vx: 0, vy: 1  }, { vx: -1, vy: 1 }, { vx: -1, vy: 0 }, { vx: -1, vy: -1 },
@@ -1166,13 +1200,20 @@
   }
 
   // ----- XP / Level -----------------------------------------
-  function awardXP(state, unit, amount) {
-    if (unit.side !== 'player' || !unit.alive) return;
-    if (unit.lv >= LV_CAP) return;
-    unit.xp += amount;
-    while (unit.lv < LV_CAP && unit.xp >= xpToNext(unit.lv)) {
-      unit.xp -= xpToNext(unit.lv);
-      levelUp(state, unit);
+  // XP は alive な全プレイヤーに 等量 分配する (旧: 攻撃を当てた本人のみ)。
+  // 1 人だけが急成長 (= 勇者ばかり強くなる) 問題への対応。
+  // 二次曲線の必要 XP と相まって、低レベルのユニットほど早く次レベルへ進めるので、
+  // 新規加入もすぐに追いつく。
+  // 第 2 引数 (旧 dealer) はインターフェース互換のために残しているが内部で参照しない。
+  function awardXP(state, _trigger, amount) {
+    for (const u of state.units) {
+      if (u.side !== 'player' || !u.alive) continue;
+      if (u.lv >= LV_CAP) continue;
+      u.xp += amount;
+      while (u.lv < LV_CAP && u.xp >= xpToNext(u.lv)) {
+        u.xp -= xpToNext(u.lv);
+        levelUp(state, u);
+      }
     }
   }
   // ステ反映だけ。UI 副作用は呼び出し側で。
@@ -1726,6 +1767,8 @@
         if (moveSet.has(k)) cell.classList.add('move-target');
         if (aimSet.has(k)) cell.classList.add('aim-target');
         if (u && u.side === 'player' && state.sel === u.id && u.x === x && u.y === y) cell.classList.add('selected');
+        // 行動中のプレイヤーユニットは琥珀色でハイライト (どれを操作中か明確化)
+        if (u && u.side === 'player' && u.x === x && u.y === y) cell.classList.add('active-unit');
         const obsHere = obstacleAt(state, x, y);
         if (obsHere) {
           if (obsHere.kind === 'wall') cell.classList.add('has-wall');
@@ -1741,6 +1784,7 @@
         if (onCell) {
           const div = document.createElement('div');
           div.className = 'unit ' + onCell.side;
+          if (u && onCell.id === u.id) div.classList.add('active');
           const lvTag = onCell.lv ? `<span class="lvl">L${onCell.lv}</span>` : '';
           div.innerHTML = `
             <span class="glyph">${onCell.glyph}</span>
@@ -1748,12 +1792,12 @@
             <span class="hpbar"><i style="width:${(onCell.hp / onCell.maxHp) * 100}%"></i></span>`;
           cell.appendChild(div);
         }
-        // ball overlay
+        // ball overlay — 進行方向の矢印で表示 (色 = 陣営)
         const ballHere = state.balls.find(b => b.x === x && b.y === y);
         if (ballHere) {
           const b = document.createElement('div');
-          b.className = 'ball';
-          b.innerHTML = `<span class="dot">${ballHere.side === 'player' ? '🔵' : '🔴'}</span>`;
+          b.className = 'ball ' + ballHere.side;
+          b.innerHTML = `<span class="arrow">${arrowGlyph(ballHere.vx, ballHere.vy)}</span>`;
           cell.appendChild(b);
         }
         boardEl.appendChild(cell);
