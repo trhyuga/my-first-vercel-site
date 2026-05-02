@@ -169,9 +169,10 @@
       padding: 0 3px; border-radius: 5px;
       line-height: 1.4;
     }
-    /* 球: 進行方向を示す太字の矢印で表示 (色 = 陣営)。
-       Unicode の矢印を 強い text-shadow で縁取り、HP バーや絵文字に被っても
-       視認できるようにしている。 */
+    /* 球: 弾丸/水滴形のシルエットを進行方向に回転して描画。
+       SVG の path で先端が尖った雫を作り、--rot プロパティで 8 方向 (0/45/90/...)
+       に回す。色は陣営別 (青 = 味方 / 赤 = 敵)、白いグロー + 落とし影で
+       小さくても視認できる。 */
     .ball {
       position: absolute; inset: 0;
       display: flex; align-items: center; justify-content: center;
@@ -179,17 +180,20 @@
       animation: pop 0.18s ease-out;
       z-index: 2;
     }
-    .ball .arrow {
-      font-size: calc(var(--cell) * 0.55);
-      line-height: 1;
-      font-weight: 900;
-      text-shadow:
-        0 0 3px rgba(255,255,255,0.95),
-        0 0 6px rgba(255,255,255,0.85),
-        0 1px 2px rgba(0,0,0,0.35);
+    .ball .bullet {
+      width: 62%; height: 62%;
+      transform: rotate(var(--rot, 0deg));
+      filter:
+        drop-shadow(0 0 2px rgba(255,255,255,0.9))
+        drop-shadow(0 1px 1.5px rgba(0,0,0,0.45));
     }
-    .ball.player .arrow { color: #1d4ed8; }
-    .ball.enemy  .arrow { color: #dc2626; }
+    .ball .bullet path { fill: currentColor; }
+    .ball.player { color: #1d4ed8; }
+    .ball.enemy  { color: #b91c1c; }
+    /* tracer のキラ — 先端に小さな光点 */
+    .ball .bullet circle.tip {
+      fill: rgba(255,255,255,0.85);
+    }
     @keyframes pop { from { transform: scale(0.55); } to { transform: scale(1); } }
     /* roster + active panels */
     .panel {
@@ -789,14 +793,21 @@
     return Object.keys(weights)[0];
   }
   // 8 方向の単位ベクトル候補
-  // 球が向かっている 8 方向ベクトル → Unicode 矢印 (太字で着色して描画する)
-  const ARROW = {
-    '0,-1': '↑', '1,-1': '↗', '1,0': '→', '1,1': '↘',
-    '0,1':  '↓', '-1,1': '↙', '-1,0': '←', '-1,-1': '↖',
+  // 球が向かっている 8 方向ベクトル → 回転角度 (deg)。
+  // SVG の弾丸は「上 = 0°」で描かれており、ここで指定した deg だけ時計回りに回す。
+  const BULLET_ROT = {
+    '0,-1': 0,   '1,-1': 45,  '1,0': 90,  '1,1': 135,
+    '0,1':  180, '-1,1': 225, '-1,0': 270, '-1,-1': 315,
   };
-  function arrowGlyph(vx, vy) {
-    return ARROW[`${vx},${vy}`] || '•';
+  function bulletRot(vx, vy) {
+    return BULLET_ROT[`${vx},${vy}`] ?? 0;
   }
+  // 弾丸 (上向き) の SVG マークアップ。--rot プロパティで方向を切り替える。
+  // 雫型 (上が尖り下が丸い) に小さな白いハイライトを入れて立体感を出している。
+  const BULLET_SVG = '<svg class="bullet" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">'
+    + '<path d="M 50 6 Q 88 28 88 58 Q 88 92 50 92 Q 12 92 12 58 Q 12 28 50 6 Z" />'
+    + '<circle class="tip" cx="50" cy="22" r="6" />'
+    + '</svg>';
   const DIR8 = [
     { vx: 0, vy: -1 }, { vx: 1, vy: -1 }, { vx: 1, vy: 0 }, { vx: 1, vy: 1 },
     { vx: 0, vy: 1  }, { vx: -1, vy: 1 }, { vx: -1, vy: 0 }, { vx: -1, vy: -1 },
@@ -1792,12 +1803,13 @@
             <span class="hpbar"><i style="width:${(onCell.hp / onCell.maxHp) * 100}%"></i></span>`;
           cell.appendChild(div);
         }
-        // ball overlay — 進行方向の矢印で表示 (色 = 陣営)
+        // ball overlay — 弾丸/水滴の SVG を進行方向に回転 (色 = 陣営)
         const ballHere = state.balls.find(b => b.x === x && b.y === y);
         if (ballHere) {
           const b = document.createElement('div');
           b.className = 'ball ' + ballHere.side;
-          b.innerHTML = `<span class="arrow">${arrowGlyph(ballHere.vx, ballHere.vy)}</span>`;
+          b.style.setProperty('--rot', bulletRot(ballHere.vx, ballHere.vy) + 'deg');
+          b.innerHTML = BULLET_SVG;
           cell.appendChild(b);
         }
         boardEl.appendChild(cell);
