@@ -926,10 +926,13 @@
     return u;
   }
   // STAGE def → state
-  // opts.enemyLv: 敵が獲得するレベル数 (味方古参の平均 Lv)。1 なら基本ステ。
+  // opts.enemyLvBase: 敵が獲得するレベルの基準 (味方古参の平均 Lv をステージ数+1
+  //   でキャップしたもの)。各敵はこの基準値を中心に ±1 のばらつきで個別に決まる。
+  // opts.enemyLvCap: ステージ Lv 上限 (= ステージ数 + 1)。±1 ばらつきの上限。
   function buildStageState(stageIdx, roster, opts = {}) {
     const stage = STAGES[stageIdx];
-    const enemyLv = Math.max(1, Math.floor(opts.enemyLv || 1));
+    const enemyLvBase = Math.max(1, Math.floor(opts.enemyLvBase || opts.enemyLv || 1));
+    const enemyLvCap  = Math.max(enemyLvBase, Math.floor(opts.enemyLvCap || enemyLvBase));
     const units = [];
     // プレイヤー: roster をそのまま並べ、空き枠に配置
     let spawnI = 0;
@@ -971,7 +974,13 @@
     }
     for (const e of enemySpecs) {
       const u = makeUnit(e, 'enemy');
-      if (enemyLv > 1) levelUpTo(u, enemyLv);
+      // 各敵 Lv = base ± 1 のばらつき (50% base / 25% +1 / 25% -1)
+      const r = Math.random();
+      let off = 0;
+      if (r < 0.25) off = -1;
+      else if (r < 0.50) off = 1;
+      const lv = clamp(enemyLvBase + off, 1, enemyLvCap);
+      if (lv > 1) levelUpTo(u, lv);
       else u.lv = 1;
       units.push(u);
     }
@@ -1550,8 +1559,11 @@
     const avgPartyLv = lvPool.length
       ? Math.max(1, Math.round(lvPool.reduce((a, r) => a + (r.lv || 1), 0) / lvPool.length))
       : 1;
-    const enemyLv = avgPartyLv;
-    const recruitLv = Math.max(1, avgPartyLv - 1);
+    // 敵 Lv 上限はステージ数 + 1 (= idx 0-based + 2)。負け続けて Lv だけ上がる
+    // パターンで「序盤ステージなのに敵 Lv10」みたいな破綻を防ぐ。
+    const stageCap = idx + 2;
+    const enemyLvBase = Math.min(avgPartyLv, stageCap);
+    const recruitLv = Math.max(1, enemyLvBase - 1);
     // 新規加入は recruitLv まで level-up を適用してから合流させる。
     // この段階では isFresh: true。次ステージ開始時に古参化する。
     const newAllies = recruitedQueue.splice(0).map(r => {
@@ -1561,8 +1573,9 @@
       return u;
     });
     const roster = baseRoster.concat(newAllies);
-    state = buildStageState(idx, roster, { enemyLv });
-    state.stageEnemyLv = enemyLv;
+    state = buildStageState(idx, roster, { enemyLvBase, enemyLvCap: stageCap });
+    state.stageEnemyLv = enemyLvBase;
+    state.stageEnemyLvCap = stageCap;
     state.order = buildOrder(state);
     state.orderIdx = 0;
     stageEntryRoster = JSON.parse(JSON.stringify(roster)); // ステージ突入時 snapshot (rollback 用)
@@ -1683,11 +1696,13 @@
 
       <h3 class="accent">敵レベル / 新規加入レベル</h3>
       <ul>
-        <li><b>敵レベル</b>: そのステージは 味方の <b>古参</b> (新規加入以外) の <b>Lv 平均</b> に揃えられる</li>
+        <li><b>敵レベル基準</b>: 味方の <b>古参</b> (新規加入以外) の Lv 平均</li>
+        <li><b>上限</b>: ステージ数 + 1 (例: ステージ 3 なら最大 Lv 4)。負け続けて Lv だけ伸びても序盤面が破綻しないようキャップ</li>
+        <li><b>ばらつき</b>: 各敵は基準 Lv ± 1 (50% は基準, 25% +1, 25% −1) で個別に決まる</li>
         <li>新規加入 (このステージから合流) は <b>古参計算に含めない</b></li>
-        <li>新規加入の開始レベル: <span class="accent">敵 Lv − 1</span> (最低 1)</li>
+        <li>新規加入の開始レベル: <span class="accent">基準 Lv − 1</span> (最低 1)</li>
         <li>新規加入は次のステージから <b>古参</b> 扱い (= 平均計算に組み込まれる)</li>
-        <li>ロスター行に <span class="kbd">新</span> バッジ表示</li>
+        <li>ロスター行に <span class="kbd">新</span> バッジ、勇者には <span class="kbd">👑</span> バッジ表示</li>
       </ul>
 
       <h3 class="accent">リクルート (仲間化)</h3>
@@ -1816,11 +1831,14 @@
     else if (state.phase === 'turn-start') phaseLabel = `次のターン開始`;
     const playerN = state.units.filter(uu => uu.side === 'player' && uu.alive).length;
     const enemyN  = state.units.filter(uu => uu.side === 'enemy'  && uu.alive).length;
-    const eLv = state.stageEnemyLv || 1;
+    const enemyLvs = state.units.filter(uu => uu.side === 'enemy' && uu.alive).map(uu => uu.lv || 1);
+    const eMin = enemyLvs.length ? Math.min(...enemyLvs) : (state.stageEnemyLv || 1);
+    const eMax = enemyLvs.length ? Math.max(...enemyLvs) : eMin;
+    const lvLabel = eMin === eMax ? `Lv${eMin}` : `Lv${eMin}〜${eMax}`;
     statusEl.innerHTML = `
       <span class="turn">ステージ ${state.stageIdx + 1} / 「${state.stageName}」</span>
       <span>T${state.turn}</span>
-      <span>👤${playerN} / 👹${enemyN} (敵Lv${eLv})</span>
+      <span>👤${playerN} / 👹${enemyN} (敵${lvLabel})</span>
       <span class="phase ${u && u.side === 'enemy' ? 'enemy' : ''}">${phaseLabel}</span>`;
     // board
     boardEl.innerHTML = '';
