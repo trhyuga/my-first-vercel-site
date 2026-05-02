@@ -1211,16 +1211,30 @@
   }
 
   // ----- XP / Level -----------------------------------------
-  // XP は alive な全プレイヤーに 等量 分配する (旧: 攻撃を当てた本人のみ)。
-  // 1 人だけが急成長 (= 勇者ばかり強くなる) 問題への対応。
-  // 二次曲線の必要 XP と相まって、低レベルのユニットほど早く次レベルへ進めるので、
-  // 新規加入もすぐに追いつく。
-  // 第 2 引数 (旧 dealer) はインターフェース互換のために残しているが内部で参照しない。
-  function awardXP(state, _trigger, amount) {
-    for (const u of state.units) {
-      if (u.side !== 'player' || !u.alive) continue;
+  // XP の半分は とどめ役 (dealer) に、もう半分は alive な味方ユニット全員に
+  // 均等配分する。
+  //   dealer 取得 = amount / 2 + (amount / 2) / N
+  //   非 dealer  = (amount / 2) / N        (N = alive プレイヤー数)
+  // → dealer は確実に多めに伸びるので「育てる楽しみ」が出るが、サブも置いて
+  // いかれない。
+  // dealer が既に倒れている場合 (球が刺さる前に dealer が死んだ等) は dealer 分も
+  // 共有プールに合流させる (= 全員均等に amount を分配)。
+  function awardXP(state, dealer, amount) {
+    if (!amount || amount <= 0) return;
+    const players = state.units.filter(u => u.side === 'player' && u.alive);
+    if (players.length === 0) return;
+    const dealerAlive = dealer && dealer.alive && dealer.side === 'player'
+      && players.some(p => p.id === dealer.id);
+    const dealerBonus = dealerAlive ? amount / 2 : 0;
+    const sharedTotal = amount - dealerBonus;
+    const sharePer = sharedTotal / players.length;
+    for (const u of players) {
       if (u.lv >= LV_CAP) continue;
-      u.xp += amount;
+      let gain = sharePer;
+      if (dealerAlive && u.id === dealer.id) gain += dealerBonus;
+      gain = Math.round(gain);
+      if (gain <= 0) continue;
+      u.xp += gain;
       while (u.lv < LV_CAP && u.xp >= xpToNext(u.lv)) {
         u.xp -= xpToNext(u.lv);
         levelUp(state, u);
@@ -1611,8 +1625,10 @@
 
       <h3>経験値・レベル</h3>
       <ul>
-        <li>球 / 接近戦で<b>与えたダメージ量</b> = XP</li>
-        <li>敵を <b>とどめ</b> を刺すと <span class="kbd">敵 maxHP / 2</span> ボーナス</li>
+        <li>球 / 接近戦で<b>与えたダメージ量</b> = XP イベント</li>
+        <li>敵を <b>とどめ</b> を刺すと <span class="kbd">敵 maxHP / 2</span> ボーナス XP</li>
+        <li>XP の <b>分配</b>: 半分はとどめ役本人へ、残り半分を alive な味方全員 (本人含む) で均等山分け<br/>
+          → メイン火力役は伸びやすいが、サブも置いていかれない</li>
         <li>レベルアップで +3 ステ (アーキタイプの重みで HP/攻/守/速 にランダム配分)</li>
         <li>必要 XP は <span class="kbd">8 + 5 × Lv²</span> (Lv1→2: 13, 2→3: 28, 3→4: 53, 4→5: 88, 5→6: 133, 6→7: 188 …)</li>
         <li>レベル上限は 20</li>
@@ -1762,10 +1778,17 @@
       for (const c of legalMoveCells(state, u)) moveSet.add(c.x + ',' + c.y);
     }
     if (state.phase === 'aim' && u && u.side === 'player') {
-      // 射撃可能 = 全マス (盤外を除く)
-      for (let y = 0; y < state.boardH; y++) {
-        for (let x = 0; x < state.boardW; x++) {
-          if (!(x === u.x && y === u.y)) aimSet.add(x + ',' + y);
+      // 射撃可能 = 8 方向レイの上のセルだけ。各方向に走査し、ユニット / 障害物 /
+      // 盤外で止まる前のセルをすべて aim-target に加える。これで「タップした
+      // マスに球が確実に通る」保証ができる (旧: 全マスを許可していたので、
+      // 8 方向に乗らないタップは最寄り方向にスナップしてしまっていた)。
+      for (const v of DIR8) {
+        let cx = u.x + v.vx, cy = u.y + v.vy;
+        while (cx >= 0 && cx < state.boardW && cy >= 0 && cy < state.boardH) {
+          aimSet.add(cx + ',' + cy);
+          // ユニット or 障害物にぶつかったらそのセルは含めるが、その先には進まない
+          if (unitAt(state, cx, cy) || obstacleAt(state, cx, cy)) break;
+          cx += v.vx; cy += v.vy;
         }
       }
     }
@@ -1925,6 +1948,15 @@
     if (state.phase === 'aim') {
       // 自分自身は無効 (キャンセルはボタン)
       if (u.x === x && u.y === y) return;
+      // 8 方向のレイ上にあるセルだけ受け付ける (それ以外は球が通らないので
+      // タップを無効化してフィードバック)
+      const dx = x - u.x, dy = y - u.y;
+      const onLine = (dx === 0 || dy === 0 || Math.abs(dx) === Math.abs(dy));
+      if (!onLine) {
+        toast('球は 8 方向にしか飛びません (黄色のマス)', 'warn');
+        SFX.tap();
+        return;
+      }
       fireBall(state, u, x, y);
       log(state, `${u.name} → (${x},${y}) に発射`);
       endActiveUnit();
