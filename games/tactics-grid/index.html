@@ -348,6 +348,42 @@
       font-size: 0.7rem; color: #64748b;
       text-align: center;
     }
+    /* rules / about modal — re-uses #overlay layer, but with a scrollable card */
+    .rules-card {
+      background: #fff; border-radius: 16px;
+      padding: 1rem 1rem 0.85rem;
+      max-width: 420px; width: 100%;
+      max-height: 80vh; overflow-y: auto;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+      text-align: left; color: #0f172a;
+    }
+    .rules-card h2 { margin: 0 0 0.5rem; font-size: 1.05rem; text-align: center; }
+    .rules-card h3 {
+      margin: 0.7rem 0 0.25rem;
+      font-size: 0.85rem; color: #0ea5e9; letter-spacing: 0.04em;
+      border-bottom: 1px solid #e2e8f0; padding-bottom: 0.15rem;
+    }
+    .rules-card p, .rules-card li {
+      font-size: 0.8rem; color: #334155; line-height: 1.55;
+      margin: 0.25rem 0;
+    }
+    .rules-card ul { padding-left: 1.1rem; margin: 0.2rem 0 0.4rem; }
+    .rules-card .kbd {
+      background: #f1f5f9; border-radius: 4px; padding: 1px 5px;
+      font-family: ui-monospace, monospace; font-size: 0.78rem;
+    }
+    .rules-card .accent { color: #b45309; font-weight: 700; }
+    /* mute toggle in header */
+    #mute-btn {
+      position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%);
+      background: rgba(255,255,255,0.6);
+      border: 1px solid #e2e8f0;
+      border-radius: 999px;
+      width: 36px; height: 36px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1rem;
+      cursor: pointer;
+    }
     /* overlay (stage clear / game over) */
     #overlay {
       position: fixed; inset: 0;
@@ -371,9 +407,10 @@
   </style>
 </head>
 <body>
-  <header>
+  <header style="position:relative;">
     <a class="back" href="../" aria-label="戻る">← games</a>
     <h1>⚔️ 戦術バトル (試作)</h1>
+    <button id="mute-btn" aria-label="音のオン/オフ" title="音のオン/オフ">🔊</button>
   </header>
   <main>
     <div id="status"></div>
@@ -407,7 +444,8 @@
 
   // ----- Config -----------------------------------------------
   const SAVE_KEY = 'games.tactics-grid.v1';
-  const RECRUIT_PROB = { melee: 0.7, ball: 0.45 };
+  const SFX_MUTE_KEY = 'games.tactics-grid.mute';
+  const RECRUIT_PROB = { melee: 0.30, ball: 0.20 };
   const LV_CAP = 20;
   const xpToNext = (lv) => 12 + 8 * (lv - 1);   // 12, 20, 28, 36, ...
   const ARCH_WEIGHTS = {                        // レベルアップ時のステ分配重み
@@ -417,6 +455,84 @@
     rogue:   { hp: 1, atk: 3, def: 1, spd: 5 },
     balanced:{ hp: 2, atk: 2, def: 2, spd: 2 },
   };
+
+  // ----- SFX (WebAudio で合成、外部ファイル不要) -----------------
+  // モバイルブラウザは初回ユーザー操作まで AudioContext を resume できない。
+  // タイトル画面ボタン押下が最初の gesture になるので、そこで ensure() を
+  // 呼ぶことで自動的に解錠される。
+  const SFX = (() => {
+    let ctx = null;
+    let muted = false;
+    try { muted = localStorage.getItem(SFX_MUTE_KEY) === '1'; } catch (_) {}
+    function ensure() {
+      if (muted) return null;
+      if (!ctx) {
+        try { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+        catch (_) { ctx = null; }
+      }
+      if (ctx && ctx.state === 'suspended') ctx.resume();
+      return ctx;
+    }
+    function tone({ freq, dur, type = 'sine', vol = 0.12, slide = 0, delay = 0 }) {
+      const c = ensure(); if (!c) return;
+      const o = c.createOscillator();
+      const g = c.createGain();
+      const t = c.currentTime + delay;
+      o.type = type;
+      o.frequency.setValueAtTime(freq, t);
+      if (slide) o.frequency.linearRampToValueAtTime(Math.max(40, freq + slide), t + dur);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); g.connect(c.destination);
+      o.start(t); o.stop(t + dur + 0.05);
+    }
+    function noise({ dur, vol = 0.06, hp = 1500, lp = 8000, delay = 0 }) {
+      const c = ensure(); if (!c) return;
+      const buf = c.createBuffer(1, Math.max(1, Math.floor(c.sampleRate * dur)), c.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+      const s = c.createBufferSource(); s.buffer = buf;
+      const g = c.createGain(); g.gain.value = vol;
+      const f1 = c.createBiquadFilter(); f1.type = 'highpass'; f1.frequency.value = hp;
+      const f2 = c.createBiquadFilter(); f2.type = 'lowpass';  f2.frequency.value = lp;
+      s.connect(f1); f1.connect(f2); f2.connect(g); g.connect(c.destination);
+      const t = c.currentTime + delay;
+      s.start(t); s.stop(t + dur);
+    }
+    return {
+      isMuted: () => muted,
+      setMuted: (m) => {
+        muted = !!m;
+        try { localStorage.setItem(SFX_MUTE_KEY, muted ? '1' : '0'); } catch (_) {}
+        if (muted && ctx) { try { ctx.suspend(); } catch (_) {} }
+        else if (ctx) { try { ctx.resume(); } catch (_) {} }
+      },
+      ensure,
+      fire:  (side) => tone({ freq: side === 'enemy' ? 660 : 880, dur: 0.10, type: 'square', vol: 0.05, slide: -200 }),
+      hit:   () => { tone({ freq: 240, dur: 0.14, type: 'sawtooth', vol: 0.10, slide: -120 }); noise({ dur: 0.10, vol: 0.05 }); },
+      block: () => { tone({ freq: 180, dur: 0.10, type: 'square',   vol: 0.06 }); noise({ dur: 0.06, vol: 0.04, hp: 600, lp: 3000 }); },
+      melee: () => { tone({ freq: 460, dur: 0.06, type: 'sawtooth', vol: 0.10 }); noise({ dur: 0.08, vol: 0.06 }); },
+      death: () => { tone({ freq: 320, dur: 0.30, type: 'triangle', vol: 0.10, slide: -240 }); },
+      lvUp:  () => {
+        tone({ freq: 600, dur: 0.10, type: 'triangle', vol: 0.10 });
+        tone({ freq: 800, dur: 0.10, type: 'triangle', vol: 0.10, delay: 0.10 });
+        tone({ freq: 1000, dur: 0.20, type: 'triangle', vol: 0.10, delay: 0.20 });
+      },
+      recruit: () => {
+        tone({ freq: 520, dur: 0.10, type: 'square', vol: 0.08 });
+        tone({ freq: 780, dur: 0.18, type: 'square', vol: 0.08, delay: 0.10 });
+      },
+      clear: () => {
+        [523, 659, 784, 1046].forEach((f, i) => tone({ freq: f, dur: 0.18, type: 'sine', vol: 0.10, delay: i * 0.13 }));
+      },
+      over: () => {
+        tone({ freq: 420, dur: 0.30, type: 'sawtooth', vol: 0.10, slide: -260 });
+        tone({ freq: 200, dur: 0.50, type: 'sawtooth', vol: 0.10, slide: -150, delay: 0.30 });
+      },
+      tap: () => tone({ freq: 1200, dur: 0.04, type: 'sine', vol: 0.04 }),
+    };
+  })();
 
   // ----- Stages ----------------------------------------------
   // 全 10 ステージ。グリッドサイズ・敵タイプ・敵数を段階的に上げる。
@@ -748,8 +864,30 @@
       };
       units.push(u);
     }
-    // 敵
-    for (const e of stage.enemies) {
+    // 敵 — 仕様: 敵数は常に味方より多い。ステージ既定の敵リストで足りない場合は
+    // 既定リストから循環してテンプレを取り、上半分の空きセルに増援を配置する。
+    const enemySpecs = stage.enemies.slice();
+    const playerCount = roster.length;
+    const taken = new Set();
+    for (const e of enemySpecs)        taken.add(`${e.x},${e.y}`);
+    for (const o of (stage.obstacles || [])) taken.add(`${o.x},${o.y}`);
+    for (const s of stage.playerSpawns) taken.add(`${s.x},${s.y}`);
+    let safety = 30;
+    while (enemySpecs.length <= playerCount && safety-- > 0) {
+      const tmpl = stage.enemies[enemySpecs.length % stage.enemies.length];
+      let placed = null;
+      const yMax = Math.max(2, Math.ceil(stage.h / 2));
+      outer:
+      for (let y = 0; y < yMax; y++) {
+        for (let x = 0; x < stage.w; x++) {
+          if (!taken.has(`${x},${y}`)) { placed = { x, y }; break outer; }
+        }
+      }
+      if (!placed) break; // 上半分が完全に埋まった — 諦め
+      taken.add(`${placed.x},${placed.y}`);
+      enemySpecs.push({ ...tmpl, x: placed.x, y: placed.y });
+    }
+    for (const e of enemySpecs) {
       units.push(makeUnit(e, 'enemy'));
     }
     // 障害物 (ステージ定義から実体を作る)
@@ -867,6 +1005,7 @@
       atk: shooter.ballAtk,
     };
     state.balls.push(ball);
+    SFX.fire(shooter.side);
     return ball;
   }
   // 球を全部 1 マス前進、衝突判定
@@ -884,12 +1023,12 @@
       if (obs) {
         if (obs.kind === 'wall') {
           log(state, `球が壁に弾かれた`);
-          flashHit(nx, ny);
+          flashHit(nx, ny); SFX.block();
           continue; // 球は消滅
         }
         // breakable: ダメージを与えて球は消滅 (穴があけば次以降の球が通る)
         obs.hp = Math.max(0, obs.hp - b.atk);
-        flashHit(nx, ny);
+        flashHit(nx, ny); SFX.block();
         if (obs.hp === 0) {
           log(state, `${obs.glyph || '障害物'} を破壊した!`);
           // XP も少し進呈 (撃った側がプレイヤーなら)
@@ -905,7 +1044,7 @@
         const dmg = Math.max(1, b.atk - target.def);
         target.hp = Math.max(0, target.hp - dmg);
         log(state, `${target.name} に球が命中! −${dmg}`);
-        flashHit(nx, ny);
+        flashHit(nx, ny); SFX.hit();
         // 撃った側がプレイヤーならXP
         const shooter = state.units.find(u => u.id === b.ownerId);
         if (shooter && shooter.side === 'player' && target.side === 'enemy') {
@@ -914,6 +1053,7 @@
         if (target.hp === 0) {
           target.alive = false;
           log(state, `💥 ${target.name} 撃破!`);
+          SFX.death();
           if (shooter && shooter.side === 'player' && target.side === 'enemy') {
             // 撃破ボーナス
             awardXP(state, shooter, Math.ceil(target.maxHp / 2));
@@ -954,12 +1094,13 @@
       log(state, `⚔ ${a.name} ↔ ${b.name} (${a.name}→${dmgA} / ${b.name}→${dmgB})`);
       flashHit(a.x, a.y);
       flashHit(b.x, b.y);
+      SFX.melee();
       // XP
       if (a.side === 'player') awardXP(state, a, dmgA);
       if (b.side === 'player') awardXP(state, b, dmgB);
       const aDead = a.hp === 0, bDead = b.hp === 0;
-      if (aDead) { a.alive = false; log(state, `💥 ${a.name} 撃破!`); }
-      if (bDead) { b.alive = false; log(state, `💥 ${b.name} 撃破!`); }
+      if (aDead) { a.alive = false; log(state, `💥 ${a.name} 撃破!`); SFX.death(); }
+      if (bDead) { b.alive = false; log(state, `💥 ${b.name} 撃破!`); SFX.death(); }
       // KO ボーナス + リクルート
       if (bDead && a.side === 'player') {
         awardXP(state, a, Math.ceil(b.maxHp / 2));
@@ -978,7 +1119,13 @@
   const recruitedQueue = [];
   function tryRecruit(state, deadEnemy, killCause) {
     const p = RECRUIT_PROB[killCause] ?? 0;
-    if (Math.random() >= p) return;
+    const pct = Math.round(p * 100);
+    const causeLabel = killCause === 'melee' ? '近接' : '球';
+    const roll = Math.random();
+    if (roll >= p) {
+      log(state, `🎲 リクルート判定 [${causeLabel} ${pct}%] → 失敗 (${deadEnemy.name})`);
+      return;
+    }
     // ベースステ (敵のスペック) を Lv.1 として再生成
     const baseSpec = STAGES[state.stageIdx].enemies.find(e => e.name === deadEnemy.name) || {
       name: deadEnemy.name, glyph: deadEnemy.glyph,
@@ -996,8 +1143,9 @@
       side: 'player',
     };
     recruitedQueue.push(recruit);
+    SFX.recruit();
     toast(`♻ ${recruit.name} が仲間になった!`, 'success');
-    log(state, `♻ ${recruit.name} が仲間に加わった (次のステージから)`);
+    log(state, `🎲 リクルート判定 [${causeLabel} ${pct}%] → 成功! ♻ ${recruit.name} が仲間に (次ステージから)`);
   }
 
   // ----- XP / Level -----------------------------------------
@@ -1031,48 +1179,51 @@
     if (gains.atk) parts.push(`攻+${gains.atk}`);
     if (gains.def) parts.push(`守+${gains.def}`);
     if (gains.spd) parts.push(`速+${gains.spd}`);
+    SFX.lvUp();
     toast(`🆙 ${unit.name} Lv.${unit.lv}!  ${parts.join(' / ')}`, 'success');
     log(state, `🆙 ${unit.name} Lv.${unit.lv} (${parts.join(', ')})`);
   }
 
   // ----- AI --------------------------------------------------
   function aiAct(state, unit) {
-    // 1. 射撃: 全プレイヤーのうち、8-vector 上で射線 (障害無し) が通る最寄りを選ぶ
-    const players = state.units.filter(u => u.alive && u.side === 'player');
-    let target = null, bestDist = Infinity;
-    for (const p of players) {
-      const dist = Math.max(Math.abs(p.x - unit.x), Math.abs(p.y - unit.y));
-      if (dist === 0) continue;
-      // 射線判定: dirTo() の方向で 1 マスずつ進めて、間にユニットが居なければ通る
-      const v = dirTo(unit.x, unit.y, p.x, p.y);
-      if (!v) continue;
+    // 1. 射撃: 8 方向すべてを走査し、その方向に球を撃ったときに最初に当たる
+    //    ものを調べる。プレイヤーに当たるなら、最も近距離のものを撃つ。
+    //    旧実装は dirTo() の単一ベクトルが厳密にプレイヤーマスへ着弾することを
+    //    要求していたため、グリッド上で正対していない限りほぼ撃たないバグが
+    //    あった (盤面 3×8 の典型配置でも撃たないケース多数)。
+    let best = null; // { target, dir, dist }
+    for (const v of DIR8) {
       let cx = unit.x + v.vx, cy = unit.y + v.vy;
-      let blocked = false;
-      while (cx !== p.x || cy !== p.y) {
-        if (cx < 0 || cx >= state.boardW || cy < 0 || cy >= state.boardH) { blocked = true; break; }
-        if (unitAt(state, cx, cy)) { blocked = true; break; }
-        if (obstacleAt(state, cx, cy)) { blocked = true; break; }
+      let dist = 0;
+      while (cx >= 0 && cx < state.boardW && cy >= 0 && cy < state.boardH) {
+        dist++;
+        if (obstacleAt(state, cx, cy)) break; // 球はここで止まる
+        const t = unitAt(state, cx, cy);
+        if (t) {
+          if (t.side !== unit.side && t.alive) {
+            if (!best || dist < best.dist) best = { target: t, dir: v, dist };
+          }
+          break; // 同方向で別ユニットの後ろは届かない
+        }
         cx += v.vx; cy += v.vy;
       }
-      if (blocked) continue;
-      if (dist < bestDist) { bestDist = dist; target = p; }
     }
-    if (target) {
-      fireBall(state, unit, target.x, target.y);
-      log(state, `${unit.name} が ${target.name} に向けて発射`);
+    if (best) {
+      fireBall(state, unit, best.target.x, best.target.y);
+      log(state, `🎯 ${unit.name} → ${best.target.name} に発射`);
     }
-    // 2. 移動: 1 マス、最寄りプレイヤー (target が居れば優先) に近づく
-    const goal = target || players.reduce((a, b) =>
+    // 2. 移動: 撃てる相手が居れば優先、いなければ最寄りプレイヤーへ
+    const players = state.units.filter(u => u.alive && u.side === 'player');
+    const goal = best ? best.target : players.reduce((a, b) =>
       !a ? b : (Math.hypot(b.x - unit.x, b.y - unit.y) < Math.hypot(a.x - unit.x, a.y - unit.y) ? b : a), null);
     if (goal) {
-      // 1 マス分の移動候補から、goal に最も近づくマスへ
       const cells = reachable(state, unit.x, unit.y, 1);
-      let best = null, bestD = Math.hypot(goal.x - unit.x, goal.y - unit.y);
+      let bestC = null, bestD = Math.hypot(goal.x - unit.x, goal.y - unit.y);
       for (const c of cells) {
         const d = Math.hypot(goal.x - c.x, goal.y - c.y);
-        if (d < bestD) { bestD = d; best = c; }
+        if (d < bestD) { bestD = d; bestC = c; }
       }
-      if (best) moveUnit(unit, best.x, best.y);
+      if (bestC) moveUnit(unit, bestC.x, bestC.y);
     }
   }
 
@@ -1135,6 +1286,7 @@
   function clearStage() {
     cleared = Math.max(cleared, state.stageIdx + 1);
     saveAll();
+    SFX.clear();
     const next = state.stageIdx + 1;
     const card = document.getElementById('overlay-card');
     if (next < STAGES.length) {
@@ -1207,6 +1359,7 @@
         localStorage.setItem(SAVE_KEY, JSON.stringify(s));
       }
     } catch (_) {}
+    SFX.over();
     const card = document.getElementById('overlay-card');
     const isFirst = state.stageIdx === 0;
     const backName = isFirst ? null : STAGES[state.stageIdx - 1].name;
@@ -1301,6 +1454,7 @@
     if (stagesDone > 0 || inProgress) {
       btns.push(`<button class="title-btn danger" id="ttl-restart">⟲ 最初からやり直す</button>`);
     }
+    btns.push(`<button class="title-btn secondary" id="ttl-rules">📜 ルール / 仕様</button>`);
     document.getElementById('title-progress').textContent =
       `— 進行: ${stagesDone} / ${STAGES.length} ステージ クリア —`;
     document.getElementById('title-buttons').innerHTML = btns.join('');
@@ -1319,11 +1473,87 @@
       saveAll();
       advanceToNext(state);
     };
-    if ($('ttl-new')) $('ttl-new').onclick = () => { hideTitle(); startFresh(); };
+    if ($('ttl-new')) $('ttl-new').onclick = () => { SFX.tap(); hideTitle(); startFresh(); };
     if ($('ttl-restart')) $('ttl-restart').onclick = () => {
       if (!confirm('セーブを消して最初からやり直しますか?')) return;
       hideTitle();
       startFresh();
+    };
+    if ($('ttl-rules')) $('ttl-rules').onclick = () => { SFX.ensure(); SFX.tap(); showRules(); };
+  }
+
+  // ルール / 仕様の解説モーダル。タイトル画面の上に重ねて出すので overlay を再利用。
+  function showRules() {
+    const card = document.getElementById('overlay-card');
+    card.classList.add('rules-card');
+    const meleePct = Math.round(RECRUIT_PROB.melee * 100);
+    const ballPct  = Math.round(RECRUIT_PROB.ball * 100);
+    card.innerHTML = `
+      <h2>📜 ルール / 仕様</h2>
+
+      <h3>1ターンの流れ</h3>
+      <ul>
+        <li>ユニットは <span class="kbd">速さ</span> 降順で行動 (同値はプレイヤー先行)</li>
+        <li><b>プレイヤー</b>: 移動 → 射撃 (or 射撃キャンセル)</li>
+        <li><b>敵 AI</b>: 射撃 (撃てる方向があれば) → 1マス前進</li>
+        <li>全員行動後: 飛行中の球が 1 マス進行 → 命中判定</li>
+        <li>その後: 隣接する敵対ペアで <b>接近戦</b> (同時ダメージ)</li>
+      </ul>
+
+      <h3>ステータス</h3>
+      <ul>
+        <li><b>HP</b>: 0 になると倒れる (永久退場)</li>
+        <li><b>攻</b>: 接近戦のダメージ <span class="kbd">max(1, 攻 − 守)</span></li>
+        <li><b>守</b>: 受けるダメージを軽減 (球も同じ式で計算)</li>
+        <li><b>速</b>: 行動順 + 1 ターンの移動マス数 <span class="kbd">ceil(速/3)</span> (1〜3)</li>
+        <li><b>球攻</b>: 球が当たった時のダメージ計算用 (接近戦とは別)</li>
+      </ul>
+
+      <h3>球 (遠隔攻撃)</h3>
+      <ul>
+        <li>射手から見た 8 方向のうち、対象に最も近いベクトルへ発射</li>
+        <li>1 ターンに 1 マスずつ直進。盤外で消滅</li>
+        <li>ユニットや障害物に当たると消滅。<b>壁</b>は球を弾く、<b>壊せる障害物</b>は HP が削れる</li>
+      </ul>
+
+      <h3>経験値・レベル</h3>
+      <ul>
+        <li>球 / 接近戦で<b>与えたダメージ量</b> = XP</li>
+        <li>敵を <b>とどめ</b> を刺すと <span class="kbd">敵 maxHP / 2</span> ボーナス</li>
+        <li>レベルアップで +3 ステ (アーキタイプの重みで HP/攻/守/速 にランダム配分)</li>
+        <li>レベル上限は 20</li>
+      </ul>
+
+      <h3 class="accent">リクルート (仲間化)</h3>
+      <ul>
+        <li>敵をとどめると確率判定:<br/>
+          <b>接近戦 KO</b>: <span class="accent">${meleePct}%</span> &nbsp;・&nbsp;
+          <b>球 KO</b>: <span class="accent">${ballPct}%</span></li>
+        <li>成功すると <b>次のステージ</b> から仲間として参戦 (Lv.1 から)</li>
+        <li>戦闘ログに <span class="kbd">🎲 リクルート判定 [近接 ${meleePct}%] → 成功/失敗</span> を表示</li>
+        <li><b>失敗ステージで仲間にした敵は失われる</b> (ロールバック扱い)</li>
+      </ul>
+
+      <h3>失敗時の挙動</h3>
+      <ul>
+        <li>味方が 1 体倒れたら、そのステージ中は <b>復活しない</b></li>
+        <li>クリアしてもそのユニットは <b>永久退場</b> (次ステージ以降に居なくなる)</li>
+        <li>全滅すると <b>1 ステージ前に戻される</b>:<br/>
+          失敗ステージ進入時の roster に巻き戻し (= 失敗ステージ中の死は元に戻る、それ以前の死は戻らない)。Lv は維持。</li>
+      </ul>
+
+      <h3>敵の数</h3>
+      <ul>
+        <li>常に <b>味方より多い</b> ようにステージ開始時に自動調整される</li>
+      </ul>
+
+      <div class="btn-row" style="margin-top:0.85rem;">
+        <button class="btn btn-secondary" id="rules-close">閉じる</button>
+      </div>`;
+    document.getElementById('overlay').classList.add('show');
+    document.getElementById('rules-close').onclick = () => {
+      document.getElementById('overlay').classList.remove('show');
+      card.classList.remove('rules-card');
     };
   }
   function hideTitle() {
@@ -1413,9 +1643,12 @@
     else if (state.phase === 'enemy-act') phaseLabel = `${u ? u.name : ''} (敵) 行動中…`;
     else if (state.phase === 'resolve') phaseLabel = `球と接近戦の解決中…`;
     else if (state.phase === 'turn-start') phaseLabel = `次のターン開始`;
+    const playerN = state.units.filter(uu => uu.side === 'player' && uu.alive).length;
+    const enemyN  = state.units.filter(uu => uu.side === 'enemy'  && uu.alive).length;
     statusEl.innerHTML = `
       <span class="turn">ステージ ${state.stageIdx + 1} / 「${state.stageName}」</span>
       <span>T${state.turn}</span>
+      <span>👤${playerN} / 👹${enemyN}</span>
       <span class="phase ${u && u.side === 'enemy' ? 'enemy' : ''}">${phaseLabel}</span>`;
     // board
     boardEl.innerHTML = '';
@@ -1597,6 +1830,18 @@
   function init() {
     const save = loadSave();
     cleared = (save && save.clearedStageIdx) || 0;
+    // ミュートボタンの状態を反映 + クリックハンドラ
+    const muteBtn = document.getElementById('mute-btn');
+    const refreshMute = () => { muteBtn.textContent = SFX.isMuted() ? '🔇' : '🔊'; };
+    refreshMute();
+    muteBtn.addEventListener('click', () => {
+      SFX.setMuted(!SFX.isMuted());
+      refreshMute();
+      SFX.tap();
+    });
+    // 初回ユーザー操作で AudioContext を解錠 (モバイル対策)
+    const unlock = () => { SFX.ensure(); document.removeEventListener('pointerdown', unlock); };
+    document.addEventListener('pointerdown', unlock);
     showTitle();
   }
   init();
