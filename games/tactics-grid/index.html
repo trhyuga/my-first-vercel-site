@@ -813,19 +813,23 @@
     { vx: 0, vy: 1  }, { vx: -1, vy: 1 }, { vx: -1, vy: 0 }, { vx: -1, vy: -1 },
   ];
   // 始点 → 終点の最寄り 8-vector
+  // (始点, 終点) → 8 方向の単位ベクトルのうち「向きが最も近い」ものを返す。
+  //
+  // 旧実装は dot(d, target) / |target| をスコアにしていた = 候補ベクトル d の
+  // 長さ (cardinal は 1, diagonal は √2) で割ってなかったため、cardinal と
+  // diagonal が同じ方向を狙うとき diagonal が常に同点 〜 上回ってしまい、
+  // 「真下を狙うと右下に飛ぶ」「真右を狙うと右上に飛ぶ」等のバグになっていた。
+  // 正しくは |d| でも割って cosine similarity にする必要がある。
   function dirTo(fromX, fromY, toX, toY) {
     const dx = toX - fromX, dy = toY - fromY;
     if (dx === 0 && dy === 0) return null;
-    const ang = Math.atan2(dy, dx);                              // -π..π
-    const idx = Math.round((ang + Math.PI) / (Math.PI / 4)) % 8; // 0..7
-    // idx 0 が「左」(π or -π) になるので回転を直す
-    // 簡単のため候補を直に総当たりで最も内積最大のベクトルを選ぶ
-    let bestIdx = 0, bestScore = -Infinity;
     const norm = Math.hypot(dx, dy) || 1;
+    let bestIdx = 0, bestScore = -Infinity;
     for (let i = 0; i < DIR8.length; i++) {
       const d = DIR8[i];
-      const score = (d.vx * dx + d.vy * dy) / (norm);
-      if (score > bestScore) { bestScore = score; bestIdx = i; }
+      const dnorm = Math.hypot(d.vx, d.vy); // 1 or √2
+      const cos = (d.vx * dx + d.vy * dy) / (norm * dnorm);
+      if (cos > bestScore) { bestScore = cos; bestIdx = i; }
     }
     return DIR8[bestIdx];
   }
@@ -1743,7 +1747,7 @@
   function initialRoster() {
     return [{
       id: 'P-hero', name: '勇者', glyph: '🛡️',
-      maxHp: 18, atk: 5, def: 1, spd: 3, ballAtk: 3,
+      maxHp: 18, atk: 5, def: 1, spd: 3, ballAtk: 5,
       archetype: 'balanced', lv: 1, xp: 0,
     }];
   }
