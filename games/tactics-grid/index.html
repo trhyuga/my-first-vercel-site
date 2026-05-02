@@ -1103,6 +1103,12 @@
       }
       const target = unitAt(state, nx, ny);
       if (target && target.id !== b.ownerId) {
+        // 同陣営ユニットは素通り (友軍誤射はなし)。同じセルで重なるが、次ターンに
+        // 球が前進して解消される。
+        if (target.side === b.side) {
+          survived.push(b);
+          continue;
+        }
         const dmg = Math.max(1, b.atk - target.def);
         target.hp = Math.max(0, target.hp - dmg);
         log(state, `${target.name} に球が命中! −${dmg}`);
@@ -1291,13 +1297,17 @@
       let dist = 0;
       while (cx >= 0 && cx < state.boardW && cy >= 0 && cy < state.boardH) {
         dist++;
-        if (obstacleAt(state, cx, cy)) break; // 球はここで止まる
+        if (obstacleAt(state, cx, cy)) break; // 球は障害物で止まる
         const t = unitAt(state, cx, cy);
         if (t) {
-          if (t.side !== unit.side && t.alive) {
-            if (!best || dist < best.dist) best = { target: t, dir: v, dist };
+          if (t.side === unit.side) {
+            // 自陣ユニットは球が素通りするので射線は遮らない (= 進める)
+            cx += v.vx; cy += v.vy;
+            continue;
           }
-          break; // 同方向で別ユニットの後ろは届かない
+          // 敵 (= 撃つべき対象) を発見 → そこで止める
+          if (t.alive && (!best || dist < best.dist)) best = { target: t, dir: v, dist };
+          break;
         }
         cx += v.vx; cy += v.vy;
       }
@@ -1618,9 +1628,11 @@
 
       <h3>球 (遠隔攻撃)</h3>
       <ul>
-        <li>射手から見た 8 方向のうち、対象に最も近いベクトルへ発射</li>
+        <li>aim 中の <b>黄色マス</b> をタップして発射。撃てるのは射手から見た 8 方向 (上下左右 + 斜め) のレイ上のセルだけ</li>
         <li>1 ターンに 1 マスずつ直進。盤外で消滅</li>
-        <li>ユニットや障害物に当たると消滅。<b>壁</b>は球を弾く、<b>壊せる障害物</b>は HP が削れる</li>
+        <li>ダメージ <span class="kbd">max(1, 球攻 − 守)</span></li>
+        <li><b>味方を素通りする</b> (友軍誤射なし)。敵は止める</li>
+        <li><b>壁</b>は球を弾いて消滅、<b>壊せる障害物</b>は HP が削れて球も消滅</li>
       </ul>
 
       <h3>経験値・レベル</h3>
@@ -1778,16 +1790,16 @@
       for (const c of legalMoveCells(state, u)) moveSet.add(c.x + ',' + c.y);
     }
     if (state.phase === 'aim' && u && u.side === 'player') {
-      // 射撃可能 = 8 方向レイの上のセルだけ。各方向に走査し、ユニット / 障害物 /
-      // 盤外で止まる前のセルをすべて aim-target に加える。これで「タップした
-      // マスに球が確実に通る」保証ができる (旧: 全マスを許可していたので、
-      // 8 方向に乗らないタップは最寄り方向にスナップしてしまっていた)。
+      // 射撃可能 = 8 方向レイの上のセル。球は自陣ユニットを素通りするので、
+      // 味方を超えた先のマスも aim 可能 (= 黄色) として表示する。
+      // 障害物または敵で止まる (障害物 / 敵のマスは含めるが、その先は不可)。
       for (const v of DIR8) {
         let cx = u.x + v.vx, cy = u.y + v.vy;
         while (cx >= 0 && cx < state.boardW && cy >= 0 && cy < state.boardH) {
           aimSet.add(cx + ',' + cy);
-          // ユニット or 障害物にぶつかったらそのセルは含めるが、その先には進まない
-          if (unitAt(state, cx, cy) || obstacleAt(state, cx, cy)) break;
+          if (obstacleAt(state, cx, cy)) break;
+          const tt = unitAt(state, cx, cy);
+          if (tt && tt.side !== u.side) break; // 敵で止まる (味方は素通り)
           cx += v.vx; cy += v.vy;
         }
       }
