@@ -169,6 +169,18 @@
       padding: 0 3px; border-radius: 5px;
       line-height: 1.4;
     }
+    /* 勇者マーク: ユニット上部の小さな冠 — 「絶対に死なせてはいけない」サイン */
+    .unit.hero .crown {
+      position: absolute;
+      top: -10px; left: 50%;
+      transform: translateX(-50%);
+      font-size: calc(var(--cell) * 0.32);
+      filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35));
+      pointer-events: none;
+    }
+    .unit.hero .glyph {
+      filter: drop-shadow(0 0 3px rgba(245,158,11,0.85)) drop-shadow(0 1px 1px rgba(0,0,0,0.2));
+    }
     /* 球: 弾丸/水滴形のシルエットを進行方向に回転して描画。
        SVG の path で先端が尖った雫を作り、--rot プロパティで 8 方向 (0/45/90/...)
        に回す。色は陣営別 (青 = 味方 / 赤 = 敵)、白いグロー + 落とし影で
@@ -224,6 +236,14 @@
     .roster-row .fresh {
       display: inline-block;
       background: #f59e0b; color: #fff;
+      font-size: 0.6rem; font-weight: 700;
+      padding: 1px 5px; border-radius: 5px;
+      vertical-align: 2px;
+    }
+    .roster-row .hero-tag {
+      display: inline-block;
+      background: linear-gradient(135deg, #b45309 0%, #d97706 100%);
+      color: #fff;
       font-size: 0.6rem; font-weight: 700;
       padding: 1px 5px; border-radius: 5px;
       vertical-align: 2px;
@@ -482,6 +502,8 @@
   // ----- Config -----------------------------------------------
   const SAVE_KEY = 'games.tactics-grid.v1';
   const SFX_MUTE_KEY = 'games.tactics-grid.mute';
+  // 勇者は守らないといけない主人公 (このユニットが死んだ瞬間にステージ失敗)
+  const HERO_ID = 'P-hero';
   const RECRUIT_PROB = { melee: 0.30, ball: 0.20 };
   const LV_CAP = 20;
   // 2次関数で「上がるほど上がりにくい」カーブ
@@ -1376,8 +1398,12 @@
       saveAll();
       const enemyAlive = state.units.some(u => u.alive && u.side === 'enemy');
       const playerAlive = state.units.some(u => u.alive && u.side === 'player');
+      // 勇者は守らないといけないユニット。state.units に存在し alive=false なら
+      // ステージ失敗扱い (= 全滅と同じ扱いにして 1 ステージ戻る)。
+      const hero = state.units.find(u => u.id === HERO_ID);
+      const heroDead = !!(hero && !hero.alive);
       if (!enemyAlive) return clearStage();
-      if (!playerAlive) return gameOver();
+      if (!playerAlive || heroDead) return gameOver(heroDead ? 'hero' : 'wipe');
       state.turn += 1;
       startTurn(state);
     }, 380);
@@ -1447,7 +1473,8 @@
       };
     }
   }
-  function gameOver() {
+  function gameOver(reason) {
+    // reason: 'hero' = 勇者が倒れた / 'wipe' (default) = 全員倒れた
     // 全滅した state を save に残すと次回起動で「続きから」ですぐゲームオーバーに
     // 戻るので、currentStage は捨てて roster / cleared だけ残す
     try {
@@ -1462,9 +1489,13 @@
     const card = document.getElementById('overlay-card');
     const isFirst = state.stageIdx === 0;
     const backName = isFirst ? null : STAGES[state.stageIdx - 1].name;
+    const heading = reason === 'hero' ? '💀 勇者 倒れる...' : '💀 全滅...';
+    const sub = reason === 'hero'
+      ? `${state.stageName} 失敗 (勇者が倒れた)`
+      : `${state.stageName} 失敗`;
     card.innerHTML = `
-      <h2>💀 全滅...</h2>
-      <p>${state.stageName} 失敗</p>
+      <h2>${heading}</h2>
+      <p>${sub}</p>
       ${isFirst
         ? `<p style="font-size:0.78rem;color:#475569;line-height:1.55;">このステージをやり直します。<br/>(生存していたユニットの Lv は維持)</p>`
         : `<p style="font-size:0.78rem;color:#475569;line-height:1.55;">1 ステージ戻ります → 「<b>${backName}</b>」<br/>倒れたユニットは復活しません。生存者の Lv は維持されます。</p>`}
@@ -1669,11 +1700,18 @@
         <li><b>失敗ステージで仲間にした敵は失われる</b> (ロールバック扱い)</li>
       </ul>
 
+      <h3 class="accent">勇者は絶対に守れ</h3>
+      <ul>
+        <li>盤上で <span class="kbd">👑</span> マークが付いている <b>勇者</b> は主人公</li>
+        <li><b>勇者が倒れた瞬間にステージ失敗</b> (他の仲間が生きていても負け扱い)</li>
+        <li>失敗の挙動は通常の全滅と同じ (1 ステージ戻る / Lv 維持)</li>
+      </ul>
+
       <h3>失敗時の挙動</h3>
       <ul>
         <li>味方が 1 体倒れたら、そのステージ中は <b>復活しない</b></li>
         <li>クリアしてもそのユニットは <b>永久退場</b> (次ステージ以降に居なくなる)</li>
-        <li>全滅すると <b>1 ステージ前に戻される</b>:<br/>
+        <li>全滅 or 勇者死亡 で <b>1 ステージ前に戻される</b>:<br/>
           失敗ステージ進入時の roster に巻き戻し (= 失敗ステージ中の死は元に戻る、それ以前の死は戻らない)。Lv は維持。</li>
       </ul>
 
@@ -1746,7 +1784,7 @@
   }
   function initialRoster() {
     return [{
-      id: 'P-hero', name: '勇者', glyph: '🛡️',
+      id: HERO_ID, name: '勇者', glyph: '🛡️',
       maxHp: 18, atk: 5, def: 1, spd: 3, ballAtk: 5,
       archetype: 'balanced', lv: 1, xp: 0,
     }];
@@ -1835,9 +1873,12 @@
           const div = document.createElement('div');
           div.className = 'unit ' + onCell.side;
           if (u && onCell.id === u.id) div.classList.add('active');
+          if (onCell.id === HERO_ID) div.classList.add('hero');
           const lvTag = onCell.lv ? `<span class="lvl">L${onCell.lv}</span>` : '';
+          const heroCrown = onCell.id === HERO_ID ? '<span class="crown">👑</span>' : '';
           div.innerHTML = `
             <span class="glyph">${onCell.glyph}</span>
+            ${heroCrown}
             ${lvTag}
             <span class="hpbar"><i style="width:${(onCell.hp / onCell.maxHp) * 100}%"></i></span>`;
           cell.appendChild(div);
@@ -1876,11 +1917,12 @@
           ? `<div class="lvbar"><i style="width:${(uu.xp / xpToNext(uu.lv)) * 100}%"></i></div>`
           : '';
         const freshTag = uu.side === 'player' && uu.isFresh ? ' <span class="fresh">新</span>' : '';
+        const heroTag = uu.id === HERO_ID ? ' <span class="hero-tag">👑勇者</span>' : '';
         return `<div class="${cls.join(' ')}">
           <span class="glyph">${uu.glyph}</span>
           <div style="flex:1;">
             <div style="display:flex; gap:0.3rem; align-items:baseline;">
-              <span class="name">${uu.name}${freshTag}</span>
+              <span class="name">${uu.name}${heroTag}${freshTag}</span>
               <span class="stats">攻${uu.atk}/守${uu.def}/速${uu.spd}${uu.lv ? ` Lv${uu.lv}` : ''}</span>
             </div>
             ${lvBar}
