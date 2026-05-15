@@ -56,60 +56,71 @@
       line-height: 1.55;
       margin: 0;
     }
-    /* XML を「タグそのまま」ではなく、構造を可視化した整形ビューで表示する。
-       - 要素ごとに左罫線でネストを示す
-       - タグ名はカードヘッダーとして小さく色付き表示
-       - 属性は ヘッダ内に key=value のチップで並べる
-       - 末端テキストは普通の本文として読めるサイズに */
-    .xml-doc {
-      font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
-      font-size: 14px;
-      line-height: 1.6;
+    /* XML を A4 ドキュメントっぽく整形して表示する。
+       要素名 = 見出し / 属性 = 小さなメタ行 / テキスト = 本文。
+       見た目はそのまま @media print 経由で PDF にも書き出される。 */
+    .xml-page {
+      font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif;
+      font-size: 11pt;
+      line-height: 1.75;
       color: #0f172a;
+      background: #fff;
+      padding: 0.8rem 0.9rem 1.2rem;
+      max-width: 190mm;
+      margin: 0 auto;
+      box-sizing: border-box;
     }
-    .xml-elt {
-      margin: 0.4rem 0;
-      padding: 0.1rem 0 0.1rem 0.7rem;
-      border-left: 2px solid #cbd5e1;
-    }
-    .xml-elt > .xml-head {
-      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem;
-      font-size: 0.8rem;
-      margin-bottom: 0.15rem;
-    }
-    .xml-elt > .xml-head .xml-tag {
+    .xml-page h1, .xml-page h2, .xml-page h3, .xml-page h4 {
+      color: #0f172a;
       font-weight: 700;
-      color: #0369a1;
+      line-height: 1.3;
+      margin: 1.1em 0 0.3em;
+      page-break-after: avoid;
+    }
+    .xml-page h1 {
+      font-size: 1.6rem;
+      border-bottom: 2px solid #0ea5e9;
+      padding-bottom: 0.25em;
+      margin-top: 0;
       letter-spacing: 0.02em;
     }
-    .xml-elt > .xml-head .xml-attr {
-      font-size: 0.72rem;
-      color: #475569;
-      background: #f1f5f9;
-      padding: 1px 6px;
-      border-radius: 4px;
+    .xml-page h2 {
+      font-size: 1.25rem;
+      border-bottom: 1px solid #cbd5e1;
+      padding-bottom: 0.15em;
     }
-    .xml-elt > .xml-head .xml-attr b { color: #0f172a; font-weight: 600; }
-    .xml-elt > .xml-text {
-      font-size: 0.95rem;
-      color: #0f172a;
-      padding: 0.1rem 0 0.2rem;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .xml-elt.empty > .xml-head { color: #94a3b8; font-style: italic; }
-    .xml-comment {
-      font-style: italic;
-      color: #94a3b8;
+    .xml-page h3 { font-size: 1.05rem; color: #1e293b; }
+    .xml-page h4 { font-size: 0.95rem; color: #334155; }
+    .xml-page p  { margin: 0.35em 0; }
+    .xml-page .xml-meta {
       font-size: 0.78rem;
-      margin: 0.2rem 0;
+      color: #64748b;
+      font-style: italic;
+      margin: 0 0 0.5em;
     }
-    /* root element はインデント不要 */
-    .xml-doc > .xml-elt:first-child {
-      border-left: 0;
-      padding-left: 0;
+    .xml-page .xml-leaf b { color: #0369a1; font-weight: 700; }
+    .xml-page .xml-list {
+      margin: 0.4em 0 0.6em 1.2em;
+      padding: 0;
     }
-    /* 印刷時もこの整形ビューがそのまま出る。CSS の borderL も保持される。 */
+    .xml-page .xml-list li {
+      margin: 0.15em 0;
+      line-height: 1.6;
+    }
+    .xml-page .xml-comment {
+      color: #94a3b8;
+      font-style: italic;
+      font-size: 0.85rem;
+      margin: 0.4em 0;
+    }
+    /* 印刷時: @page で A4 マージンが効くので、内部の margin/padding は最小に */
+    @media print {
+      .xml-page {
+        padding: 0;
+        max-width: none;
+        font-size: 10.5pt;
+      }
+    }
 
     /* When printing, only the preview host should appear. The @page rule
        forces A4 portrait with tight margins so the browser's Print→PDF
@@ -341,40 +352,91 @@
       previewHost.innerHTML = cleaned;
     }
 
-    // XML を再帰的に走査し、構造を可視化した HTML に変換する。
-    // 要素 → .xml-elt カード (ヘッダにタグ名と属性チップ、本体に子要素 or テキスト)
-    // テキスト/コメントは独立した行として表示。タグの記号 (< > /) は一切出さず、
-    // 「タグ名 = ラベル」「属性 = チップ」「内容 = 本文」の 3 種だけで表現する。
-    function xmlNodeToHtml(node) {
-      if (node.nodeType === 3) { // text
-        const t = node.nodeValue.replace(/\s+/g, ' ').trim();
-        return t ? '<div class="xml-text">' + escapeHtml(t) + '</div>' : '';
+    // XML を「読める A4 ドキュメント」相当の HTML へ変換する。
+    //   - 子を持つ要素 → 見出し (深さに応じて h1〜h4) + 属性メタ行 + 中身を再帰
+    //   - テキストのみの末端 → 「<b>タグ名</b>: 本文」段落
+    //   - 同名 / 属性なし / テキストのみ の連続兄弟 → <ul> リストにまとめてタグ名を省略
+    //   - 完全に空 → 属性があれば 1 行で出す / 無ければ省略
+    // 結果は通常 HTML なので @media print の A4 設定にそのまま乗る。
+    function attrsToInline(attrs) {
+      if (!attrs.length) return '';
+      return attrs.map(a => escapeHtml(a.name) + ': ' + escapeHtml(a.value)).join(', ');
+    }
+    function attrsToMetaLine(attrs) {
+      if (!attrs.length) return '';
+      return '<p class="xml-meta">' + attrs.map(a =>
+        escapeHtml(a.name) + ': ' + escapeHtml(a.value)
+      ).join(' ・ ') + '</p>';
+    }
+    function isTextOnlyNoAttr(node, requireName) {
+      if (!node || node.nodeType !== 1) return false;
+      if (requireName && node.nodeName !== requireName) return false;
+      if (node.attributes && node.attributes.length > 0) return false;
+      const cs = Array.from(node.childNodes).filter(x => x.nodeType !== 3 || x.nodeValue.trim());
+      return cs.length === 1 && cs[0].nodeType === 3;
+    }
+    function xmlElementToHtml(node, depth) {
+      // text
+      if (node.nodeType === 3 || node.nodeType === 4) { // text or CDATA
+        const t = String(node.nodeValue || '').replace(/\s+/g, ' ').trim();
+        return t ? '<p>' + escapeHtml(t) + '</p>' : '';
       }
-      if (node.nodeType === 8) { // comment
-        return '<div class="xml-comment">※ ' + escapeHtml(String(node.nodeValue).trim()) + '</div>';
+      // comment
+      if (node.nodeType === 8) {
+        const t = String(node.nodeValue || '').trim();
+        return t ? '<p class="xml-comment">※ ' + escapeHtml(t) + '</p>' : '';
       }
       if (node.nodeType !== 1) return '';
-      const attrs = Array.from(node.attributes || []).map(a =>
-        '<span class="xml-attr"><b>' + escapeHtml(a.name) + '</b>: ' + escapeHtml(a.value) + '</span>'
-      ).join('');
-      const head = '<div class="xml-head">' +
-        '<span class="xml-tag">' + escapeHtml(node.nodeName) + '</span>' + attrs +
-        '</div>';
+
+      const tagName = node.nodeName;
+      const attrs = Array.from(node.attributes || []);
       const children = Array.from(node.childNodes)
         .filter(n => n.nodeType !== 3 || n.nodeValue.trim());
+
+      // 末端 (テキスト 1 件のみ)
+      if (children.length === 1 && (children[0].nodeType === 3 || children[0].nodeType === 4)) {
+        const t = String(children[0].nodeValue || '').replace(/\s+/g, ' ').trim();
+        const inline = attrs.length ? ' <span class="xml-meta">(' + attrsToInline(attrs) + ')</span>' : '';
+        return '<p class="xml-leaf"><b>' + escapeHtml(tagName) + '</b>' + inline + ': ' + escapeHtml(t) + '</p>';
+      }
+      // 完全に空
       if (children.length === 0) {
-        return '<div class="xml-elt empty">' + head + '</div>';
+        if (attrs.length) {
+          return '<p class="xml-leaf"><b>' + escapeHtml(tagName) + '</b> <span class="xml-meta">' + attrsToInline(attrs) + '</span></p>';
+        }
+        return '';
       }
-      // 子がテキスト 1 件だけ → ヘッダ + 本文だけ (=「ラベル: 内容」の見え方)
-      if (children.length === 1 && children[0].nodeType === 3) {
-        const t = children[0].nodeValue.replace(/\s+/g, ' ').trim();
-        return '<div class="xml-elt">' + head +
-          '<div class="xml-text">' + escapeHtml(t) + '</div>' +
-          '</div>';
-      }
+
+      // コンテナ: 見出し + メタ + 再帰
+      const hLevel = Math.min(4, Math.max(1, depth));
       let body = '';
-      for (const c of children) body += xmlNodeToHtml(c);
-      return '<div class="xml-elt">' + head + body + '</div>';
+      let i = 0;
+      while (i < children.length) {
+        const cur = children[i];
+        // 連続する 同名 / 属性なし / テキストのみ の兄弟 → <ul> に集約
+        if (cur.nodeType === 1 && isTextOnlyNoAttr(cur)) {
+          const group = [];
+          while (i < children.length && isTextOnlyNoAttr(children[i], cur.nodeName)) {
+            group.push(children[i]);
+            i++;
+          }
+          if (group.length >= 2) {
+            body += '<ul class="xml-list">';
+            for (const g of group) {
+              const t = String(g.firstChild.nodeValue || '').replace(/\s+/g, ' ').trim();
+              body += '<li>' + escapeHtml(t) + '</li>';
+            }
+            body += '</ul>';
+            continue;
+          }
+          // 1 件しか連続しなかった場合は通常レンダリングに戻す
+          i -= group.length;
+        }
+        body += xmlElementToHtml(children[i], depth + 1);
+        i++;
+      }
+      return '<h' + hLevel + '>' + escapeHtml(tagName) + '</h' + hLevel + '>' +
+        attrsToMetaLine(attrs) + body;
     }
 
     async function renderXml(file) {
@@ -384,9 +446,8 @@
         const doc = new DOMParser().parseFromString(raw, 'application/xml');
         const err = doc.querySelector('parsererror');
         if (err) throw new Error(err.textContent || 'XML parse error');
-        html = '<div class="xml-doc">' + xmlNodeToHtml(doc.documentElement) + '</div>';
+        html = '<div class="xml-page">' + xmlElementToHtml(doc.documentElement, 1) + '</div>';
       } catch (e) {
-        // パース失敗時のみ raw を表示 (BOM や 不正タグ など)。注釈を添える。
         html = '<p class="convert-hint" style="color:#b91c1c;">XML として解釈できなかったので、生のテキストを表示します。<br>' +
           escapeHtml(String(e.message || e)) + '</p>' +
           '<pre>' + escapeHtml(raw) + '</pre>';
