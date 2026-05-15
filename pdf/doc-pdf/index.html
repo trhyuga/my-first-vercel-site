@@ -56,6 +56,13 @@
       line-height: 1.55;
       margin: 0;
     }
+    .preview-host pre.xml-pre {
+      background: #f8fafc;
+      padding: 0.6rem 0.7rem;
+      border-radius: 8px;
+      font-size: 12px;
+      color: #0f172a;
+    }
 
     /* When printing, only the preview host should appear. The @page rule
        forces A4 portrait with tight margins so the browser's Print→PDF
@@ -115,16 +122,17 @@
     <!-- 資料 → PDF -->
     <section id="to-pdf">
       <div class="dropzone" id="dzTo">
-        <input type="file" id="fiTo" accept=".docx,.xlsx,.txt,.md,.html,.htm,.csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
+        <input type="file" id="fiTo" accept=".docx,.xlsx,.txt,.md,.html,.htm,.csv,.xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/xml,text/xml" hidden />
         <div class="icon">📄</div>
         <p><b>タップして資料を選択</b></p>
-        <p class="sub">Word (.docx) / Excel (.xlsx) / テキスト / HTML / CSV</p>
+        <p class="sub">Word (.docx) / Excel (.xlsx) / テキスト / HTML / CSV / XML</p>
         <div class="fmt-list">
           <span class="fmt-chip">DOCX</span>
           <span class="fmt-chip">XLSX</span>
           <span class="fmt-chip">CSV</span>
           <span class="fmt-chip">TXT / MD</span>
           <span class="fmt-chip">HTML</span>
+          <span class="fmt-chip">XML</span>
         </div>
       </div>
 
@@ -157,7 +165,7 @@
         <input type="file" id="fiFrom" accept="application/pdf" hidden />
         <div class="icon">📕</div>
         <p><b>タップしてPDFを選択</b></p>
-        <p class="sub">テキストを抽出して Word (.docx) または テキスト (.txt) で保存</p>
+        <p class="sub">テキストを抽出して Word (.docx) / テキスト (.txt) / XML (.xml) で保存</p>
       </div>
 
       <div id="fromControls" style="display:none;" class="controls">
@@ -170,6 +178,7 @@
           <select id="outFormat">
             <option value="docx" selected>Word (.docx)</option>
             <option value="txt">テキスト (.txt)</option>
+            <option value="xml">XML (.xml)</option>
           </select>
         </div>
         <div class="field">
@@ -285,6 +294,58 @@
       previewHost.innerHTML = cleaned;
     }
 
+    // Pretty-print an XML node tree recursively. We re-walk because most XML
+    // we see in the wild is single-line / minified, and dumping the raw text
+    // makes for an unreadable preview / print.
+    function prettyXml(doc) {
+      function walk(node, level) {
+        const pad = '  '.repeat(level);
+        if (node.nodeType === 3) { // text
+          const t = node.nodeValue.replace(/\s+/g, ' ').trim();
+          return t ? pad + t + '\n' : '';
+        }
+        if (node.nodeType === 8) { // comment
+          return pad + '<!-- ' + node.nodeValue.trim() + ' -->\n';
+        }
+        if (node.nodeType !== 1) return '';
+        const attrs = Array.from(node.attributes || [])
+          .map(a => ` ${a.name}="${String(a.value).replace(/"/g, '&quot;')}"`)
+          .join('');
+        const children = Array.from(node.childNodes)
+          .filter(n => n.nodeType !== 3 || n.nodeValue.trim());
+        if (children.length === 0) {
+          return `${pad}<${node.nodeName}${attrs}/>\n`;
+        }
+        // 子がテキスト 1 件だけならインライン化
+        if (children.length === 1 && children[0].nodeType === 3) {
+          const t = children[0].nodeValue.replace(/\s+/g, ' ').trim();
+          return `${pad}<${node.nodeName}${attrs}>${t}</${node.nodeName}>\n`;
+        }
+        let out = `${pad}<${node.nodeName}${attrs}>\n`;
+        for (const c of children) out += walk(c, level + 1);
+        out += `${pad}</${node.nodeName}>\n`;
+        return out;
+      }
+      const version = doc.xmlVersion || '1.0';
+      const encoding = (doc.xmlEncoding || 'UTF-8').toUpperCase();
+      return `<?xml version="${version}" encoding="${encoding}"?>\n` + walk(doc.documentElement, 0);
+    }
+
+    async function renderXml(file) {
+      const raw = await file.text();
+      let body;
+      try {
+        const doc = new DOMParser().parseFromString(raw, 'application/xml');
+        const err = doc.querySelector('parsererror');
+        if (err) throw new Error(err.textContent || 'XML parse error');
+        body = prettyXml(doc);
+      } catch (_) {
+        // パースに失敗したら生のテキストを出す (BOM や不正タグなど)
+        body = raw;
+      }
+      previewHost.innerHTML = '<pre class="xml-pre">' + escapeHtml(body) + '</pre>';
+    }
+
     async function handleToFile(file) {
       clearBox(toMsg);
       toSrcName.textContent = file.name;
@@ -298,6 +359,7 @@
         else if (ext === 'xlsx' || ext === 'xls') await renderXlsx(file);
         else if (ext === 'csv') await renderCsv(file);
         else if (ext === 'html' || ext === 'htm') await renderHtml(file);
+        else if (ext === 'xml') await renderXml(file);
         else if (ext === 'txt' || ext === 'md') await renderText(file);
         else {
           throw new Error('対応していない形式です (.' + ext + ')');
@@ -399,6 +461,31 @@
       return pages;
     }
 
+    // PDF から抽出したテキストを単純な XML 構造で書き出す。1 ページ = <page>
+    // 1 行 = <line>。タグ内のテキストは &/</>/" を実体参照に置換。
+    function xmlEscape(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+    }
+    function buildXmlBlob(pages) {
+      let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<document>\n';
+      pages.forEach((text, i) => {
+        xml += `  <page number="${i + 1}">\n`;
+        const lines = text.split(/\r?\n/);
+        for (const line of lines) {
+          if (line.trim() === '') continue;
+          xml += `    <line>${xmlEscape(line)}</line>\n`;
+        }
+        xml += `  </page>\n`;
+      });
+      xml += '</document>\n';
+      return new Blob([xml], { type: 'application/xml;charset=utf-8' });
+    }
+
     function buildDocxBlob(pages) {
       // `docx` here is the document-building library (overwrote docx-preview's
       // global above; docx-preview was saved to window.docxPreview).
@@ -442,6 +529,9 @@
           const body = pages.map((t, i) => `=== ページ ${i + 1} ===\n${t}`).join('\n\n');
           const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
           download(blob, base + '.txt');
+        } else if (fmt === 'xml') {
+          const blob = buildXmlBlob(pages);
+          download(blob, base + '.xml');
         } else {
           const blob = await buildDocxBlob(pages);
           download(blob, base + '.docx');
