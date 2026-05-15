@@ -99,19 +99,81 @@
       margin: 0 0 0.5em;
     }
     .xml-page .xml-leaf b { color: #0369a1; font-weight: 700; }
-    .xml-page .xml-list {
-      margin: 0.4em 0 0.6em 1.2em;
-      padding: 0;
-    }
-    .xml-page .xml-list li {
-      margin: 0.15em 0;
-      line-height: 1.6;
-    }
+    .xml-page .xml-list { margin: 0.4em 0 0.6em 1.2em; padding: 0; }
+    .xml-page .xml-list li { margin: 0.15em 0; line-height: 1.6; }
     .xml-page .xml-comment {
-      color: #94a3b8;
-      font-style: italic;
-      font-size: 0.85rem;
-      margin: 0.4em 0;
+      color: #94a3b8; font-style: italic;
+      font-size: 0.85rem; margin: 0.4em 0;
+    }
+    /* セマンティックなドキュメント部分 (letter / memo / article 風) */
+    .xml-page section.xml-front {
+      border-bottom: 1px solid #cbd5e1;
+      padding-bottom: 0.6rem;
+      margin: 0 0 1rem;
+    }
+    .xml-page section.xml-body { margin: 1rem 0; }
+    .xml-page section.xml-back {
+      border-top: 1px solid #cbd5e1;
+      padding-top: 0.6rem;
+      margin: 1rem 0 0;
+      font-size: 0.95rem;
+    }
+    .xml-page header.xml-head, .xml-page header.xml-header {
+      margin: 0 0 0.8rem;
+    }
+    .xml-page footer.xml-footer {
+      margin: 1rem 0 0;
+      font-size: 0.9rem;
+      color: #475569;
+    }
+    /* ラベル付きフィールド行 (TO / FROM / SUBJECT / DATE 等) */
+    .xml-page .xml-field {
+      display: flex; flex-wrap: wrap; align-items: baseline;
+      gap: 0.6em; margin: 0.25em 0;
+    }
+    .xml-page .xml-field-label {
+      font-weight: 700; color: #0369a1;
+      min-width: 4.5em;
+      font-size: 0.85em;
+      letter-spacing: 0.02em;
+    }
+    .xml-page .xml-field-value { flex: 1; min-width: 0; word-break: break-word; }
+    /* 手紙系の決まり文句行 */
+    .xml-page p.xml-salutation { margin: 1.2em 0 0.4em; }
+    .xml-page p.xml-greeting   { margin: 1.2em 0 0.4em; }
+    .xml-page p.xml-closing    { margin: 1.5em 0 0.3em; text-align: right; }
+    .xml-page p.xml-signature  { margin: 0.2em 0 1em; text-align: right; font-weight: 600; }
+    .xml-page p.xml-dateline   { text-align: right; font-size: 0.92rem; color: #475569; margin: 0.3em 0 0.6em; }
+    .xml-page address          { font-style: normal; margin: 0.4em 0; white-space: pre-wrap; }
+    /* リスト / 表 / 引用 / コード */
+    .xml-page ul, .xml-page ol { margin: 0.5em 0 0.8em 1.5em; padding: 0; }
+    .xml-page li { margin: 0.18em 0; line-height: 1.65; }
+    .xml-page table {
+      border-collapse: collapse; margin: 0.8em 0; width: 100%;
+    }
+    .xml-page table th, .xml-page table td {
+      border: 1px solid #cbd5e1; padding: 4px 8px;
+      text-align: left; vertical-align: top;
+      font-size: 0.95em;
+    }
+    .xml-page table th { background: #f1f5f9; font-weight: 700; }
+    .xml-page blockquote {
+      margin: 0.8em 0; padding: 0.3em 0.8em;
+      border-left: 3px solid #0ea5e9; color: #475569;
+      background: #f8fafc;
+    }
+    .xml-page code {
+      background: #f1f5f9; padding: 1px 5px; border-radius: 3px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 0.9em;
+    }
+    .xml-page pre {
+      background: #f8fafc; padding: 0.6em 0.8em; border-radius: 6px;
+      overflow-x: auto; font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 0.85em; white-space: pre-wrap;
+    }
+    .xml-xsl-notice {
+      background: #fef3c7; padding: 0.5rem 0.7rem; border-radius: 6px;
+      font-size: 0.8rem; color: #92400e; margin: 0 0 0.8rem;
     }
     /* 印刷時: @page で A4 マージンが効くので、内部の margin/padding は最小に */
     @media print {
@@ -120,6 +182,7 @@
         max-width: none;
         font-size: 10.5pt;
       }
+      .xml-xsl-notice, .no-print { display: none !important; }
     }
 
     /* When printing, only the preview host should appear. The @page rule
@@ -352,14 +415,80 @@
       previewHost.innerHTML = cleaned;
     }
 
-    // XML を「読める A4 ドキュメント」相当の HTML へ変換する。
-    //   - 子を持つ要素 → 見出し (深さに応じて h1〜h4) + 属性メタ行 + 中身を再帰
-    //   - テキストのみの末端 → 「<b>タグ名</b>: 本文」段落
-    //   - 同名 / 属性なし / テキストのみ の連続兄弟 → <ul> リストにまとめてタグ名を省略
-    //   - 完全に空 → 属性があれば 1 行で出す / 無ければ省略
-    // 結果は通常 HTML なので @media print の A4 設定にそのまま乗る。
+    // ---- XML をセマンティック HTML に変換 -----------------------
+    //
+    // よくあるドキュメント系 XML タグを HTML 要素にマッピングして、A4 上で
+    // 読めるレイアウトに整える。FRONT/BODY/BACK のような構造タグはセクション、
+    // TO/FROM/SUBJECT/DATE などはラベル付きフィールド行、TITLE/HEADING は
+    // 見出し、P や LIST は段落 / リストへ。マッピング外のタグは「タグ名: 内容」の
+    // 形でフォールバック表示する。
+    //
+    // 値が 'FIELD' のものは特別扱い: <ラベル: 値> 形式の行に変換される。
+    // 大文字小文字は無視 (XML は本来 case-sensitive だが、実ファイルで
+    // 揺れがあるので大文字化して引く)。
+
+    const TAG_MAP = {
+      // 構造
+      FRONT: 'section', FRONTMATTER: 'section',
+      BODY: 'section',  MAIN: 'section', MAINMATTER: 'section',
+      BACK: 'section',  BACKMATTER: 'section',
+      HEAD: 'header',   HEADER: 'header', FOOTER: 'footer',
+      SECTION: 'section', SECT: 'section', SEC: 'section', DIV: 'div',
+      ARTICLE: 'article', ASIDE: 'aside',
+      ADDRESS: 'address',
+      // 見出し
+      TITLE: 'h1',
+      SUBTITLE: 'h2', HEADING: 'h2', SUBHEADING: 'h3',
+      H1: 'h1', H2: 'h2', H3: 'h3', H4: 'h4', H5: 'h5', H6: 'h6',
+      // 段落 / 決まり文句
+      P: 'p', PARA: 'p', PARAGRAPH: 'p', TEXT: 'p',
+      SALUTATION: 'p', GREETING: 'p', OPENING: 'p',
+      CLOSING: 'p', SIGNATURE: 'p', DATELINE: 'p',
+      // インライン
+      B: 'strong', BOLD: 'strong', STRONG: 'strong',
+      EM: 'em', EMPH: 'em', I: 'em', ITALIC: 'em',
+      U: 'u', UNDERLINE: 'u',
+      BR: 'br', NEWLINE: 'br',
+      SPAN: 'span', SMALL: 'small',
+      SUB: 'sub', SUP: 'sup',
+      // リスト
+      LIST: 'ul', UL: 'ul', OL: 'ol',
+      ITEM: 'li', LI: 'li', LISTITEM: 'li',
+      // 表
+      TABLE: 'table',
+      TR: 'tr', ROW: 'tr',
+      TD: 'td', CELL: 'td', ENTRY: 'td',
+      TH: 'th',
+      THEAD: 'thead', TBODY: 'tbody', TFOOT: 'tfoot',
+      CAPTION: 'caption',
+      // 引用 / コード
+      QUOTE: 'blockquote', Q: 'q', QUOTATION: 'blockquote',
+      CODE: 'code', PRE: 'pre',
+      // ラベル付きフィールド (手紙 / メモ系)
+      TO: 'FIELD', FROM: 'FIELD', CC: 'FIELD', BCC: 'FIELD',
+      SUBJECT: 'FIELD', DATE: 'FIELD',
+      SENDER: 'FIELD', RECIPIENT: 'FIELD', AUTHOR: 'FIELD',
+      REFERENCE: 'FIELD', REF: 'FIELD',
+      PRIORITY: 'FIELD', STATUS: 'FIELD',
+    };
+    const FIELD_LABELS = {
+      TO: '宛先', FROM: '差出人', CC: 'CC', BCC: 'BCC',
+      SUBJECT: '件名', DATE: '日付',
+      SENDER: '差出人', RECIPIENT: '宛先', AUTHOR: '作成者',
+      REFERENCE: '参照', REF: '参照',
+      PRIORITY: '優先度', STATUS: 'ステータス',
+    };
+    const INLINE_TAGS = new Set(['strong','em','u','span','small','sub','sup','q','code','br']);
+    const CONTENT_BLOCKS = new Set(['p','h1','h2','h3','h4','h5','h6','li','td','th','blockquote','caption']);
+    const STRUCTURAL_BLOCKS = new Set([
+      'section','div','article','aside','header','footer','main','address',
+      'ul','ol','table','thead','tbody','tfoot','tr','pre',
+    ]);
+
+    function xmlMappedTag(name) {
+      return TAG_MAP[String(name).toUpperCase()] || null;
+    }
     function attrsToInline(attrs) {
-      if (!attrs.length) return '';
       return attrs.map(a => escapeHtml(a.name) + ': ' + escapeHtml(a.value)).join(', ');
     }
     function attrsToMetaLine(attrs) {
@@ -375,13 +504,37 @@
       const cs = Array.from(node.childNodes).filter(x => x.nodeType !== 3 || x.nodeValue.trim());
       return cs.length === 1 && cs[0].nodeType === 3;
     }
+    // インライン用レンダ — テキストはエスケープ、認識インラインタグは置換、
+    // 未知のインラインタグは中身だけ出す。
+    function xmlRenderInline(node) {
+      if (node.nodeType === 3 || node.nodeType === 4) return escapeHtml(String(node.nodeValue || ''));
+      if (node.nodeType === 8) return '';
+      if (node.nodeType !== 1) return '';
+      const map = xmlMappedTag(node.nodeName);
+      if (map === 'br') return '<br>';
+      let inner = '';
+      for (const c of node.childNodes) inner += xmlRenderInline(c);
+      if (map && INLINE_TAGS.has(map)) return '<' + map + '>' + inner + '</' + map + '>';
+      return inner;
+    }
+    // <p> や <li> など、テキスト + インライン要素が混在しうるブロックの中身
+    function xmlRenderMixedContent(node) {
+      let html = '';
+      for (const c of node.childNodes) {
+        if (c.nodeType === 3 || c.nodeType === 4) {
+          html += escapeHtml(String(c.nodeValue || ''));
+        } else if (c.nodeType === 1) {
+          html += xmlRenderInline(c);
+        }
+      }
+      return html;
+    }
+
     function xmlElementToHtml(node, depth) {
-      // text
-      if (node.nodeType === 3 || node.nodeType === 4) { // text or CDATA
+      if (node.nodeType === 3 || node.nodeType === 4) {
         const t = String(node.nodeValue || '').replace(/\s+/g, ' ').trim();
         return t ? '<p>' + escapeHtml(t) + '</p>' : '';
       }
-      // comment
       if (node.nodeType === 8) {
         const t = String(node.nodeValue || '').trim();
         return t ? '<p class="xml-comment">※ ' + escapeHtml(t) + '</p>' : '';
@@ -389,10 +542,40 @@
       if (node.nodeType !== 1) return '';
 
       const tagName = node.nodeName;
+      const tagUpper = tagName.toUpperCase();
+      const map = xmlMappedTag(tagName);
       const attrs = Array.from(node.attributes || []);
       const children = Array.from(node.childNodes)
         .filter(n => n.nodeType !== 3 || n.nodeValue.trim());
 
+      // ====== FIELD: ラベル付き行 (TO / FROM / SUBJECT / DATE 等) ======
+      if (map === 'FIELD') {
+        const label = FIELD_LABELS[tagUpper] || tagName;
+        const value = xmlRenderMixedContent(node).trim();
+        return '<div class="xml-field"><span class="xml-field-label">' + escapeHtml(label) + '</span>' +
+          '<span class="xml-field-value">' + value + '</span></div>';
+      }
+      // ====== <br> 単独 ======
+      if (map === 'br') return '<br>';
+      // ====== インラインタグがブロック位置にあるとき → <p> でラップ ======
+      if (map && INLINE_TAGS.has(map)) {
+        return '<p>' + xmlRenderInline(node) + '</p>';
+      }
+      // ====== コンテンツブロック (p / h1-h6 / li / td 等) ======
+      //   テキスト + インライン要素を混ぜて中身を組み立てる
+      if (map && CONTENT_BLOCKS.has(map)) {
+        const cls = 'xml-' + tagUpper.toLowerCase();
+        return '<' + map + ' class="' + cls + '">' + xmlRenderMixedContent(node) + '</' + map + '>';
+      }
+      // ====== 構造ブロック (section / div / ul / table 等) → 子に再帰 ======
+      if (map && STRUCTURAL_BLOCKS.has(map)) {
+        const cls = 'xml-' + tagUpper.toLowerCase();
+        let body = '';
+        for (const c of children) body += xmlElementToHtml(c, depth + 1);
+        return '<' + map + ' class="' + cls + '">' + body + '</' + map + '>';
+      }
+
+      // ====== マッピング外: 旧来のフォールバック (タグ名を見出し / ラベルに使う) ======
       // 末端 (テキスト 1 件のみ)
       if (children.length === 1 && (children[0].nodeType === 3 || children[0].nodeType === 4)) {
         const t = String(children[0].nodeValue || '').replace(/\s+/g, ' ').trim();
@@ -406,14 +589,21 @@
         }
         return '';
       }
-
+      // ルート (depth 1) の未マッピング要素は「透明」 — タグ名を出さずに子だけ
+      // レンダリングする。例: <LETTER>...</LETTER> のように外側だけ意味のない
+      // ラッパーである場合に有効。
+      if (depth === 1) {
+        let body = '';
+        for (const c of children) body += xmlElementToHtml(c, depth);
+        return body;
+      }
       // コンテナ: 見出し + メタ + 再帰
-      const hLevel = Math.min(4, Math.max(1, depth));
+      const hLevel = Math.min(4, Math.max(2, depth));
       let body = '';
       let i = 0;
       while (i < children.length) {
         const cur = children[i];
-        // 連続する 同名 / 属性なし / テキストのみ の兄弟 → <ul> に集約
+        // 連続する 同名 / 属性なし / テキストのみ の兄弟 → <ul> リストに集約
         if (cur.nodeType === 1 && isTextOnlyNoAttr(cur)) {
           const group = [];
           while (i < children.length && isTextOnlyNoAttr(children[i], cur.nodeName)) {
@@ -429,7 +619,6 @@
             body += '</ul>';
             continue;
           }
-          // 1 件しか連続しなかった場合は通常レンダリングに戻す
           i -= group.length;
         }
         body += xmlElementToHtml(children[i], depth + 1);
@@ -446,7 +635,20 @@
         const doc = new DOMParser().parseFromString(raw, 'application/xml');
         const err = doc.querySelector('parsererror');
         if (err) throw new Error(err.textContent || 'XML parse error');
-        html = '<div class="xml-page">' + xmlElementToHtml(doc.documentElement, 1) + '</div>';
+        // <?xml-stylesheet?> 処理命令の検出 — XSL は別ファイルなので適用は
+        // できないが、参照されている事を控えめに告知する (印刷時には非表示)
+        let xslNotice = '';
+        for (const n of doc.childNodes) {
+          if (n.nodeType === 7 && n.target === 'xml-stylesheet') {
+            const m = String(n.data || '').match(/href="([^"]+)"/);
+            if (m) {
+              xslNotice = '<div class="xml-xsl-notice no-print">この XML は外部スタイルシート <code>' +
+                escapeHtml(m[1]) + '</code> を参照しています。スタイルシートを読み込めないため、簡易レンダリングで表示します。</div>';
+            }
+            break;
+          }
+        }
+        html = xslNotice + '<div class="xml-page">' + xmlElementToHtml(doc.documentElement, 1) + '</div>';
       } catch (e) {
         html = '<p class="convert-hint" style="color:#b91c1c;">XML として解釈できなかったので、生のテキストを表示します。<br>' +
           escapeHtml(String(e.message || e)) + '</p>' +
