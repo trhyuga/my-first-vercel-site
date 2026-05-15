@@ -175,6 +175,28 @@
       background: #fef3c7; padding: 0.5rem 0.7rem; border-radius: 6px;
       font-size: 0.8rem; color: #92400e; margin: 0 0 0.8rem;
     }
+    /* XSL スロット (現在内蔵されている XSL の表示 + 解除ボタン) */
+    .xsl-slot {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      background: #ecfeff; border: 1px solid #67e8f9;
+      border-radius: 999px;
+      padding: 0.25rem 0.5rem 0.25rem 0.6rem;
+      font-size: 0.78rem;
+      margin: 0.2rem 0 0.4rem;
+    }
+    .xsl-slot .xsl-tag {
+      background: #0e7490; color: #fff;
+      padding: 0 0.45rem; border-radius: 999px;
+      font-weight: 700; font-size: 0.65rem;
+      letter-spacing: 0.05em;
+    }
+    .xsl-slot .xsl-name { color: #155e75; font-weight: 600; }
+    .xsl-slot .xsl-clear {
+      border: 0; background: transparent; cursor: pointer;
+      color: #155e75; font-size: 1rem; line-height: 1;
+      padding: 0 0.2rem;
+    }
+    .xsl-slot .xsl-clear:hover { color: #b91c1c; }
     /* 印刷時: @page で A4 マージンが効くので、内部の margin/padding は最小に */
     @media print {
       .xml-page {
@@ -262,10 +284,18 @@
           <span class="name" id="toSrcName"></span>
           <span class="size" id="toSrcSize"></span>
         </div>
+        <!-- XSL ストア表示行: 現在ロード済みの XSL があれば表示 -->
+        <div id="xslSlot" class="xsl-slot" style="display:none;">
+          <span class="xsl-tag">XSL</span>
+          <span class="xsl-name" id="xslSlotName"></span>
+          <button class="xsl-clear" id="xslClear">×</button>
+        </div>
         <div class="btn-row" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
           <button class="btn-primary" id="toPrintBtn" style="flex:1;min-width:200px;">🖨️ PDFとして保存 (印刷ダイアログ)</button>
+          <button class="btn-secondary" id="addXslBtn" style="flex:0 0 auto;">📑 XSL を追加</button>
           <button class="btn-secondary" id="toClear" style="flex:0 0 auto;">別のファイル</button>
         </div>
+        <input type="file" id="fiXsl" accept=".xsl,.xslt,application/xml,text/xml" hidden />
         <p class="convert-hint">
           プレビューをブラウザの <b>印刷ダイアログ → 「PDFとして保存」</b> で書き出します。<br>
           この経路がクライアント側で一番レイアウトを崩さない方法です。iPhoneは Safari の共有から「ファイルに保存 / プリント」→ 拡大(プリント画面でピンチアウト)→ 共有 → 「ファイルに保存」 で PDFにできます。
@@ -628,25 +658,163 @@
         attrsToMetaLine(attrs) + body;
     }
 
+    // ---- XSL Bundle / XSLT 適用 -----------------------------------
+    // 1. ビルトイン: BUILTIN_XSL に href のベース名 → XSL 文字列 の辞書を持つ。
+    //    例えば <?xml-stylesheet href="kagami.xsl"?> なら BUILTIN_XSL['kagami.xsl']
+    //    が使われる。今は空 (TODO: 中身を貼ってもらえば組み込み)。
+    // 2. ユーザー追加: 「📑 XSL を追加」ボタンから読み込んだ XSL は
+    //    localStorage に保存され、以降の XML 描画時に最優先で適用される。
+    //    複数 XSL を保存できる (ファイル名キー) ので、kagami.xsl と他システムの
+    //    XSL を共存させられる。
+    const XSL_STORE_KEY = 'pdf.doc-pdf.xslStore.v1';
+    const BUILTIN_XSL = {
+      // 'kagami.xsl': '<?xml version="1.0"?>...',   // ユーザーから入手したら埋める
+    };
+    function loadXslStore() {
+      try {
+        const raw = localStorage.getItem(XSL_STORE_KEY);
+        if (!raw) return {};
+        return JSON.parse(raw) || {};
+      } catch (_) { return {}; }
+    }
+    function saveXslStore(map) {
+      try { localStorage.setItem(XSL_STORE_KEY, JSON.stringify(map)); } catch (_) {}
+    }
+    // すべての XSL を統合 (ユーザー追加 が組み込みを上書き)
+    function allXsl() {
+      return Object.assign({}, BUILTIN_XSL, loadXslStore());
+    }
+    function findXsl(href) {
+      const map = allXsl();
+      if (map[href]) return map[href];
+      // ベース名でも引く (e.g. ./styles/kagami.xsl → kagami.xsl)
+      const base = String(href).split(/[/\\]/).pop();
+      return map[base] || null;
+    }
+    function refreshXslSlot() {
+      const stored = loadXslStore();
+      const builtinKeys = Object.keys(BUILTIN_XSL);
+      const userKeys = Object.keys(stored);
+      const all = builtinKeys.concat(userKeys.filter(k => !builtinKeys.includes(k)));
+      const slot = document.getElementById('xslSlot');
+      const nameEl = document.getElementById('xslSlotName');
+      if (all.length === 0) {
+        slot.style.display = 'none';
+        return;
+      }
+      slot.style.display = '';
+      const label = all.length === 1 ? all[0] : `${all.length} files (${all.join(', ')})`;
+      nameEl.textContent = label;
+    }
+    // XML 文字列に XSL を適用して DocumentFragment を返す
+    function applyXsltText(xmlText, xslText) {
+      const xmlDoc = new DOMParser().parseFromString(xmlText, 'application/xml');
+      if (xmlDoc.querySelector('parsererror')) {
+        throw new Error('XML が解釈できませんでした');
+      }
+      const xslDoc = new DOMParser().parseFromString(xslText, 'application/xml');
+      if (xslDoc.querySelector('parsererror')) {
+        throw new Error('XSL が解釈できませんでした');
+      }
+      const proc = new XSLTProcessor();
+      proc.importStylesheet(xslDoc);
+      try {
+        return proc.transformToFragment(xmlDoc, document);
+      } catch (e) {
+        // 一部の XSL は XML 出力を返すので、フォールバックで document として受ける
+        const out = proc.transformToDocument(xmlDoc);
+        const frag = document.createDocumentFragment();
+        if (out && out.documentElement) frag.appendChild(out.documentElement);
+        return frag;
+      }
+    }
+
+    // XSL 追加ボタンの配線
+    document.getElementById('addXslBtn').addEventListener('click', () => {
+      document.getElementById('fiXsl').click();
+    });
+    document.getElementById('fiXsl').addEventListener('change', async (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      try {
+        const text = await f.text();
+        // 軽くパース検証
+        const d = new DOMParser().parseFromString(text, 'application/xml');
+        if (d.querySelector('parsererror')) throw new Error('XSL として解釈できませんでした');
+        const map = loadXslStore();
+        map[f.name] = text;
+        saveXslStore(map);
+        refreshXslSlot();
+        // 直近の XML が選択中なら再レンダ
+        if (lastXmlFile) await renderXml(lastXmlFile);
+      } catch (e) {
+        showError(toMsg, 'XSL 読込失敗: ' + (e.message || e));
+      } finally {
+        ev.target.value = '';
+      }
+    });
+    document.getElementById('xslClear').addEventListener('click', () => {
+      if (!confirm('保存されている XSL をすべて消しますか?')) return;
+      saveXslStore({});
+      refreshXslSlot();
+      if (lastXmlFile) renderXml(lastXmlFile);
+    });
+
+    // 最後に読み込んだ XML を覚えておき、XSL 追加時に再描画できるようにする
+    let lastXmlFile = null;
+
     async function renderXml(file) {
+      lastXmlFile = file;
       const raw = await file.text();
+      // 先に XSL 参照 PI を抽出してマッチを試す
+      let xslHref = null;
+      try {
+        const probe = new DOMParser().parseFromString(raw, 'application/xml');
+        for (const n of probe.childNodes) {
+          if (n.nodeType === 7 && n.target === 'xml-stylesheet') {
+            const m = String(n.data || '').match(/href="([^"]+)"/);
+            if (m) { xslHref = m[1]; break; }
+          }
+        }
+      } catch (_) { /* swallow */ }
+
+      // XSL マッチ — 内蔵 or ユーザー追加 (ベース名でも探す)
+      const xslText = xslHref ? findXsl(xslHref) : null;
+      // XSL が見つからなくても、ユーザーが手動追加した XSL があれば最後の手段で使う
+      const fallbackXslName = !xslText ? Object.keys(loadXslStore())[0] : null;
+      const finalXslText = xslText || (fallbackXslName ? loadXslStore()[fallbackXslName] : null);
+
+      if (finalXslText) {
+        try {
+          const frag = applyXsltText(raw, finalXslText);
+          previewHost.innerHTML = '';
+          const wrap = document.createElement('div');
+          wrap.className = 'xml-page';
+          wrap.appendChild(frag);
+          // どの XSL が適用されたかを画面でだけ告知 (印刷時は非表示)
+          const notice = document.createElement('div');
+          notice.className = 'xml-xsl-notice no-print';
+          notice.innerHTML = '✅ XSLT 適用: <code>' + escapeHtml(xslHref || fallbackXslName || '') + '</code>';
+          previewHost.appendChild(notice);
+          previewHost.appendChild(wrap);
+          return;
+        } catch (e) {
+          showError(toMsg, 'XSLT 適用に失敗: ' + (e.message || e) + ' — 汎用レンダラで表示します');
+          // 落ちたら下のフォールバックへ
+        }
+      }
+
+      // ----- フォールバック: タグ意味マップで汎用レンダ -----
       let html;
       try {
         const doc = new DOMParser().parseFromString(raw, 'application/xml');
         const err = doc.querySelector('parsererror');
         if (err) throw new Error(err.textContent || 'XML parse error');
-        // <?xml-stylesheet?> 処理命令の検出 — XSL は別ファイルなので適用は
-        // できないが、参照されている事を控えめに告知する (印刷時には非表示)
         let xslNotice = '';
-        for (const n of doc.childNodes) {
-          if (n.nodeType === 7 && n.target === 'xml-stylesheet') {
-            const m = String(n.data || '').match(/href="([^"]+)"/);
-            if (m) {
-              xslNotice = '<div class="xml-xsl-notice no-print">この XML は外部スタイルシート <code>' +
-                escapeHtml(m[1]) + '</code> を参照しています。スタイルシートを読み込めないため、簡易レンダリングで表示します。</div>';
-            }
-            break;
-          }
+        if (xslHref) {
+          xslNotice = '<div class="xml-xsl-notice no-print">この XML は外部スタイルシート <code>' +
+            escapeHtml(xslHref) + '</code> を参照しています。スタイルシートが手元にないため、簡易レンダリングで表示しています。<br>' +
+            '<b>「📑 XSL を追加」</b> ボタンから XSL ファイルを登録すると、以降は正式なレイアウトで描画します。</div>';
         }
         html = xslNotice + '<div class="xml-page">' + xmlElementToHtml(doc.documentElement, 1) + '</div>';
       } catch (e) {
@@ -656,6 +824,8 @@
       }
       previewHost.innerHTML = html;
     }
+    // ページ初期化時に既存ストアの状態を反映
+    refreshXslSlot();
 
     async function handleToFile(file) {
       clearBox(toMsg);
@@ -688,6 +858,7 @@
       toControls.style.display = 'none';
       previewHost.innerHTML = '';
       clearBox(toMsg);
+      lastXmlFile = null;
     });
 
     document.getElementById('toPrintBtn').addEventListener('click', () => {
