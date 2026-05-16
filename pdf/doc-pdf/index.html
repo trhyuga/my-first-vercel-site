@@ -884,38 +884,25 @@
             const t = (child.tagName || '').toUpperCase();
             if (t === 'STYLE' || t === 'LINK') shadow.appendChild(child.cloneNode(true));
           }
-          // ===== DOM レベルで XSL の構造的 overflow を吸収 =====
-          // この種の XSL は <table class="outline" cellpadding="20-22"> の
-          // 内側に width:640px の inner テーブルを差し込む。outline の
-          // cellpadding ぶん (40-44px) inner がはみ出してしまうので、
-          // outline テーブルの cellpadding を 0 にしてしまう。CSS の
-          // !important では HTML 属性 cellpadding と戦えないブラウザが
-          // あるため、属性そのものを書き換える + td へ inline style 注入の
-          // 二重保険。
-          const bodyForShadow = body ? body.cloneNode(true) : null;
-          if (bodyForShadow) {
-            // 1) <table><td>...</td></table> のように <tr> を省略した
-            //    出力 (7100001.xsl 系がそう) を補正。XSLTProcessor は
-            //    DOM API で出力するので HTML パーサーの auto-insertion が
-            //    効かず、<tr> が無いと td が正しいセルとして描画されない。
-            //    連続する直下 td/th を 1 つの <tr> でラップする。
-            for (const t of bodyForShadow.querySelectorAll('table')) {
-              let trWrap = null;
-              for (const child of Array.from(t.children)) {
-                const tag = (child.tagName || '').toUpperCase();
-                if (tag === 'TD' || tag === 'TH') {
-                  if (!trWrap) {
-                    trWrap = document.createElement('tr');
-                    t.insertBefore(trWrap, child);
-                  }
-                  trWrap.appendChild(child);
-                } else {
-                  // tr / thead / tbody / colgroup などに当たったら一旦リセット
-                  trWrap = null;
-                }
-              }
-            }
-            // 2) outline テーブルの cellpadding/spacing を 0 に
+          // ===== XSLT 出力の DOM をブラウザ HTML パーサーに通して正規化 =====
+          //
+          // XSLTProcessor (Chrome / Edge / Safari) は API 経由で DOM を組むため、
+          // HTML パーサーの auto-insertion (<table> 直下の <td> を <tbody><tr>
+          // で包む等) が走らない。7100001.xsl のように XSL 側で <tr> を省略
+          // して書かれていると、ブラウザはそれをセルとして描画できず左右の
+          // 段が縦に積まれたり片側が消える。
+          //
+          // 一番確実な救済は、出力 HTML を <body>.innerHTML 経由で再パースし
+          // 直すこと。innerHTML setter は HTML パーサーを起動するので、その
+          // 過程で <tbody> / <tr> が自動補完される。
+          let bodyForShadow = null;
+          if (body) {
+            bodyForShadow = document.createElement('body');
+            if (body.getAttribute('style')) bodyForShadow.setAttribute('style', body.getAttribute('style'));
+            // body.innerHTML はシリアライズ→再パースのため tbody/tr が正規化される
+            bodyForShadow.innerHTML = body.innerHTML;
+            // outline テーブルの cellpadding/spacing を 0 に (HTML 属性自体を
+            // 書き換える + td に inline style padding:0 強制で二重保険)
             for (const t of bodyForShadow.querySelectorAll('table.outline')) {
               t.setAttribute('cellpadding', '0');
               t.setAttribute('cellspacing', '0');
