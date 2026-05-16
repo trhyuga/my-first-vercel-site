@@ -221,17 +221,20 @@
       display: block;
       background: #fff;
       margin: 0 auto;
-      min-height: 50px;
+      width: 100%;
+      max-width: 100%;
     }
     @media print {
-      .xml-xslt-host { margin: 0; min-height: 0; }
+      .xml-xslt-host { margin: 0; width: auto; max-width: none; }
     }
 
     /* When printing, only the preview host should appear. The @page rule
        forces A4 portrait with tight margins so the browser's Print→PDF
-       output matches the on-screen preview. */
+       output matches the on-screen preview.
+       8mm 余白で 194mm × 281mm 確保 ── 公的書類 XSL の典型サイズ
+       (640×940 CSS px = 169×249mm) が中央寄せでも余裕で収まる。 */
     @media print {
-      @page { size: A4 portrait; margin: 12mm; }
+      @page { size: A4 portrait; margin: 8mm; }
       body * { visibility: hidden !important; }
       .preview-host, .preview-host * { visibility: visible !important; }
       .preview-host {
@@ -242,6 +245,7 @@
         border: none !important;
         padding: 0 !important;
         box-shadow: none !important;
+        background: transparent !important;
       }
     }
 
@@ -881,6 +885,22 @@
             if (t === 'STYLE' || t === 'LINK') shadow.appendChild(child.cloneNode(true));
           }
           if (body) shadow.appendChild(body.cloneNode(true));
+          // ===== Shadow 内のリセット =====
+          // 1. UA の body { margin: 8px } を打ち消し、コンテンツを左右にずらさない
+          // 2. 印刷時に最大幅で配置し、A4 のはみ出し余白を抑える
+          // 3. 大きな固定幅 (640px 等) のテーブルが、画面プレビューで横スクロール
+          //    して見切れることがあるので、ホスト側の幅に余裕がある時だけ
+          //    中央寄せにする (XSL 側の <table align="center"> 系を尊重)
+          const reset = document.createElement('style');
+          reset.textContent = `
+            body { margin: 0 !important; padding: 0 !important; background: transparent !important; }
+            html { margin: 0 !important; padding: 0 !important; }
+            @media print {
+              body { margin: 0 !important; padding: 0 !important; }
+              table { page-break-inside: avoid; }
+            }
+          `;
+          shadow.appendChild(reset);
           return host;
         }
         // XSL に style が無いケース (kagami.xsl など) ⇒ こちら側の .xml-page
