@@ -300,8 +300,113 @@
     });
 
     document.getElementById('printBtn').addEventListener('click', () => {
-      window.print();
+      printActiveDocument();
     });
+
+    // 印刷時は親ページの @media print と layout 干渉を完全に避けるため、
+    // XSLT 出力を独立した <iframe srcdoc> ドキュメントに展開して、その
+    // iframe.contentWindow.print() でブラウザに印刷させる。iframe には
+    // 自前の @page (A4 portrait, 8mm margin) を流し込むので、Edge の
+    // print engine が親側 CSS の position:absolute / visibility:hidden を
+    // 誤解釈してコンテンツを縮小する事故を回避できる。
+    function printActiveDocument() {
+      const xmls = files.filter(f => f.kind === 'xml');
+      if (xmls.length === 0) return;
+      const xmlEntry = xmls[activeDocIdx] || xmls[0];
+      const xslEntry = findXslFor(xmlEntry);
+      if (!xslEntry) {
+        showError(msg, '対応する XSL が見つかりません');
+        return;
+      }
+      let html;
+      try {
+        html = buildStandaloneHtml(xmlEntry.text, xslEntry.text);
+      } catch (e) {
+        showError(msg, '印刷用 HTML の生成に失敗: ' + (e.message || e));
+        return;
+      }
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.style.cssText = 'position:fixed; left:-99999px; top:0; width:1024px; height:1500px; border:0; visibility:hidden;';
+      iframe.srcdoc = html;
+      iframe.addEventListener('load', () => {
+        // load 完了後に少し遅延して print。XSLT で生成された <link>/フォント
+        // 等の遅延ロードに余裕を持たせる。
+        setTimeout(() => {
+          try {
+            iframe.contentWindow.focus();
+            iframe.contentWindow.print();
+          } catch (err) {
+            console.warn('iframe print failed, falling back', err);
+            window.print();
+          }
+          // 印刷ダイアログを閉じてしばらくしてから iframe を破棄
+          setTimeout(() => { try { iframe.remove(); } catch (_) {} }, 8000);
+        }, 250);
+      });
+      document.body.appendChild(iframe);
+    }
+
+    // XSLT を当てて、印刷用に独立した完全な HTML ドキュメント文字列を返す。
+    //   1. XSLTProcessor で変換 → fragment
+    //   2. <html> ラップを取り出すか、無ければ minimal HTML に包む
+    //   3. DOMParser('text/html') を一度通して tbody/tr 等を auto-insertion
+    //   4. <table class="outline"> の cellpadding / cellspacing を 0 へ
+    //   5. <head> に @page A4 + リセット CSS を注入
+    //   6. シリアライズして文字列で返す
+    function buildStandaloneHtml(xmlText, xslText) {
+      const xmlDoc = new DOMParser().parseFromString(xmlText, 'application/xml');
+      if (xmlDoc.querySelector('parsererror')) throw new Error('XML が解釈できませんでした');
+      const xslDoc = new DOMParser().parseFromString(xslText, 'application/xml');
+      if (xslDoc.querySelector('parsererror')) throw new Error('XSL が解釈できませんでした');
+      const proc = new XSLTProcessor();
+      proc.importStylesheet(xslDoc);
+      let frag;
+      try { frag = proc.transformToFragment(xmlDoc, document); }
+      catch (e) {
+        const out = proc.transformToDocument(xmlDoc);
+        frag = document.createDocumentFragment();
+        if (out && out.documentElement) frag.appendChild(out.documentElement);
+      }
+      // 先頭要素を空白を飛ばして取得
+      let first = frag.firstChild;
+      while (first && first.nodeType !== 1) first = first.nextSibling;
+
+      // raw HTML 文字列を組み立て
+      let raw;
+      if (first && first.tagName && first.tagName.toUpperCase() === 'HTML') {
+        raw = '<!DOCTYPE html>' + new XMLSerializer().serializeToString(first);
+      } else {
+        // <html> ラップが無い場合 (kagami.xsl のようなフラグメント XSL)
+        const div = document.createElement('div');
+        div.appendChild(frag);
+        raw = '<!DOCTYPE html><html><head></head><body>' + div.innerHTML + '</body></html>';
+      }
+
+      // text/html で再パース → tbody/tr auto-insertion 等を効かせる
+      const doc = new DOMParser().parseFromString(raw, 'text/html');
+
+      // outline テーブルの padding/spacing を 0 に (XSL の構造的 overflow 救済)
+      for (const t of doc.querySelectorAll('table.outline')) {
+        t.setAttribute('cellpadding', '0');
+        t.setAttribute('cellspacing', '0');
+      }
+      for (const td of doc.querySelectorAll('td.outline')) {
+        td.style.setProperty('padding', '0', 'important');
+      }
+
+      // @page + 印刷用リセット CSS を head に注入
+      const inject = doc.createElement('style');
+      inject.textContent = `
+        @page { size: A4 portrait; margin: 8mm; }
+        html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
+        pre { white-space: pre-wrap !important; overflow-wrap: anywhere; word-break: break-word; }
+        table { page-break-inside: avoid; }
+      `;
+      (doc.head || doc.documentElement).appendChild(inject);
+
+      return '<!DOCTYPE html>' + doc.documentElement.outerHTML;
+    }
 
     // ----- XSLT 適用 -----
     // XSL を XML に適用し、結果をスタイル隔離された <div> (Shadow DOM 持ち) として返す。
