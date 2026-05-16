@@ -186,9 +186,11 @@
       ファイルは <b>すべて端末内で処理</b> ── サーバーには一切送信されません。
     </div>
 
-    <!-- ========== モード切替 ========== -->
-    <label class="auto-dl-toggle">
-      <input type="checkbox" id="autoDl" checked />
+    <!-- ========== モード切替 ==========
+         ドロップ即 PDF ダウンロードは未完成のため一時的に非表示。
+         再開時に hidden を外すだけで戻せるように DOM ごと残してある。 -->
+    <label class="auto-dl-toggle" hidden>
+      <input type="checkbox" id="autoDl" />
       <span>ドロップ即 PDF ダウンロード (プレビュー省略)</span>
     </label>
 
