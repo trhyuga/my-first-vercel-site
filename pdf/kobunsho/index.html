@@ -256,12 +256,13 @@
       for (const e of entries) {
         const name = basename(e.name); // ZIP内パスから basename のみ
         const kind = classifyByExt(name);
+        const lastModified = e.date ? e.date.getTime() : null;
         if (kind === 'xml' || kind === 'xsl') {
           const text = await e.async('text');
-          out.push({ name, kind, text, fromZip: file.name });
+          out.push({ name, kind, text, fromZip: file.name, lastModified });
         } else {
           const blob = await e.async('blob');
-          out.push({ name, kind: 'other', blob, fromZip: file.name });
+          out.push({ name, kind: 'other', blob, fromZip: file.name, lastModified });
         }
       }
       return out;
@@ -278,10 +279,12 @@
             files.push(...entries);
           } else if (e === 'xml' || e === 'xsl' || e === 'xslt') {
             const text = await f.text();
-            files.push({ name: f.name, kind: classifyByExt(f.name), text });
+            files.push({
+              name: f.name, kind: classifyByExt(f.name), text,
+              lastModified: f.lastModified || null,
+            });
           } else {
-            // その他のファイル — そのまま保持 (添付資料想定)
-            files.push({ name: f.name, kind: 'other', blob: f });
+            files.push({ name: f.name, kind: 'other', blob: f, lastModified: f.lastModified || null });
           }
         } catch (err) {
           showError(msg, `${f.name} の読み込みに失敗: ${err.message || err}`);
@@ -318,20 +321,31 @@
         showError(msg, '対応する XSL が見つかりません');
         return;
       }
-      let html;
+      let buildResult;
       try {
-        html = buildStandaloneHtml(xmlEntry.text, xslEntry.text);
+        buildResult = buildStandaloneHtml(xmlEntry.text, xslEntry.text, xmlEntry);
       } catch (e) {
         showError(msg, '印刷用 HTML の生成に失敗: ' + (e.message || e));
         return;
       }
+      // ブラウザの「PDF として保存」ダイアログは iframe の <title> ではなく
+      // 親ウィンドウの document.title をデフォルトファイル名に使う。print()
+      // を呼ぶ前に親タイトルを差し替え、afterprint で元に戻す。
+      const originalTitle = document.title;
+      document.title = buildResult.filename;
+      const restoreTitle = () => {
+        document.title = originalTitle;
+        window.removeEventListener('afterprint', restoreTitle);
+      };
+      window.addEventListener('afterprint', restoreTitle);
+      // 念のため一定時間後にも復元 (afterprint が発火しないブラウザ用)
+      setTimeout(restoreTitle, 60000);
+
       const iframe = document.createElement('iframe');
       iframe.setAttribute('aria-hidden', 'true');
       iframe.style.cssText = 'position:fixed; left:-99999px; top:0; width:1024px; height:1500px; border:0; visibility:hidden;';
-      iframe.srcdoc = html;
+      iframe.srcdoc = buildResult.html;
       iframe.addEventListener('load', () => {
-        // load 完了後に少し遅延して print。XSLT で生成された <link>/フォント
-        // 等の遅延ロードに余裕を持たせる。
         setTimeout(() => {
           try {
             iframe.contentWindow.focus();
@@ -340,71 +354,115 @@
             console.warn('iframe print failed, falling back', err);
             window.print();
           }
-          // 印刷ダイアログを閉じてしばらくしてから iframe を破棄
           setTimeout(() => { try { iframe.remove(); } catch (_) {} }, 8000);
         }, 250);
       });
       document.body.appendChild(iframe);
     }
 
-    // 「PDF として保存」のデフォルトファイル名に使うタイトルを組み立てる。
-    //   - 被保険者氏名 (XML 内の被保険者漢字氏名 / 氏名 / NAME などから抽出)
-    //   - 書類名 (XSLT 出力の <title> や <td class="title"> 等から抽出)
-    // 両方あれば 「氏名_書類名」、書類名だけなら 「書類名」、何も無ければ
-    // 元の XML ファイル名を使う。
-    function buildDocTitle(xmlText, htmlDoc) {
-      let person = '';
-      try {
-        const xd = new DOMParser().parseFromString(xmlText, 'application/xml');
-        const NAME_FIELDS = [
-          '被保険者漢字氏名', '被保険者カナ氏名', '被保険者氏名',
-          '申請者氏名', '申請者漢字氏名',
-          '氏名', 'NAME', 'PersonName',
-        ];
-        for (const f of NAME_FIELDS) {
-          const el = xd.querySelector(f);
-          if (el && el.textContent && el.textContent.trim()) {
-            person = el.textContent.trim().replace(/\s+/g, '_');
-            break;
-          }
+    // 「PDF として保存」のデフォルトファイル名: 「氏名_YYYYMMDD_書類名」
+    //
+    //   氏名: XML の 被保険者漢字氏名 / 申請者氏名 / 氏名 / NAME など
+    //   YYYYMMDD の優先順位:
+    //     1. 資格取得年月日_元号 + _年 + _月 + _日 (和暦 → 西暦変換)
+    //     2. 通知年月日 (CDATA 文字列 「令和 8年 4月 6日」をパース)
+    //     3. ファイル作成日 (File.lastModified)
+    //     4. 到達番号_項目 の左 8 桁 (これ自体が YYYYMMDD で始まる)
+    //   書類名: XSLT 出力の <title> / <td class="title"> / XML の <TITLE>
+
+    const ERA_OFFSETS = { M: 1867, T: 1911, S: 1925, H: 1988, R: 2018, '明治': 1867, '大正': 1911, '昭和': 1925, '平成': 1988, '令和': 2018 };
+    function pad(s, n) { return String(s).padStart(n, '0'); }
+    function ymd8FromEraParts(era, y, m, d) {
+      const off = ERA_OFFSETS[String(era).trim()];
+      if (!off) return '';
+      const yi = parseInt(y, 10), mi = parseInt(m, 10), di = parseInt(d, 10);
+      if (!Number.isFinite(yi) || !Number.isFinite(mi) || !Number.isFinite(di)) return '';
+      return pad(off + yi, 4) + pad(mi, 2) + pad(di, 2);
+    }
+    function buildDateString(xd, xmlEntry) {
+      const q = (n) => { const e = xd.querySelector(n); return e ? (e.textContent || '').trim() : ''; };
+      // 1) 資格取得年月日 (元号 / 年 / 月 / 日)
+      const era = q('資格取得年月日_元号');
+      if (era) {
+        const r = ymd8FromEraParts(era, q('資格取得年月日_年'), q('資格取得年月日_月'), q('資格取得年月日_日'));
+        if (r) return r;
+      }
+      // 2) 通知年月日 (CDATA 「令和 8年 4月 6日」 など)
+      const notif = q('通知年月日');
+      if (notif) {
+        const m = notif.match(/(明治|大正|昭和|平成|令和)?\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日/);
+        if (m) {
+          const r = ymd8FromEraParts(m[1] || '令和', m[2], m[3], m[4]);
+          if (r) return r;
         }
-      } catch (_) {}
-      let title = '';
+        // 数値表記 (例 "2026/04/06" や "2026-04-06" や "20260406")
+        const m2 = notif.match(/(\d{4})\D*(\d{1,2})\D*(\d{1,2})/);
+        if (m2) return pad(m2[1], 4) + pad(m2[2], 2) + pad(m2[3], 2);
+      }
+      // 3) ファイル作成日 (File.lastModified)
+      if (xmlEntry && xmlEntry.lastModified) {
+        const d = new Date(xmlEntry.lastModified);
+        if (!isNaN(d)) {
+          return pad(d.getFullYear(), 4) + pad(d.getMonth() + 1, 2) + pad(d.getDate(), 2);
+        }
+      }
+      // 4) 到達番号 左 8 桁
+      const arrival = q('到達番号_項目') || q('到達番号');
+      if (arrival) {
+        const m = arrival.match(/^(\d{8})/);
+        if (m) return m[1];
+      }
+      return '';
+    }
+    function buildPersonName(xd) {
+      const NAME_FIELDS = [
+        '被保険者漢字氏名', '被保険者氏名',
+        '申請者漢字氏名', '申請者氏名',
+        '氏名', 'NAME', 'PersonName',
+      ];
+      for (const f of NAME_FIELDS) {
+        const el = xd.querySelector(f);
+        if (el && el.textContent && el.textContent.trim()) {
+          return el.textContent.trim();
+        }
+      }
+      return '';
+    }
+    function buildBookTitle(xd, htmlDoc) {
       if (htmlDoc) {
         const t = htmlDoc.querySelector('title');
-        if (t && t.textContent.trim()) title = t.textContent.trim();
-        if (!title) {
-          // kagami.xsl 系: <P ALIGN="CENTER"> や class="title" にタイトルが入る
-          const cls = htmlDoc.querySelector('.title, td.title, p.title');
-          if (cls && cls.textContent.trim()) title = cls.textContent.trim();
-        }
+        if (t && t.textContent.trim()) return t.textContent.trim();
+        const cls = htmlDoc.querySelector('.title, td.title, p.title');
+        if (cls && cls.textContent.trim()) return cls.textContent.trim();
       }
-      // XML 側 <TITLE> も最後の保険として確認 (kagami.xsl はここを表示する)
-      if (!title) {
-        try {
-          const xd = new DOMParser().parseFromString(xmlText, 'application/xml');
-          const xt = xd.querySelector('TITLE') || xd.querySelector('title');
-          if (xt && xt.textContent.trim()) title = xt.textContent.trim();
-        } catch (_) {}
-      }
-      // 連結 — 余計な空白を縮約、ファイル名で問題になる文字を簡易除去
-      const safe = (s) => String(s || '').replace(/[\\/:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-      const p = safe(person);
-      const t = safe(title);
-      if (p && t) return `${p}_${t}`;
-      if (t) return t;
-      if (p) return p;
-      return 'document';
+      const xt = xd.querySelector('TITLE') || xd.querySelector('title');
+      if (xt && xt.textContent.trim()) return xt.textContent.trim();
+      return '';
+    }
+    function safeFilenamePart(s) {
+      return String(s || '').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    }
+    function buildDocTitle(xmlText, htmlDoc, xmlEntry) {
+      let xd = null;
+      try { xd = new DOMParser().parseFromString(xmlText, 'application/xml'); } catch (_) {}
+      const person = xd ? buildPersonName(xd) : '';
+      const ymd = xd ? buildDateString(xd, xmlEntry) : '';
+      const title = xd ? buildBookTitle(xd, htmlDoc) : '';
+      const parts = [person, ymd, title].map(safeFilenamePart).filter(Boolean);
+      return parts.length ? parts.join('_') : 'document';
     }
 
     // XSLT を当てて、印刷用に独立した完全な HTML ドキュメント文字列を返す。
+    // 戻り値: { html, filename } — html は iframe srcdoc 用、filename は
+    // 親ウィンドウの document.title を一時的に差し替える際に使う名前。
     //   1. XSLTProcessor で変換 → fragment
     //   2. <html> ラップを取り出すか、無ければ minimal HTML に包む
     //   3. DOMParser('text/html') を一度通して tbody/tr 等を auto-insertion
     //   4. <table class="outline"> の cellpadding / cellspacing を 0 へ
-    //   5. <head> に @page A4 + リセット CSS を注入
-    //   6. シリアライズして文字列で返す
-    function buildStandaloneHtml(xmlText, xslText) {
+    //   5. <pre> を <div> へ置換、page-break-after の空 div を撤去
+    //   6. <head> に @page A4 + リセット CSS を注入
+    //   7. シリアライズして文字列で返す
+    function buildStandaloneHtml(xmlText, xslText, xmlEntry) {
       const xmlDoc = new DOMParser().parseFromString(xmlText, 'application/xml');
       if (xmlDoc.querySelector('parsererror')) throw new Error('XML が解釈できませんでした');
       const xslDoc = new DOMParser().parseFromString(xslText, 'application/xml');
@@ -456,31 +514,49 @@
         p.replaceWith(div);
       }
 
+      // XSL が <div style="page-break-after:always" /> を空のページ区切りと
+      // して挿入してくる (7100001.xsl は kagami と 教示文 の間に挿入)。
+      // 元々の意図は次の outline を新ページ送りすることだが、空 div + 改ページ
+      // の組合せで Chrome/Edge は 1 ページ余分な空白ページを作ってしまう。
+      // 後続の outline テーブルには page-break-inside:avoid + 大きい高さが
+      // あるので、本来の改ページ div を撤去しても自然に改ページされる。
+      for (const d of doc.querySelectorAll('div[style*="page-break-after"]')) {
+        d.remove();
+      }
+      // 2 番目以降の outline テーブルに page-break-before:always を明示的に
+      // 付与 (kagami の後で確実に kyoji が新ページ起点になるように)
+      const outlines = doc.querySelectorAll('table.outline');
+      for (let i = 1; i < outlines.length; i++) {
+        outlines[i].style.setProperty('page-break-before', 'always');
+        outlines[i].style.setProperty('break-before', 'page');
+      }
+
       // ===== ファイル名のデフォルト =====
-      // ブラウザの「PDF として保存」ダイアログのファイル名は、対象
-      // ドキュメントの <title> から決まる。XML 側に被保険者漢字氏名 等が
-      // あれば「氏名_書類名」を、無ければ書類名のみを <title> に流し込む。
-      const niceTitle = buildDocTitle(xmlText, doc);
+      const filename = buildDocTitle(xmlText, doc, xmlEntry);
       let titleEl = doc.querySelector('title');
       if (!titleEl) {
         titleEl = doc.createElement('title');
         (doc.head || doc.documentElement).appendChild(titleEl);
       }
-      titleEl.textContent = niceTitle;
+      titleEl.textContent = filename;
 
       // @page + 印刷用リセット CSS を head に注入。
       //   - margin: 3mm (本物の e-Gov 帳票に近い)
-      //   - body { zoom: 1.15 } で 640×940px の outline を A4 ほぼ全面に拡大
+      //   - body { zoom: 1.10 } で 640×940px の outline を A4 に近く拡大
+      //     (zoom 1.15 は kagami の高さを超過させて空白ページの原因になる)
       const inject = doc.createElement('style');
       inject.textContent = `
         @page { size: A4 portrait; margin: 3mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
-        body { zoom: 1.15; }
+        body { zoom: 1.10; }
         table { page-break-inside: avoid; }
       `;
       (doc.head || doc.documentElement).appendChild(inject);
 
-      return '<!DOCTYPE html>' + doc.documentElement.outerHTML;
+      return {
+        html: '<!DOCTYPE html>' + doc.documentElement.outerHTML,
+        filename,
+      };
     }
 
     // ----- XSLT 適用 -----
