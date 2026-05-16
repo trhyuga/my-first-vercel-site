@@ -900,25 +900,37 @@
             const t = (child.tagName || '').toUpperCase();
             if (t === 'STYLE' || t === 'LINK') shadow.appendChild(child.cloneNode(true));
           }
-          // ===== XSLT 出力の DOM をブラウザ HTML パーサーに通して正規化 =====
+          // ===== XSLT 出力を DOMParser('text/html') で完全再パース =====
           //
-          // XSLTProcessor (Chrome / Edge / Safari) は API 経由で DOM を組むため、
-          // HTML パーサーの auto-insertion (<table> 直下の <td> を <tbody><tr>
-          // で包む等) が走らない。7100001.xsl のように XSL 側で <tr> を省略
-          // して書かれていると、ブラウザはそれをセルとして描画できず左右の
-          // 段が縦に積まれたり片側が消える。
+          // XSLTProcessor の出力は名前空間が XHTML / XML 混在で、API ベースで
+          // DOM が組まれているため、<table> 直下の <td> を <tbody><tr> で
+          // 包む HTML パーサーの auto-insertion が走らない。7100001.xsl 等の
+          // 「<tr> を省略して書いた XSL」はそのままだと左右の段が縦積みになる。
           //
-          // 一番確実な救済は、出力 HTML を <body>.innerHTML 経由で再パースし
-          // 直すこと。innerHTML setter は HTML パーサーを起動するので、その
-          // 過程で <tbody> / <tr> が自動補完される。
+          // body.innerHTML 経由の round-trip でも一応再パースされるが、
+          // XHTML 名前空間で XML シリアライズされたものを HTML パーサーが
+          // 期待通りに直さないケースが残る。最も確実なのは DOMParser に
+          // 'text/html' を明示して文字列から組み直す事 (= 外部 HTML を
+          // 読み込むのと同じ経路) なので、その方式に切り替える。
           let bodyForShadow = null;
           if (body) {
+            // body の子要素を文字列としてシリアライズ
+            const innerSrc = (typeof body.innerHTML === 'string' && body.innerHTML.length)
+              ? body.innerHTML
+              : new XMLSerializer().serializeToString(body);
+            // text/html パーサーで再構築 (この時 tbody / tr が自動補完される)
+            const reparsed = new DOMParser().parseFromString(
+              '<!DOCTYPE html><html><body>' + innerSrc + '</body></html>',
+              'text/html'
+            );
             bodyForShadow = document.createElement('body');
-            if (body.getAttribute('style')) bodyForShadow.setAttribute('style', body.getAttribute('style'));
-            // body.innerHTML はシリアライズ→再パースのため tbody/tr が正規化される
-            bodyForShadow.innerHTML = body.innerHTML;
-            // outline テーブルの cellpadding/spacing を 0 に (HTML 属性自体を
-            // 書き換える + td に inline style padding:0 強制で二重保険)
+            if (body.getAttribute && body.getAttribute('style')) {
+              bodyForShadow.setAttribute('style', body.getAttribute('style'));
+            }
+            while (reparsed.body.firstChild) {
+              bodyForShadow.appendChild(reparsed.body.firstChild);
+            }
+            // outline テーブルの cellpadding/spacing を 0 に
             for (const t of bodyForShadow.querySelectorAll('table.outline')) {
               t.setAttribute('cellpadding', '0');
               t.setAttribute('cellspacing', '0');
