@@ -368,9 +368,15 @@
         }
 
         // Shadow 内の基本リセット
+        // 公文書 XSL は <pre class="oshirase"> のような長文ブロックを
+        // 「白抜き枠の中に詰める」が、デフォルトの <pre> は white-space:pre で
+        // 一切折り返さない。XSL 側は line-break:anywhere / overflow-wrap:break-word
+        // を当てているが、white-space:pre が優先されてしまうため右側にあふれる。
+        // → pre-wrap で「空白は保ちつつ折り返す」挙動に上書きして救済する。
         const reset = document.createElement('style');
         reset.textContent = `
           html, body { margin: 0 !important; padding: 0 !important; background: transparent !important; }
+          pre { white-space: pre-wrap !important; overflow-wrap: anywhere; word-break: break-word; }
           @media print {
             html, body { margin: 0 !important; padding: 0 !important; }
             table { page-break-inside: avoid; }
