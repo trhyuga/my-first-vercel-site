@@ -248,6 +248,27 @@
       return 'other';
     }
 
+    // 公文書 XML の <pre> ブロック (機構からのお知らせ 等) は元の帳票で
+    // ビジュアル整列するため全角スペースが大量に詰まっており、ブラウザで
+    // 折り返した時に「なりま　　　す」のような不自然な改行になる。
+    //   1. 句点「。」直後の中黒「・」 → 改行 + 「・」 (箇条書きの行始まり)
+    //   2. 全角スペースが 2 つ以上連続してから現れる中黒 → 改行 + 「・」
+    //   3. その他の連続する全角スペース (2 つ以上) を撤去
+    //   4. 各行末尾の空白を削除
+    function cleanNoticeText(text) {
+      if (!text) return text;
+      let s = String(text);
+      // 1) 句点 + 空白 + 中黒 → 句点 + 改行 + 中黒
+      s = s.replace(/。[ 　]*・/g, '。\n・');
+      // 2) 2 つ以上の空白 + 中黒 → 改行 + 中黒
+      s = s.replace(/[ 　]{2,}・/g, '\n・');
+      // 3) 残った 2 つ以上の連続全角スペースを削除 (ビジュアル整列のためのパディング)
+      s = s.replace(/[ 　]{2,}/g, '');
+      // 4) 各行末の空白を整理
+      s = s.split('\n').map(l => l.replace(/[ 　]+$/, '')).join('\n');
+      return s;
+    }
+
     // ----- ZIP 展開 -----
     async function unpackZip(file) {
       const zip = await JSZip.loadAsync(await file.arrayBuffer());
@@ -502,11 +523,11 @@
       for (const td of doc.querySelectorAll('td.outline')) {
         td.style.setProperty('padding', '0', 'important');
       }
-      // <pre> も <div> に置換 (screen 側と同じ処理 — UA 既定の white-space:pre を構造的に回避)
+      // <pre> も <div> に置換 (screen 側と同じ処理) + テキスト整形
       for (const p of doc.querySelectorAll('pre')) {
         const div = doc.createElement('div');
         for (const a of p.attributes) div.setAttribute(a.name, a.value);
-        while (p.firstChild) div.appendChild(p.firstChild);
+        div.textContent = cleanNoticeText(p.textContent || '');
         div.style.setProperty('white-space', 'pre-wrap', 'important');
         div.style.setProperty('overflow-wrap', 'anywhere', 'important');
         div.style.setProperty('word-break', 'break-word', 'important');
@@ -544,11 +565,16 @@
       //   - margin: 3mm (本物の e-Gov 帳票に近い)
       //   - body { zoom: 1.10 } で 640×940px の outline を A4 に近く拡大
       //     (zoom 1.15 は kagami の高さを超過させて空白ページの原因になる)
+      //   - body { padding-top: 6mm } — kagami は spacer table の関係で
+      //     content 自体が page area より短く、何もしないと top に詰まって
+      //     bottom が大きく余る (top 3mm / bottom 25mm の不均衡)。
+      //     padding-top で content を 6mm 下げることで top/bottom が
+      //     視覚的にほぼ揃う (top ≈ 9mm, bottom ≈ 8mm)。
       const inject = doc.createElement('style');
       inject.textContent = `
         @page { size: A4 portrait; margin: 3mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
-        body { zoom: 1.10; }
+        body { zoom: 1.10; padding-top: 6mm !important; }
         table { page-break-inside: avoid; }
       `;
       (doc.head || doc.documentElement).appendChild(inject);
@@ -640,10 +666,12 @@
           // 右側にあふれる。Shadow 内 <style> の override が効かない
           // ブラウザ挙動への一番確実な対処は、要素そのものを <div> に
           // 置換して UA 既定の影響を完全に外すこと。class や中身は維持。
+          // 同時に、原本帳票が視覚整列のために大量に挿入した全角スペースも
+          // ここで詰めて、不自然な折り返しを消す。
           for (const p of wrap.querySelectorAll('pre')) {
             const div = document.createElement('div');
             for (const a of p.attributes) div.setAttribute(a.name, a.value);
-            while (p.firstChild) div.appendChild(p.firstChild);
+            div.textContent = cleanNoticeText(p.textContent || '');
             div.style.setProperty('white-space', 'pre-wrap', 'important');
             div.style.setProperty('overflow-wrap', 'anywhere', 'important');
             div.style.setProperty('word-break', 'break-word', 'important');
