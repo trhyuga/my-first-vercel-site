@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <title>公文書→PDF | PDFツール</title>
+  <link rel="stylesheet" href="../shared.css" />
+  <style>
+    /* ========== レイアウト ========== */
+    .intro-note {
+      font-size: 0.82rem; color: #475569; line-height: 1.65;
+      background: #ecfeff;
+      border: 1px solid #67e8f9;
+      border-radius: 12px;
+      padding: 0.7rem 0.9rem;
+      margin: 0 0 1rem;
+    }
+    .intro-note b { color: #0e7490; }
+    .intro-note code {
+      background: #fff; padding: 1px 5px; border-radius: 4px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 0.92em;
+    }
+
+    .filelist {
+      display: flex; flex-direction: column; gap: 0.35rem;
+      margin: 0.6rem 0;
+    }
+    .fileitem {
+      display: flex; align-items: center; gap: 0.5rem;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 0.45rem 0.65rem;
+      font-size: 0.86rem;
+    }
+    .fileitem .kind {
+      flex: 0 0 auto;
+      font-size: 0.65rem; font-weight: 700; letter-spacing: 0.05em;
+      padding: 1px 7px; border-radius: 999px;
+      color: #fff;
+    }
+    .fileitem .kind.xml      { background: #0284c7; }
+    .fileitem .kind.xsl      { background: #0e7490; }
+    .fileitem .kind.other    { background: #64748b; }
+    .fileitem .kind.attached { background: #b45309; }
+    .fileitem .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: #0f172a; }
+    .fileitem .size { flex: 0 0 auto; color: #64748b; font-size: 0.78rem; }
+    .fileitem .pair { color: #475569; font-size: 0.75rem; }
+    .fileitem .badge {
+      font-size: 0.72rem; color: #b91c1c;
+      background: #fee2e2; padding: 1px 6px; border-radius: 4px;
+    }
+    .fileitem .download-btn {
+      background: #0ea5e9; color: #fff; border: 0;
+      padding: 0.25rem 0.55rem; border-radius: 6px;
+      font-size: 0.75rem; font-weight: 600; cursor: pointer;
+    }
+
+    /* タブ (複数 XML がある場合) */
+    .doc-tabs {
+      display: flex; gap: 0.3rem; flex-wrap: wrap;
+      margin: 0.8rem 0 0.5rem;
+    }
+    .doc-tab {
+      background: #f1f5f9; color: #475569;
+      border: 1px solid #e2e8f0; border-radius: 8px;
+      padding: 0.35rem 0.7rem;
+      font-size: 0.8rem; font-weight: 600;
+      cursor: pointer; user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .doc-tab.active {
+      background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%);
+      color: #fff;
+      border-color: transparent;
+    }
+
+    /* プレビュー領域 */
+    .preview-pane {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 0.6rem;
+      max-height: 72vh;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      margin-top: 0.5rem;
+    }
+    .preview-pane:empty { display: none; }
+
+    /* Shadow DOM ホスト: XSL 出力をここに入れる。隔離されているので
+       ホストページ側の CSS とは干渉しない。 */
+    .xslt-host {
+      display: block;
+      background: #fff;
+      margin: 0 auto;
+    }
+
+    .action-row {
+      display: flex; gap: 0.5rem; flex-wrap: wrap;
+      margin: 0.7rem 0;
+    }
+    .action-row .btn-primary,
+    .action-row .btn-secondary { min-width: 0; }
+
+    .empty-state {
+      text-align: center; color: #94a3b8;
+      padding: 2rem 1rem;
+      font-size: 0.85rem;
+    }
+    .empty-state b { color: #475569; }
+
+    /* 印刷モード: プレビュー領域だけ A4 で書き出す。@page で余白を抑え、
+       Shadow DOM 内の <body style> がそのまま生きる。 */
+    @media print {
+      @page { size: A4 portrait; margin: 8mm; }
+      body * { visibility: hidden !important; }
+      .preview-pane, .preview-pane * { visibility: visible !important; }
+      .preview-pane {
+        position: absolute !important;
+        left: 0; top: 0; right: 0;
+        max-height: none !important;
+        overflow: visible !important;
+        border: none !important;
+        padding: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+      }
+      .doc-tabs, .action-row, .intro-note, .filelist, .empty-state { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">📜 公文書→PDF</div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="intro-note">
+      e-Gov / 年金機構 / 法務省 などから受け取った <b>公文書の XML + XSL</b> を、
+      ブラウザ上で PDF に変換します。<br>
+      <b>ZIP のままドロップ</b> もOK ── ZIP 内の <code>.xml</code>/<code>.xsl</code> は
+      自動でペアにして変換、添付資料 (PDF / JPG 等) はそのまま個別にダウンロードできます。
+      ファイルは <b>すべて端末内で処理</b> ── サーバーには一切送信されません。
+    </div>
+
+    <!-- ========== ドロップゾーン ========== -->
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" multiple accept=".xml,.xsl,.xslt,.zip,application/xml,text/xml,application/zip" hidden />
+      <div class="icon">📜</div>
+      <p><b>タップしてファイルを選択 / ドラッグ&ドロップ</b></p>
+      <p class="sub">.xml / .xsl / .zip (複数選択可)</p>
+      <div class="fmt-list" style="margin-top:0.6rem;">
+        <span class="fmt-chip">XML</span>
+        <span class="fmt-chip">XSL</span>
+        <span class="fmt-chip">ZIP</span>
+      </div>
+    </div>
+
+    <!-- ========== ファイル一覧 ========== -->
+    <div id="fileListBox"></div>
+
+    <!-- ========== アクション ========== -->
+    <div class="action-row" id="actionRow" style="display:none;">
+      <button class="btn-primary" id="printBtn" style="flex:1;min-width:200px;">🖨️ PDFとして保存 (印刷ダイアログ)</button>
+      <button class="btn-secondary" id="clearBtn">クリア</button>
+    </div>
+
+    <!-- ========== ドキュメントタブ (複数 XML 用) ========== -->
+    <div class="doc-tabs" id="docTabs"></div>
+
+    <!-- ========== プレビュー ========== -->
+    <div class="preview-pane" id="previewPane"></div>
+
+    <!-- ========== メッセージ ========== -->
+    <div id="msg"></div>
+  </main>
+
+  <!-- JSZip — ZIP 解凍用 -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="../shared.js"></script>
+  <script>
+    /* ===========================================================
+     * 公文書→PDF 変換ツール (フルクライアントサイド)
+     *
+     * - XML + XSL を受け取り、ブラウザの XSLTProcessor で変換 → 表示
+     * - ZIP の場合は JSZip で解凍してから処理
+     * - 印刷ダイアログ → 「PDF として保存」で書き出し
+     *
+     * 過去 (doc-pdf) で苦戦した教訓:
+     *   1. XSLTProcessor の出力は HTML パーサーを通っていないので
+     *      <table><td> のような <tr> 省略構造が崩れる。
+     *      → DOMParser('text/html') で再パースして HTML5 の
+     *        auto-insertion (<tbody>/<tr>) を効かせる。
+     *   2. XSL の <style> はホストページに漏らせない (body{} 等)。
+     *      → Shadow DOM に隔離する。
+     *   3. <table class="outline" cellpadding="20"> が内側 640px の
+     *      テーブルを overflow させて A4 はみ出しの原因になる。
+     *      → DOM レベルで cellpadding=0 に書き換える。
+     * =========================================================== */
+
+    const { fmtSize, bindDropzone, showError, clearBox, download } = PDFApp;
+
+    // ----- 状態 -----
+    /** @type {{name:string, kind:'xml'|'xsl'|'other', text?:string, blob?:Blob, fromZip?:string}[]} */
+    let files = [];        // 取り込んだファイル一覧 (XML / XSL は text を保持)
+    let activeDocIdx = 0;  // 現在表示中の XML インデックス
+
+    // ----- DOM ハンドル -----
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const fileListBox = document.getElementById('fileListBox');
+    const actionRow = document.getElementById('actionRow');
+    const docTabs = document.getElementById('docTabs');
+    const previewPane = document.getElementById('previewPane');
+    const msg = document.getElementById('msg');
+
+    // ----- ヘルパー -----
+    function extOf(name) { return (String(name).match(/\.([^.]+)$/) || [,''])[1].toLowerCase(); }
+    function basename(name) { return String(name).split(/[/\\]/).pop(); }
+    function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+    function classifyByExt(name) {
+      const e = extOf(name);
+      if (e === 'xml') return 'xml';
+      if (e === 'xsl' || e === 'xslt') return 'xsl';
+      return 'other';
+    }
+
+    // ----- ZIP 展開 -----
+    async function unpackZip(file) {
+      const zip = await JSZip.loadAsync(await file.arrayBuffer());
+      const out = [];
+      const entries = Object.values(zip.files).filter(e => !e.dir);
+      for (const e of entries) {
+        const name = basename(e.name); // ZIP内パスから basename のみ
+        const kind = classifyByExt(name);
+        if (kind === 'xml' || kind === 'xsl') {
+          const text = await e.async('text');
+          out.push({ name, kind, text, fromZip: file.name });
+        } else {
+          const blob = await e.async('blob');
+          out.push({ name, kind: 'other', blob, fromZip: file.name });
+        }
+      }
+      return out;
+    }
+
+    // ----- 取り込み: ドロップ / ファイル選択 -----
+    async function addFiles(fs) {
+      clearBox(msg);
+      for (const f of fs) {
+        const e = extOf(f.name);
+        try {
+          if (e === 'zip') {
+            const entries = await unpackZip(f);
+            files.push(...entries);
+          } else if (e === 'xml' || e === 'xsl' || e === 'xslt') {
+            const text = await f.text();
+            files.push({ name: f.name, kind: classifyByExt(f.name), text });
+          } else {
+            // その他のファイル — そのまま保持 (添付資料想定)
+            files.push({ name: f.name, kind: 'other', blob: f });
+          }
+        } catch (err) {
+          showError(msg, `${f.name} の読み込みに失敗: ${err.message || err}`);
+        }
+      }
+      activeDocIdx = 0;
+      refreshUI();
+    }
+
+    bindDropzone(dz, fi, (fs) => addFiles(fs));
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      files = [];
+      activeDocIdx = 0;
+      refreshUI();
+    });
+
+    document.getElementById('printBtn').addEventListener('click', () => {
+      window.print();
+    });
+
+    // ----- XSLT 適用 -----
+    // XSL を XML に適用し、結果をスタイル隔離された <div> (Shadow DOM 持ち) として返す。
+    function applyXslt(xmlText, xslText) {
+      const xmlDoc = new DOMParser().parseFromString(xmlText, 'application/xml');
+      if (xmlDoc.querySelector('parsererror')) throw new Error('XML が解釈できませんでした');
+      const xslDoc = new DOMParser().parseFromString(xslText, 'application/xml');
+      if (xslDoc.querySelector('parsererror')) throw new Error('XSL が解釈できませんでした');
+      const proc = new XSLTProcessor();
+      proc.importStylesheet(xslDoc);
+      let frag;
+      try {
+        frag = proc.transformToFragment(xmlDoc, document);
+      } catch (e) {
+        const out = proc.transformToDocument(xmlDoc);
+        frag = document.createDocumentFragment();
+        if (out && out.documentElement) frag.appendChild(out.documentElement);
+      }
+
+      // 先頭の空白テキストノードを飛ばして最初の Element を探す。
+      // <xsl:output method="html" indent="yes"> 時は <html> の前に空白が
+      // 入ることがあり、firstChild だと拾ってしまう。
+      let first = frag.firstChild;
+      while (first && first.nodeType !== 1) first = first.nextSibling;
+
+      const host = document.createElement('div');
+      host.className = 'xslt-host';
+      const shadow = host.attachShadow({ mode: 'open' });
+
+      const isHtmlWrap = first && first.tagName && first.tagName.toUpperCase() === 'HTML';
+      if (isHtmlWrap) {
+        // case-insensitive で head / body を取り出す
+        let head = null, body = null;
+        for (const c of first.childNodes) {
+          if (c.nodeType !== 1) continue;
+          const n = (c.nodeName || '').toUpperCase();
+          if (n === 'HEAD' && !head) head = c;
+          else if (n === 'BODY' && !body) body = c;
+        }
+
+        // <head> 内の <style> / <link> を Shadow Root に持ち込み
+        if (head) {
+          for (const c of head.childNodes) {
+            if (c.nodeType !== 1) continue;
+            const n = (c.nodeName || '').toUpperCase();
+            if (n === 'STYLE' || n === 'LINK') shadow.appendChild(c.cloneNode(true));
+          }
+        }
+
+        // <body> の中身を DOMParser('text/html') で再パースして
+        // tbody/tr などの auto-insertion を効かせる。
+        // XSLTProcessor は API ベースで DOM を組むため、<table><td>...
+        // のように <tr> 省略があると HTML パーサーの自動挿入が走らず、
+        // 結果テーブルが崩れる。'text/html' で文字列からパースし直すと
+        // 外部ファイル読み込みと同じ経路を通るので確実に直る。
+        if (body) {
+          let innerSrc;
+          try { innerSrc = body.innerHTML; }
+          catch (_) { innerSrc = new XMLSerializer().serializeToString(body); }
+          const reparsed = new DOMParser().parseFromString(
+            '<!DOCTYPE html><html><body>' + innerSrc + '</body></html>',
+            'text/html'
+          );
+          const wrap = document.createElement('body');
+          if (body.getAttribute('style')) wrap.setAttribute('style', body.getAttribute('style'));
+          while (reparsed.body.firstChild) wrap.appendChild(reparsed.body.firstChild);
+
+          // outline テーブルの cellpadding=20 / 22 は内側 640px テーブルを
+          // overflow させるので DOM レベルで 0 に書き換える (CSS の
+          // !important より確実)。
+          for (const t of wrap.querySelectorAll('table.outline')) {
+            t.setAttribute('cellpadding', '0');
+            t.setAttribute('cellspacing', '0');
+          }
+          for (const td of wrap.querySelectorAll('td.outline')) {
+            td.style.setProperty('padding', '0', 'important');
+          }
+          shadow.appendChild(wrap);
+        }
+
+        // Shadow 内の基本リセット
+        const reset = document.createElement('style');
+        reset.textContent = `
+          html, body { margin: 0 !important; padding: 0 !important; background: transparent !important; }
+          @media print {
+            html, body { margin: 0 !important; padding: 0 !important; }
+            table { page-break-inside: avoid; }
+          }
+        `;
+        shadow.appendChild(reset);
+      } else {
+        // <html> ラップが無い出力 (kagami.xsl のような簡素な XSL) は
+        // フラグメントをそのまま Shadow に投入。XSL のクラスベース CSS が
+        // 無い前提なので、ホスト側で見やすい基本スタイルを当てる。
+        const baseStyle = document.createElement('style');
+        baseStyle.textContent = `
+          :host { font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Noto Sans JP', sans-serif; }
+          p { margin: 0.4em 0; line-height: 1.7; }
+          p[align="right"], p[align="RIGHT"] { text-align: right; }
+          p[align="center"], p[align="CENTER"] { text-align: center; }
+          p[align="left"], p[align="LEFT"] { text-align: left; }
+          h1, h2, h3, h4 { line-height: 1.3; }
+        `;
+        shadow.appendChild(baseStyle);
+        shadow.appendChild(frag);
+      }
+
+      return host;
+    }
+
+    // ----- ファイル一覧の表示 + ペアリング判定 -----
+    function findXslFor(xmlEntry) {
+      // 1) <?xml-stylesheet href="..."?> を見て href を取り出す
+      let hrefBase = null;
+      const m = String(xmlEntry.text).match(/<\?xml-stylesheet[^?]*href=["']([^"']+)["']/);
+      if (m) hrefBase = basename(m[1]);
+      // 2) その basename と一致する XSL を files から探す
+      if (hrefBase) {
+        const exact = files.find(f => f.kind === 'xsl' && f.name === hrefBase);
+        if (exact) return exact;
+      }
+      // 3) フォールバック: XML と同じ basename (拡張子違い) を探す
+      const xmlBase = xmlEntry.name.replace(/\.xml$/i, '');
+      const sameName = files.find(f => f.kind === 'xsl' && f.name.replace(/\.xsl[tx]?$/i, '') === xmlBase);
+      if (sameName) return sameName;
+      // 4) 最後の保険: XSL がただ 1 つだけならそれを使う
+      const xsls = files.filter(f => f.kind === 'xsl');
+      if (xsls.length === 1) return xsls[0];
+      return null;
+    }
+
+    function renderFileList() {
+      if (files.length === 0) {
+        fileListBox.innerHTML = '';
+        return;
+      }
+      const xmls = files.filter(f => f.kind === 'xml');
+      const xsls = files.filter(f => f.kind === 'xsl');
+      const others = files.filter(f => f.kind === 'other');
+      const rows = [];
+      // XML 行 (ペア相手 / 添付の状態を併記)
+      for (const f of xmls) {
+        const xsl = findXslFor(f);
+        const sub = xsl
+          ? `<span class="pair">↔ <b>${escapeHtml(xsl.name)}</b></span>`
+          : `<span class="badge">XSL 未検出</span>`;
+        rows.push(`<div class="fileitem" data-name="${escapeHtml(f.name)}">
+          <span class="kind xml">XML</span>
+          <span class="name">${escapeHtml(f.name)}</span>
+          ${sub}
+        </div>`);
+      }
+      // 単独 XSL (まだ XML にペアされていないもの) も表示
+      const usedXslNames = new Set(xmls.map(x => (findXslFor(x) || {}).name).filter(Boolean));
+      for (const f of xsls) {
+        if (usedXslNames.has(f.name)) continue;
+        rows.push(`<div class="fileitem">
+          <span class="kind xsl">XSL</span>
+          <span class="name">${escapeHtml(f.name)}</span>
+          <span class="pair">(待機中)</span>
+        </div>`);
+      }
+      // 添付資料 (PDF/JPG/PNG など)
+      for (const f of others) {
+        const size = f.blob ? fmtSize(f.blob.size) : '';
+        rows.push(`<div class="fileitem" data-attached="${escapeHtml(f.name)}">
+          <span class="kind attached">添付</span>
+          <span class="name">${escapeHtml(f.name)}</span>
+          <span class="size">${size}</span>
+          <button class="download-btn" data-dl="${escapeHtml(f.name)}">⬇ DL</button>
+        </div>`);
+      }
+      fileListBox.innerHTML = '<div class="filelist">' + rows.join('') + '</div>';
+      // ダウンロードボタンの配線
+      fileListBox.querySelectorAll('[data-dl]').forEach(btn => {
+        btn.addEventListener('click', (ev) => {
+          const name = ev.currentTarget.getAttribute('data-dl');
+          const f = files.find(x => x.kind === 'other' && x.name === name);
+          if (f && f.blob) download(f.blob, name);
+        });
+      });
+    }
+
+    function renderTabs() {
+      const xmls = files.filter(f => f.kind === 'xml');
+      if (xmls.length <= 1) {
+        docTabs.innerHTML = '';
+        return;
+      }
+      docTabs.innerHTML = xmls.map((f, i) =>
+        `<div class="doc-tab ${i === activeDocIdx ? 'active' : ''}" data-idx="${i}">${escapeHtml(f.name)}</div>`
+      ).join('');
+      docTabs.querySelectorAll('.doc-tab').forEach(t => {
+        t.addEventListener('click', () => {
+          activeDocIdx = parseInt(t.dataset.idx, 10);
+          refreshUI();
+        });
+      });
+    }
+
+    function renderPreview() {
+      previewPane.innerHTML = '';
+      const xmls = files.filter(f => f.kind === 'xml');
+      if (xmls.length === 0) {
+        previewPane.innerHTML = '<div class="empty-state">ここにプレビューが表示されます。<br><b>XML + XSL</b> (または ZIP) をドロップしてください。</div>';
+        return;
+      }
+      const xmlEntry = xmls[activeDocIdx] || xmls[0];
+      const xslEntry = findXslFor(xmlEntry);
+      if (!xslEntry) {
+        previewPane.innerHTML = `<div class="empty-state">
+          <b>${escapeHtml(xmlEntry.name)}</b> に対応する XSL ファイルが見つかりません。<br>
+          公文書 ZIP には通常 同名の .xsl が同梱されています。`
+          + (files.some(f => f.kind === 'xsl')
+              ? `<br>(現在登録されている XSL: ${files.filter(f => f.kind === 'xsl').map(f => escapeHtml(f.name)).join(', ')})`
+              : `<br>該当する .xsl もドロップしてください。`)
+          + `</div>`;
+        return;
+      }
+      try {
+        const host = applyXslt(xmlEntry.text, xslEntry.text);
+        previewPane.appendChild(host);
+      } catch (e) {
+        previewPane.innerHTML = `<div class="empty-state" style="color:#b91c1c;">変換失敗: ${escapeHtml(e.message || String(e))}</div>`;
+      }
+    }
+
+    function refreshUI() {
+      const xmls = files.filter(f => f.kind === 'xml');
+      actionRow.style.display = (files.length > 0) ? '' : 'none';
+      document.getElementById('printBtn').disabled = (xmls.length === 0);
+      renderFileList();
+      renderTabs();
+      renderPreview();
+    }
+
+    // 起動時 — 空状態を表示
+    refreshUI();
+  </script>
+</body>
+</html>
