@@ -544,12 +544,21 @@
       for (const d of doc.querySelectorAll('div[style*="page-break-after"]')) {
         d.remove();
       }
-      // 2 番目以降の outline テーブルに page-break-before:always を明示的に
-      // 付与 (kagami の後で確実に kyoji が新ページ起点になるように)
-      const outlines = doc.querySelectorAll('table.outline');
-      for (let i = 1; i < outlines.length; i++) {
-        outlines[i].style.setProperty('page-break-before', 'always');
-        outlines[i].style.setProperty('break-before', 'page');
+      // 各 outline テーブルの直前に 6mm の空白 div (= 上余白) を挿入する。
+      //   - kagami / kyoji それぞれが新ページ起点で同じ上余白を持つようにする
+      //     (body padding-top では 1 ページ目しか効かない)
+      //   - 2 番目以降の outline 用 spacer には page-break-before:always も
+      //     付けて改ページ起点を兼ねる
+      const outlines = Array.from(doc.querySelectorAll('table.outline'));
+      for (let i = 0; i < outlines.length; i++) {
+        const t = outlines[i];
+        const spacer = doc.createElement('div');
+        spacer.style.height = '6mm';
+        if (i > 0) {
+          spacer.style.setProperty('page-break-before', 'always');
+          spacer.style.setProperty('break-before', 'page');
+        }
+        t.parentNode.insertBefore(spacer, t);
       }
 
       // ===== ファイル名のデフォルト =====
@@ -564,18 +573,18 @@
       // @page + 印刷用リセット CSS を head に注入。
       //   - margin: 3mm (本物の e-Gov 帳票に近い)
       //   - body { zoom: 1.10 } で 640×940px の outline を A4 に近く拡大
-      //     (zoom 1.15 は kagami の高さを超過させて空白ページの原因になる)
-      //   - body { padding-top: 6mm } — kagami は spacer table の関係で
-      //     content 自体が page area より短く、何もしないと top に詰まって
-      //     bottom が大きく余る (top 3mm / bottom 25mm の不均衡)。
-      //     padding-top で content を 6mm 下げることで top/bottom が
-      //     視覚的にほぼ揃う (top ≈ 9mm, bottom ≈ 8mm)。
+      //   - page-break-inside:avoid は table.outline 限定 (外側の
+      //     <table width="100%"> ラッパーに掛けると、ブラウザが全 outline を
+      //     1 ページに収めようとして余分な空白ページを挿入する)。
+      //   - 上余白は body padding-top ではなく outline 直前の spacer div で
+      //     入れる (上で挿入済み) ─ そうしないと kyoji 側 (2 ページ目) に
+      //     上余白が乗らない。
       const inject = doc.createElement('style');
       inject.textContent = `
         @page { size: A4 portrait; margin: 3mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
-        body { zoom: 1.10; padding-top: 6mm !important; }
-        table { page-break-inside: avoid; }
+        body { zoom: 1.10; }
+        table.outline { page-break-inside: avoid; }
       `;
       (doc.head || doc.documentElement).appendChild(inject);
 
