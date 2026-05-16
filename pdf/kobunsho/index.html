@@ -468,10 +468,10 @@
       const { html, filename } = buildStandaloneHtml(xmlEntry.text, xslEntry.text, xmlEntry);
       // 一時 iframe に印刷用 HTML を流し込み、html2canvas で描画 → jsPDF で
       // A4 PDF を組み立て、blob として取り出して anchor で download。
-      // (html2pdf の .save() は環境によっては「PDF を開く」挙動になることが
-      // あるので、output('blob') → 自前 download で確実にファイル保存にする)
       const iframe = document.createElement('iframe');
       iframe.setAttribute('aria-hidden', 'true');
+      // iframe 幅は A4 portrait (210mm = 794px @ 96dpi) に合わせて
+      // 中の outline が「ほぼ A4 サイズ」として認識されるようにする。
       iframe.style.cssText = 'position:fixed; left:-99999px; top:0; width:794px; height:3000px; border:0; visibility:hidden;';
       iframe.srcdoc = html;
       document.body.appendChild(iframe);
@@ -485,16 +485,48 @@
         await sleep(350);
         const innerDoc = iframe.contentDocument;
         if (!innerDoc || !innerDoc.body) throw new Error('iframe document not available');
+
+        // PDF 化用のオーバーライド CSS を注入:
+        //   1. body zoom: 1 (印刷ダイアログ向けの 1.10 だと html2canvas の
+        //      ピクセル計算が狂って kagami が縦長になり A4 1 枚に収まらない)
+        //   2. table.outline { page-break-after: always } で outline ごとに
+        //      確実にページ分割
+        //   3. html, body 幅を 794px に固定 (= A4 portrait)
+        const overrideCss = innerDoc.createElement('style');
+        overrideCss.textContent = `
+          html, body { width: 794px !important; }
+          body { zoom: 1 !important; }
+          table.outline {
+            page-break-after: always !important;
+            page-break-inside: avoid !important;
+            break-after: page !important;
+            break-inside: avoid !important;
+          }
+          table.outline:last-of-type {
+            page-break-after: auto !important;
+            break-after: auto !important;
+          }
+        `;
+        (innerDoc.head || innerDoc.documentElement).appendChild(overrideCss);
+
+        // html2pdf の pagebreak.after で .outline 単位の改ページを更に明示
         const blob = await html2pdf().set({
           margin: [5, 5, 5, 5],
           image: { type: 'jpeg', quality: 0.95 },
-          html2canvas: { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' },
+          html2canvas: {
+            scale: 2,
+            useCORS: true,
+            logging: false,
+            backgroundColor: '#ffffff',
+            windowWidth: 794,
+          },
           jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-          pagebreak: { mode: ['css', 'legacy'] },
+          pagebreak: {
+            mode: ['css', 'legacy'],
+            after: 'table.outline',
+            avoid: 'table.outline',
+          },
         }).from(innerDoc.body).output('blob');
-        // 確実に「ダウンロードフォルダに保存」される形で trigger
-        // (ブラウザ側の "Open PDFs externally" 設定でも開かせないため、
-        //  application/octet-stream 相当の blob として download 属性で発火)
         triggerDownload(blob, filename + '.pdf');
       } finally {
         try { iframe.remove(); } catch (_) {}
