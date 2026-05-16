@@ -867,12 +867,28 @@
         frag = document.createDocumentFragment();
         if (out && out.documentElement) frag.appendChild(out.documentElement);
       }
-      const first = frag.firstChild;
-      const isHtmlWrap = first && first.nodeType === 1 && first.tagName.toUpperCase() === 'HTML';
+      // firstChild ではなく最初の "要素" を探す ── XSL が indent="yes" で出力
+      // すると <html> の前にインデント由来の空白テキストノードが入り、それを
+      // 拾ってしまうと isHtmlWrap が常に false になって Shadow DOM 経路を素通り
+      // してしまう (= XSL の <style> が捨てられる) ので、空白を必ず飛ばす。
+      let first = frag.firstChild;
+      while (first && first.nodeType !== 1) first = first.nextSibling;
+      const isHtmlWrap = first && first.tagName && first.tagName.toUpperCase() === 'HTML';
       if (isHtmlWrap) {
-        const head = first.querySelector('head') || first.querySelector('HEAD');
-        const body = first.querySelector('body') || first.querySelector('BODY');
-        const hasOwnStyles = !!(head && head.querySelector('style, STYLE'));
+        // 名前空間 / 大小ケース両対応で head/body を探す
+        const findChild = (el, name) => {
+          const re = new RegExp('^' + name + '$', 'i');
+          for (const c of el.childNodes) {
+            if (c.nodeType === 1 && re.test(c.nodeName)) return c;
+          }
+          return null;
+        };
+        const head = findChild(first, 'head');
+        const body = findChild(first, 'body');
+        // <style> の有無も case-insensitive で
+        const hasOwnStyles = !!(head && Array.from(head.childNodes).some(c =>
+          c.nodeType === 1 && /^(style|link)$/i.test(c.nodeName)
+        ));
         if (hasOwnStyles) {
           // XSL が <style> を持つ ⇒ Shadow DOM で完全隔離。
           // ホストページの汎用 CSS が body{} / div{} / pre{} に当たるのを防ぎ、
