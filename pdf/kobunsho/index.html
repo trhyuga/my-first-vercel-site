@@ -536,33 +536,41 @@
       }
 
       // XSL が <div style="page-break-after:always" /> を空のページ区切りと
-      // して挿入してくる (7100001.xsl は kagami と 教示文 の間に挿入)。
-      // 元々の意図は次の outline を新ページ送りすることだが、空 div + 改ページ
-      // の組合せで Chrome/Edge は 1 ページ余分な空白ページを作ってしまう。
-      // 後続の outline テーブルには page-break-inside:avoid + 大きい高さが
-      // あるので、本来の改ページ div を撤去しても自然に改ページされる。
+      // して挿入してくる。Edge の挙動が一貫しないので除去。
       for (const d of doc.querySelectorAll('div[style*="page-break-after"]')) {
         d.remove();
       }
-      // 各 outline テーブルの内側 (td.outline の先頭) に 6mm の空白 div を
-      // 挿入して上余白を作る。改ページは outline 自体に page-break-before で。
-      //   - body padding-top では 1 ページ目しか効かない
-      //   - 外側に「空 div + page-break-before」だと Edge がその div 専用に
-      //     1 ページ用意してしまい、空白ページ + kyoji の 3 ページ構成になる
-      //   - 中身があるテーブル要素そのものに page-break-before を付け、
-      //     上余白は td 内の冒頭 div で確保すれば、両ブラウザで挙動が揃う
+      // <br class="kaipage" /> も outline 間の余分な空白原因になるので削除
+      for (const b of doc.querySelectorAll('br.kaipage')) {
+        b.remove();
+      }
+
+      // 各 outline テーブルの中身を整える:
+      //   - 上下にスペーサー div を入れて余白を確保 (上 6mm / 下 10mm)
+      //   - height:940px の固定値を height:auto に上書き (固定値だと
+      //     Edge が outline 1 つで A4 1 枚ぶん高さ確保しようとして
+      //     ページ計算がおかしくなる)
+      //   - 最後の outline 以外には page-break-after:always を付与して
+      //     次の outline を新しい A4 ページ起点にする
+      //     (page-break-before を kyoji に付けると Edge が誤動作するので
+      //     break は kagami 側の後ろに置く)
       const outlines = Array.from(doc.querySelectorAll('table.outline'));
       for (let i = 0; i < outlines.length; i++) {
         const t = outlines[i];
+        // 固定 height を解除して実コンテンツ高にする
+        t.style.height = 'auto';
         const td = t.querySelector('td.outline') || t.querySelector('td');
         if (td) {
-          const spacer = doc.createElement('div');
-          spacer.style.height = '6mm';
-          td.insertBefore(spacer, td.firstChild);
+          const topSpacer = doc.createElement('div');
+          topSpacer.style.height = '6mm';
+          td.insertBefore(topSpacer, td.firstChild);
+          const bottomSpacer = doc.createElement('div');
+          bottomSpacer.style.height = '10mm';
+          td.appendChild(bottomSpacer);
         }
-        if (i > 0) {
-          t.style.setProperty('page-break-before', 'always');
-          t.style.setProperty('break-before', 'page');
+        if (i < outlines.length - 1) {
+          t.style.setProperty('page-break-after', 'always');
+          t.style.setProperty('break-after', 'page');
         }
       }
 
