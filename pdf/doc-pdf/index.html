@@ -272,10 +272,10 @@
     <!-- 資料 → PDF -->
     <section id="to-pdf">
       <div class="dropzone" id="dzTo">
-        <input type="file" id="fiTo" accept=".docx,.xlsx,.txt,.md,.html,.htm,.csv,.xml,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/xml,text/xml" hidden />
+        <input type="file" id="fiTo" multiple accept=".docx,.xlsx,.txt,.md,.html,.htm,.csv,.xml,.xsl,.xslt,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/xml,text/xml" hidden />
         <div class="icon">📄</div>
         <p><b>タップして資料を選択</b></p>
-        <p class="sub">Word (.docx) / Excel (.xlsx) / テキスト / HTML / CSV / XML</p>
+        <p class="sub">Word (.docx) / Excel (.xlsx) / テキスト / HTML / CSV / XML<br>※ XML + XSL を一緒にドロップすると、その XSL で描画します</p>
         <div class="fmt-list">
           <span class="fmt-chip">DOCX</span>
           <span class="fmt-chip">XLSX</span>
@@ -283,6 +283,7 @@
           <span class="fmt-chip">TXT / MD</span>
           <span class="fmt-chip">HTML</span>
           <span class="fmt-chip">XML</span>
+          <span class="fmt-chip">+ XSL</span>
         </div>
       </div>
 
@@ -897,6 +898,8 @@
 
     // 最後に読み込んだ XML を覚えておき、XSL 追加時に再描画できるようにする
     let lastXmlFile = null;
+    // 一緒にドロップされた XSL (このバッチのみ有効、保存しない)
+    let transientXsl = null;
 
     async function renderXml(file) {
       lastXmlFile = file;
@@ -913,11 +916,25 @@
         }
       } catch (_) { /* swallow */ }
 
-      // XSL マッチ — 内蔵 or ユーザー追加 (ベース名でも探す)
-      const xslText = xslHref ? findXsl(xslHref) : null;
-      // XSL が見つからなくても、ユーザーが手動追加した XSL があれば最後の手段で使う
-      const fallbackXslName = !xslText ? Object.keys(loadXslStore())[0] : null;
-      const finalXslText = xslText || (fallbackXslName ? loadXslStore()[fallbackXslName] : null);
+      // 適用する XSL の優先順:
+      //   1. 同じバッチでドロップされた XSL (transientXsl)
+      //   2. <?xml-stylesheet?> の href にマッチする XSL (内蔵 or 保存済み)
+      //   3. 保存済み XSL の中で最初のもの (フォールバック)
+      const xslByHref = xslHref ? findXsl(xslHref) : null;
+      const storedFirstName = Object.keys(loadXslStore())[0] || null;
+      const xslByStored = storedFirstName ? loadXslStore()[storedFirstName] : null;
+      let finalXslText = null;
+      let appliedXslName = null;
+      if (transientXsl) {
+        finalXslText = transientXsl.text;
+        appliedXslName = transientXsl.name + ' (今回のみ)';
+      } else if (xslByHref) {
+        finalXslText = xslByHref;
+        appliedXslName = xslHref;
+      } else if (xslByStored) {
+        finalXslText = xslByStored;
+        appliedXslName = storedFirstName;
+      }
 
       if (finalXslText) {
         try {
@@ -929,7 +946,7 @@
           // どの XSL が適用されたかを画面でだけ告知 (印刷時は非表示)
           const notice = document.createElement('div');
           notice.className = 'xml-xsl-notice no-print';
-          notice.innerHTML = '✅ XSLT 適用: <code>' + escapeHtml(xslHref || fallbackXslName || '') + '</code>';
+          notice.innerHTML = '✅ XSLT 適用: <code>' + escapeHtml(appliedXslName || '') + '</code>';
           previewHost.appendChild(notice);
           previewHost.appendChild(wrap);
           return;
@@ -986,7 +1003,52 @@
       }
     }
 
-    bindDropzone(dzTo, fiTo, (fs) => { if (fs[0]) handleToFile(fs[0]); });
+    // XML と XSL を同時ドロップに対応 — XSL を選り分け、メイン (XML 等) と
+    // 一緒に渡された場合は transient として一回限り適用、単独で渡された場合は
+    // localStorage の XSL ストアに保存して以降の描画でも使えるようにする。
+    bindDropzone(dzTo, fiTo, async (fs) => {
+      const xslFiles    = fs.filter(f => /\.(xsl|xslt)$/i.test(f.name));
+      const otherFiles  = fs.filter(f => !/\.(xsl|xslt)$/i.test(f.name));
+      // XSL だけドロップ → 永続ストアに保存
+      if (xslFiles.length && otherFiles.length === 0) {
+        let added = 0;
+        for (const f of xslFiles) {
+          try {
+            const text = await f.text();
+            const d = new DOMParser().parseFromString(text, 'application/xml');
+            if (d.querySelector('parsererror')) continue;
+            const map = loadXslStore();
+            map[f.name] = text;
+            saveXslStore(map);
+            added++;
+          } catch (_) { /* skip broken file */ }
+        }
+        refreshXslSlot();
+        clearBox(toMsg);
+        const ok = document.createElement('div');
+        ok.className = 'success';
+        ok.textContent = `XSL ${added} 件を保存しました。以降の XML 描画で使われます。`;
+        toMsg.appendChild(ok);
+        if (lastXmlFile) await renderXml(lastXmlFile);
+        return;
+      }
+      // メインファイル + 同伴 XSL がある場合 → このバッチ限定で適用
+      transientXsl = null;
+      if (xslFiles.length) {
+        try {
+          const text = await xslFiles[0].text();
+          // パース検証
+          const d = new DOMParser().parseFromString(text, 'application/xml');
+          if (d.querySelector('parsererror')) throw new Error('XSL が解釈できませんでした');
+          transientXsl = { name: xslFiles[0].name, text };
+        } catch (e) {
+          showError(toMsg, '同伴 XSL の読込失敗: ' + (e.message || e));
+        }
+      }
+      const primary = otherFiles[0];
+      if (!primary) return;
+      await handleToFile(primary);
+    });
 
     document.getElementById('toClear').addEventListener('click', () => {
       dzTo.style.display = 'block';
