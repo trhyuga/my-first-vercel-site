@@ -884,33 +884,37 @@
             const t = (child.tagName || '').toUpperCase();
             if (t === 'STYLE' || t === 'LINK') shadow.appendChild(child.cloneNode(true));
           }
-          if (body) shadow.appendChild(body.cloneNode(true));
+          // ===== DOM レベルで XSL の構造的 overflow を吸収 =====
+          // この種の XSL は <table class="outline" cellpadding="20-22"> の
+          // 内側に width:640px の inner テーブルを差し込む。outline の
+          // cellpadding ぶん (40-44px) inner がはみ出してしまうので、
+          // outline テーブルの cellpadding を 0 にしてしまう。CSS の
+          // !important では HTML 属性 cellpadding と戦えないブラウザが
+          // あるため、属性そのものを書き換える + td へ inline style 注入の
+          // 二重保険。
+          const bodyForShadow = body ? body.cloneNode(true) : null;
+          if (bodyForShadow) {
+            for (const t of bodyForShadow.querySelectorAll('table.outline')) {
+              t.setAttribute('cellpadding', '0');
+              t.setAttribute('cellspacing', '0');
+            }
+            for (const td of bodyForShadow.querySelectorAll('td.outline')) {
+              td.style.setProperty('padding', '0', 'important');
+            }
+            shadow.appendChild(bodyForShadow);
+          }
           // ===== Shadow 内のリセット =====
           // 1. UA の body { margin: 8px } を打ち消し、コンテンツを左右にずらさない
-          // 2. 印刷時に最大幅で配置し、A4 のはみ出し余白を抑える
-          // 3. 大きな固定幅 (640px 等) のテーブルが、画面プレビューで横スクロール
-          //    して見切れることがあるので、ホスト側の幅に余裕がある時だけ
-          //    中央寄せにする (XSL 側の <table align="center"> 系を尊重)
+          // 2. inner テーブルが outline 枠より絶対に大きくならないように max-width
           const reset = document.createElement('style');
           reset.textContent = `
             body { margin: 0 !important; padding: 0 !important; background: transparent !important; }
             html { margin: 0 !important; padding: 0 !important; }
-            /* === 公的書類 XSL の構造的 overflow を救済 ===
-               この種の XSL では <table class="outline" cellpadding="20-22"> の
-               内側に CSS で width:640px のテーブルを差し込む構成になっており、
-               outline の cellpadding ぶん (40-44px) はみ出す。outline セルの
-               padding を 0 にすることで、内側 640px テーブルが outline 枠の
-               中にぴったり収まる。inner テーブルの widthも保険で固定。 */
-            td.outline { padding: 0 !important; }
             table.outline { table-layout: fixed; }
-            table.detail, table.Lterritory, table.Rterritory {
-              max-width: 100%;
-            }
+            table.detail, table.Lterritory, table.Rterritory { max-width: 100%; }
             @media print {
               body { margin: 0 !important; padding: 0 !important; }
               table { page-break-inside: avoid; }
-              /* 印刷時は overflow を絶対に内側に押し込む */
-              td.outline { padding: 0 !important; overflow: hidden; }
             }
           `;
           shadow.appendChild(reset);
