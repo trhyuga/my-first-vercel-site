@@ -347,6 +347,56 @@
       document.body.appendChild(iframe);
     }
 
+    // 「PDF として保存」のデフォルトファイル名に使うタイトルを組み立てる。
+    //   - 被保険者氏名 (XML 内の被保険者漢字氏名 / 氏名 / NAME などから抽出)
+    //   - 書類名 (XSLT 出力の <title> や <td class="title"> 等から抽出)
+    // 両方あれば 「氏名_書類名」、書類名だけなら 「書類名」、何も無ければ
+    // 元の XML ファイル名を使う。
+    function buildDocTitle(xmlText, htmlDoc) {
+      let person = '';
+      try {
+        const xd = new DOMParser().parseFromString(xmlText, 'application/xml');
+        const NAME_FIELDS = [
+          '被保険者漢字氏名', '被保険者カナ氏名', '被保険者氏名',
+          '申請者氏名', '申請者漢字氏名',
+          '氏名', 'NAME', 'PersonName',
+        ];
+        for (const f of NAME_FIELDS) {
+          const el = xd.querySelector(f);
+          if (el && el.textContent && el.textContent.trim()) {
+            person = el.textContent.trim().replace(/\s+/g, '_');
+            break;
+          }
+        }
+      } catch (_) {}
+      let title = '';
+      if (htmlDoc) {
+        const t = htmlDoc.querySelector('title');
+        if (t && t.textContent.trim()) title = t.textContent.trim();
+        if (!title) {
+          // kagami.xsl 系: <P ALIGN="CENTER"> や class="title" にタイトルが入る
+          const cls = htmlDoc.querySelector('.title, td.title, p.title');
+          if (cls && cls.textContent.trim()) title = cls.textContent.trim();
+        }
+      }
+      // XML 側 <TITLE> も最後の保険として確認 (kagami.xsl はここを表示する)
+      if (!title) {
+        try {
+          const xd = new DOMParser().parseFromString(xmlText, 'application/xml');
+          const xt = xd.querySelector('TITLE') || xd.querySelector('title');
+          if (xt && xt.textContent.trim()) title = xt.textContent.trim();
+        } catch (_) {}
+      }
+      // 連結 — 余計な空白を縮約、ファイル名で問題になる文字を簡易除去
+      const safe = (s) => String(s || '').replace(/[\\/:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+      const p = safe(person);
+      const t = safe(title);
+      if (p && t) return `${p}_${t}`;
+      if (t) return t;
+      if (p) return p;
+      return 'document';
+    }
+
     // XSLT を当てて、印刷用に独立した完全な HTML ドキュメント文字列を返す。
     //   1. XSLTProcessor で変換 → fragment
     //   2. <html> ラップを取り出すか、無ければ minimal HTML に包む
@@ -394,20 +444,38 @@
       for (const td of doc.querySelectorAll('td.outline')) {
         td.style.setProperty('padding', '0', 'important');
       }
-      // <pre> も inline style で pre-wrap を強制 (screen 側と同じ理由)
+      // <pre> も <div> に置換 (screen 側と同じ処理 — UA 既定の white-space:pre を構造的に回避)
       for (const p of doc.querySelectorAll('pre')) {
-        p.style.setProperty('white-space', 'pre-wrap', 'important');
-        p.style.setProperty('overflow-wrap', 'anywhere', 'important');
-        p.style.setProperty('word-break', 'break-word', 'important');
+        const div = doc.createElement('div');
+        for (const a of p.attributes) div.setAttribute(a.name, a.value);
+        while (p.firstChild) div.appendChild(p.firstChild);
+        div.style.setProperty('white-space', 'pre-wrap', 'important');
+        div.style.setProperty('overflow-wrap', 'anywhere', 'important');
+        div.style.setProperty('word-break', 'break-word', 'important');
+        div.style.setProperty('font-family', 'inherit');
+        p.replaceWith(div);
       }
 
-      // @page + 印刷用リセット CSS を head に注入。余白は本物の e-Gov 帳票に
-      // 寄せるため 5mm に詰める (8mm では下と横が若干余り気味になる)。
+      // ===== ファイル名のデフォルト =====
+      // ブラウザの「PDF として保存」ダイアログのファイル名は、対象
+      // ドキュメントの <title> から決まる。XML 側に被保険者漢字氏名 等が
+      // あれば「氏名_書類名」を、無ければ書類名のみを <title> に流し込む。
+      const niceTitle = buildDocTitle(xmlText, doc);
+      let titleEl = doc.querySelector('title');
+      if (!titleEl) {
+        titleEl = doc.createElement('title');
+        (doc.head || doc.documentElement).appendChild(titleEl);
+      }
+      titleEl.textContent = niceTitle;
+
+      // @page + 印刷用リセット CSS を head に注入。
+      //   - margin: 3mm (本物の e-Gov 帳票に近い)
+      //   - body { zoom: 1.15 } で 640×940px の outline を A4 ほぼ全面に拡大
       const inject = doc.createElement('style');
       inject.textContent = `
-        @page { size: A4 portrait; margin: 5mm; }
+        @page { size: A4 portrait; margin: 3mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
-        pre { white-space: pre-wrap !important; overflow-wrap: anywhere; word-break: break-word; }
+        body { zoom: 1.15; }
         table { page-break-inside: avoid; }
       `;
       (doc.head || doc.documentElement).appendChild(inject);
@@ -493,13 +561,18 @@
           }
           // <pre> の white-space:pre (UA 既定) は line-break:anywhere や
           // overflow-wrap:break-word を無効化してしまうため、テキストが
-          // 右側にあふれる。inline style + !important で pre-wrap を強制し、
-          // CSS ルールでは覆せないようにする (Shadow 内の <style> override が
-          // 効かないブラウザ挙動への保険)。
+          // 右側にあふれる。Shadow 内 <style> の override が効かない
+          // ブラウザ挙動への一番確実な対処は、要素そのものを <div> に
+          // 置換して UA 既定の影響を完全に外すこと。class や中身は維持。
           for (const p of wrap.querySelectorAll('pre')) {
-            p.style.setProperty('white-space', 'pre-wrap', 'important');
-            p.style.setProperty('overflow-wrap', 'anywhere', 'important');
-            p.style.setProperty('word-break', 'break-word', 'important');
+            const div = document.createElement('div');
+            for (const a of p.attributes) div.setAttribute(a.name, a.value);
+            while (p.firstChild) div.appendChild(p.firstChild);
+            div.style.setProperty('white-space', 'pre-wrap', 'important');
+            div.style.setProperty('overflow-wrap', 'anywhere', 'important');
+            div.style.setProperty('word-break', 'break-word', 'important');
+            div.style.setProperty('font-family', 'inherit');
+            p.replaceWith(div);
           }
           shadow.appendChild(wrap);
         }
