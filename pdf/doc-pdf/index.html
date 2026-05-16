@@ -92,6 +92,13 @@
     .xml-page h3 { font-size: 1.05rem; color: #1e293b; }
     .xml-page h4 { font-size: 0.95rem; color: #334155; }
     .xml-page p  { margin: 0.35em 0; }
+    /* kagami.xsl などレガシー XSL は <P ALIGN="RIGHT"> 等で位置決めしてくる。
+       ブラウザは多くの場合これを尊重するが、明示的に CSS でも当てて確実にする。
+       大文字/小文字どちらの属性値も拾う。 */
+    .xml-page p[align="RIGHT"], .xml-page p[align="right"]   { text-align: right;  }
+    .xml-page p[align="CENTER"], .xml-page p[align="center"] { text-align: center; }
+    .xml-page p[align="LEFT"], .xml-page p[align="left"]     { text-align: left;   }
+    .xml-page p[align="JUSTIFY"], .xml-page p[align="justify"] { text-align: justify; }
     .xml-page .xml-meta {
       font-size: 0.78rem;
       color: #64748b;
@@ -667,8 +674,124 @@
     //    複数 XSL を保存できる (ファイル名キー) ので、kagami.xsl と他システムの
     //    XSL を共存させられる。
     const XSL_STORE_KEY = 'pdf.doc-pdf.xslStore.v1';
+    // 公式の kagami.xsl をそのまま埋め込み。<?xml-stylesheet href="kagami.xsl"?>
+    // を持つ XML を読み込めば、ユーザー操作なしで自動適用される。
+    const KAGAMI_XSL = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
+<xsl:output method="html" encoding="UTF-8" indent="yes" />
+
+<xsl:template match="DOC">
+\t<xsl:apply-templates select="BODY"/>
+</xsl:template>
+
+<xsl:template match="BODY">
+\t<HTML>
+\t<HEAD>
+\t\t<TITLE><xsl:value-of select="TITLE"/></TITLE>
+\t</HEAD>
+\t<BODY>
+\t\t<P ALIGN="RIGHT"><xsl:value-of select="DOCNO"/></P>
+\t\t<xsl:if test="DATE!=''">
+\t\t\t<P ALIGN="RIGHT">
+\t\t\t\t<xsl:value-of select="substring(DATE&#x2C;1&#x2C;2)"/>
+\t\t\t\t<xsl:value-of select="format-number(substring(DATE&#x2C;3&#x2C;2)&#x2C;'##')"/>
+\t\t\t\t<xsl:value-of select="substring(DATE&#x2C;5&#x2C;1)"/>
+\t\t\t\t<xsl:value-of select="format-number(substring(DATE&#x2C;6&#x2C;2)&#x2C;'##')"/>
+\t\t\t\t<xsl:value-of select="substring(DATE&#x2C;8&#x2C;1)"/>
+\t\t\t\t<xsl:value-of select="format-number(substring(DATE&#x2C;9&#x2C;2)&#x2C;'##')"/>
+\t\t\t\t<xsl:value-of select="substring(DATE&#x2C;11&#x2C;1)"/>
+\t\t\t</P>
+\t\t</xsl:if>
+\t\t<xsl:apply-templates select="TO"/>
+\t\t<xsl:apply-templates select="AUTHOR"/>
+
+\t\t<P ALIGN="CENTER">
+\t\t\t<xsl:value-of select="TITLE"/>
+\t\t</P>
+
+\t\t<xsl:apply-templates select="MAINTXT"/>
+\t\t<xsl:apply-templates select="MAINTXT2"/>
+\t\t<xsl:apply-templates select="REFERENC"/>
+
+\t\t<xsl:apply-templates select="APPENDIX"/>
+\t\t<xsl:apply-templates select="MAINTXT3"/>
+\t</BODY>
+\t</HTML>
+</xsl:template>
+
+<xsl:template match="TO">
+\t<xsl:if test="AFF!='' and NAME!=''">
+\t\t<P>
+\t\t<xsl:value-of select="AFF" disable-output-escaping="no"/>
+\t\t</P>
+\t</xsl:if>
+\t<xsl:if test="NAME!=''">
+\t\t<P>
+\t\t<xsl:value-of select="NAME" disable-output-escaping="no"/>
+\t\t<xsl:if test="HONORIFC!='' and NAME!=''">
+\t\t\t<xsl:value-of select="concat('　'&#x2C;HONORIFC)"/>
+\t\t</xsl:if>
+\t\t</P>
+\t</xsl:if>
+</xsl:template>
+
+<xsl:template match="AUTHOR">
+\t<P ALIGN="RIGHT">
+\t<xsl:value-of select="AFF"/>
+\t</P>
+\t<xsl:if test="NAME!=''">
+\t<P ALIGN="RIGHT">
+\t\t<xsl:value-of select="NAME"/>
+\t</P>
+\t</xsl:if>
+</xsl:template>
+
+<xsl:template match="MT2TITLE">
+\t<P ALIGN="CENTER">
+\t\t<xsl:value-of select="."/>
+\t</P>
+</xsl:template>
+
+<xsl:template match="MT2TEXT">
+\t<xsl:apply-templates/>
+</xsl:template>
+
+<xsl:template match="P">
+\t<xsl:copy-of select="."/>
+</xsl:template>
+
+<xsl:template match="APPENDIX">
+\t<xsl:for-each select=".">
+\t\t<xsl:apply-templates select="DOCLINK"/>
+\t\t<BR/>
+\t</xsl:for-each>
+</xsl:template>
+
+<xsl:template match="DOCLINK">
+\t<a>
+\t\t<xsl:attribute name="href">
+\t\t\t<xsl:value-of select="@REF"/>
+\t\t</xsl:attribute>
+\t\t<xsl:attribute name="target">_blank</xsl:attribute>
+\t\t<xsl:value-of select="../APPTITLE"/>
+\t\t(
+\t\t<xsl:value-of select="@REF"/>
+\t\t)
+\t</a>
+</xsl:template>
+
+\t<xsl:template match="link">
+\t\t<a>
+\t\t\t<xsl:attribute name="href">
+\t\t\t\t<xsl:value-of select="@uri"/>
+\t\t\t</xsl:attribute>
+\t\t\t<xsl:value-of select="."/>
+\t\t</a>
+\t</xsl:template>
+
+</xsl:stylesheet>`;
     const BUILTIN_XSL = {
-      // 'kagami.xsl': '<?xml version="1.0"?>...',   // ユーザーから入手したら埋める
+      'kagami.xsl': KAGAMI_XSL,
     };
     function loadXslStore() {
       try {
@@ -718,15 +841,27 @@
       }
       const proc = new XSLTProcessor();
       proc.importStylesheet(xslDoc);
+      let frag;
       try {
-        return proc.transformToFragment(xmlDoc, document);
+        frag = proc.transformToFragment(xmlDoc, document);
       } catch (e) {
         // 一部の XSL は XML 出力を返すので、フォールバックで document として受ける
         const out = proc.transformToDocument(xmlDoc);
-        const frag = document.createDocumentFragment();
+        frag = document.createDocumentFragment();
         if (out && out.documentElement) frag.appendChild(out.documentElement);
-        return frag;
       }
+      // XSL が <HTML><BODY>...</BODY></HTML> でラップしてくる場合 (kagami.xsl がそう)、
+      // 本物の <html>/<body> を二重に入れ子にしないように BODY の中身だけ取り出す。
+      const first = frag.firstChild;
+      if (first && first.nodeType === 1 && first.tagName.toUpperCase() === 'HTML') {
+        const body = first.querySelector('body') || first.querySelector('BODY');
+        if (body) {
+          const inner = document.createDocumentFragment();
+          while (body.firstChild) inner.appendChild(body.firstChild);
+          return inner;
+        }
+      }
+      return frag;
     }
 
     // XSL 追加ボタンの配線
