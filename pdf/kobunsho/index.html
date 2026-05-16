@@ -17,6 +17,27 @@
       margin: 0 0 1rem;
     }
     .intro-note b { color: #0e7490; }
+
+    /* 自動ダウンロードモードのトグル */
+    .auto-dl-toggle {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.55rem 0.8rem;
+      background: linear-gradient(135deg, #ecfeff 0%, #cffafe 100%);
+      border: 1px solid #67e8f9;
+      border-radius: 10px;
+      margin: 0 0 0.8rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #0e7490;
+      cursor: pointer;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .auto-dl-toggle input[type="checkbox"] {
+      width: 18px; height: 18px;
+      accent-color: #0e7490;
+      cursor: pointer;
+    }
     .intro-note code {
       background: #fff; padding: 1px 5px; border-radius: 4px;
       font-family: ui-monospace, 'SF Mono', Menlo, monospace;
@@ -165,6 +186,12 @@
       ファイルは <b>すべて端末内で処理</b> ── サーバーには一切送信されません。
     </div>
 
+    <!-- ========== モード切替 ========== -->
+    <label class="auto-dl-toggle">
+      <input type="checkbox" id="autoDl" checked />
+      <span>ドロップ即 PDF ダウンロード (プレビュー省略)</span>
+    </label>
+
     <!-- ========== ドロップゾーン ========== -->
     <div class="dropzone" id="dz">
       <input type="file" id="fi" multiple accept=".xml,.xsl,.xslt,.zip,application/xml,text/xml,application/zip" hidden />
@@ -197,8 +224,9 @@
     <div id="msg"></div>
   </main>
 
-  <!-- JSZip — ZIP 解凍用 -->
+  <!-- JSZip — ZIP 解凍用 / html2pdf — 自動ダウンロード時の PDF 生成 -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
   <script src="../shared.js"></script>
   <script>
     /* ===========================================================
@@ -292,27 +320,38 @@
     // ----- 取り込み: ドロップ / ファイル選択 -----
     async function addFiles(fs) {
       clearBox(msg);
+      const newEntries = [];
       for (const f of fs) {
         const e = extOf(f.name);
         try {
           if (e === 'zip') {
             const entries = await unpackZip(f);
-            files.push(...entries);
+            newEntries.push(...entries);
           } else if (e === 'xml' || e === 'xsl' || e === 'xslt') {
             const text = await f.text();
-            files.push({
+            newEntries.push({
               name: f.name, kind: classifyByExt(f.name), text,
               lastModified: f.lastModified || null,
             });
           } else {
-            files.push({ name: f.name, kind: 'other', blob: f, lastModified: f.lastModified || null });
+            newEntries.push({ name: f.name, kind: 'other', blob: f, lastModified: f.lastModified || null });
           }
         } catch (err) {
           showError(msg, `${f.name} の読み込みに失敗: ${err.message || err}`);
         }
       }
+      files.push(...newEntries);
       activeDocIdx = 0;
       refreshUI();
+
+      // 自動ダウンロードモード ── 今回追加されたぶんだけ処理する
+      // (既存ファイルが二重ダウンロードされないように newEntries で限定)
+      const autoDl = document.getElementById('autoDl');
+      if (autoDl && autoDl.checked) {
+        const xmls = newEntries.filter(x => x.kind === 'xml');
+        const atts = newEntries.filter(x => x.kind === 'other');
+        await autoDownloadEntries(xmls, atts);
+      }
     }
 
     bindDropzone(dz, fi, (fs) => addFiles(fs));
@@ -379,6 +418,82 @@
         }, 250);
       });
       document.body.appendChild(iframe);
+    }
+
+    // ===== 自動ダウンロード (チェックボックス ON 時) =====
+    //
+    // 印刷ダイアログを通さず、XML+XSL を直接 PDF にしてブラウザ既定の
+    // ダウンロード先 (通常は ~/Downloads) に保存する。HTML→PDF 変換は
+    // html2pdf.js (html2canvas + jsPDF) を使う。
+    //
+    // ブラウザのセキュリティ上、「ドロップ元と同じフォルダ」には保存
+    // できない (Web の File API はアップロードファイルのパスを公開しない)。
+    // 任意のフォルダ指定は将来 Tauri/Electron 化したときに対応可能。
+    async function autoDownloadEntries(xmlEntries, attachments) {
+      if (typeof html2pdf === 'undefined') {
+        showError(msg, 'html2pdf ライブラリが読み込まれていません (Tracking Prevention の可能性)。プレビュー → 印刷ダイアログで PDF 化してください。');
+        return;
+      }
+      // 添付ファイル (XML/XSL 以外) はそのまま blob ダウンロード
+      for (const att of attachments || []) {
+        if (att.blob) {
+          try { download(att.blob, att.name); } catch (_) {}
+          await sleep(120); // ブラウザがダウンロード coalesce しないよう少し間隔
+        }
+      }
+      // 各 XML を PDF 化して保存
+      for (const xmlEntry of xmlEntries || []) {
+        const xslEntry = findXslFor(xmlEntry);
+        if (!xslEntry) {
+          showError(msg, `${xmlEntry.name} に対応する XSL が見つかりません`);
+          continue;
+        }
+        try {
+          await renderXmlAsPdfFile(xmlEntry, xslEntry);
+        } catch (e) {
+          showError(msg, `${xmlEntry.name} の PDF 化に失敗: ${e.message || e}`);
+        }
+        await sleep(120);
+      }
+      // 完了メッセージ
+      const ok = document.createElement('div');
+      ok.className = 'success';
+      ok.textContent = `✅ ${(xmlEntries || []).length}件の PDF + ${(attachments || []).length}件の添付ファイルをダウンロードしました`;
+      msg.appendChild(ok);
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    async function renderXmlAsPdfFile(xmlEntry, xslEntry) {
+      const { html, filename } = buildStandaloneHtml(xmlEntry.text, xslEntry.text, xmlEntry);
+      // 一時 iframe に印刷用 HTML を流し込み、html2canvas で描画 → jsPDF で
+      // A4 PDF にして download。
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.style.cssText = 'position:fixed; left:-99999px; top:0; width:794px; height:3000px; border:0; visibility:hidden;';
+      iframe.srcdoc = html;
+      document.body.appendChild(iframe);
+      try {
+        await new Promise((resolve, reject) => {
+          let done = false;
+          iframe.addEventListener('load', () => { done = true; resolve(); });
+          setTimeout(() => { if (!done) reject(new Error('iframe load timeout')); }, 15000);
+        });
+        // フォント・スタイルの適用待ち
+        await sleep(350);
+        const innerDoc = iframe.contentDocument;
+        if (!innerDoc || !innerDoc.body) throw new Error('iframe document not available');
+        await html2pdf().set({
+          filename: filename + '.pdf',
+          margin: [5, 5, 5, 5],
+          image: { type: 'jpeg', quality: 0.95 },
+          html2canvas: { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+          pagebreak: { mode: ['css', 'legacy'] },
+        }).from(innerDoc.body).save();
+      } finally {
+        try { iframe.remove(); } catch (_) {}
+      }
     }
 
     // 「PDF として保存」のデフォルトファイル名: 「氏名_YYYYMMDD_書類名」
