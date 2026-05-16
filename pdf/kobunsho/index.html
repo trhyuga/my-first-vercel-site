@@ -544,21 +544,26 @@
       for (const d of doc.querySelectorAll('div[style*="page-break-after"]')) {
         d.remove();
       }
-      // 各 outline テーブルの直前に 6mm の空白 div (= 上余白) を挿入する。
-      //   - kagami / kyoji それぞれが新ページ起点で同じ上余白を持つようにする
-      //     (body padding-top では 1 ページ目しか効かない)
-      //   - 2 番目以降の outline 用 spacer には page-break-before:always も
-      //     付けて改ページ起点を兼ねる
+      // 各 outline テーブルの内側 (td.outline の先頭) に 6mm の空白 div を
+      // 挿入して上余白を作る。改ページは outline 自体に page-break-before で。
+      //   - body padding-top では 1 ページ目しか効かない
+      //   - 外側に「空 div + page-break-before」だと Edge がその div 専用に
+      //     1 ページ用意してしまい、空白ページ + kyoji の 3 ページ構成になる
+      //   - 中身があるテーブル要素そのものに page-break-before を付け、
+      //     上余白は td 内の冒頭 div で確保すれば、両ブラウザで挙動が揃う
       const outlines = Array.from(doc.querySelectorAll('table.outline'));
       for (let i = 0; i < outlines.length; i++) {
         const t = outlines[i];
-        const spacer = doc.createElement('div');
-        spacer.style.height = '6mm';
-        if (i > 0) {
-          spacer.style.setProperty('page-break-before', 'always');
-          spacer.style.setProperty('break-before', 'page');
+        const td = t.querySelector('td.outline') || t.querySelector('td');
+        if (td) {
+          const spacer = doc.createElement('div');
+          spacer.style.height = '6mm';
+          td.insertBefore(spacer, td.firstChild);
         }
-        t.parentNode.insertBefore(spacer, t);
+        if (i > 0) {
+          t.style.setProperty('page-break-before', 'always');
+          t.style.setProperty('break-before', 'page');
+        }
       }
 
       // ===== ファイル名のデフォルト =====
