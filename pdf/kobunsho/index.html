@@ -467,7 +467,9 @@
     async function renderXmlAsPdfFile(xmlEntry, xslEntry) {
       const { html, filename } = buildStandaloneHtml(xmlEntry.text, xslEntry.text, xmlEntry);
       // 一時 iframe に印刷用 HTML を流し込み、html2canvas で描画 → jsPDF で
-      // A4 PDF にして download。
+      // A4 PDF を組み立て、blob として取り出して anchor で download。
+      // (html2pdf の .save() は環境によっては「PDF を開く」挙動になることが
+      // あるので、output('blob') → 自前 download で確実にファイル保存にする)
       const iframe = document.createElement('iframe');
       iframe.setAttribute('aria-hidden', 'true');
       iframe.style.cssText = 'position:fixed; left:-99999px; top:0; width:794px; height:3000px; border:0; visibility:hidden;';
@@ -483,17 +485,35 @@
         await sleep(350);
         const innerDoc = iframe.contentDocument;
         if (!innerDoc || !innerDoc.body) throw new Error('iframe document not available');
-        await html2pdf().set({
-          filename: filename + '.pdf',
+        const blob = await html2pdf().set({
           margin: [5, 5, 5, 5],
           image: { type: 'jpeg', quality: 0.95 },
           html2canvas: { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' },
           jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
           pagebreak: { mode: ['css', 'legacy'] },
-        }).from(innerDoc.body).save();
+        }).from(innerDoc.body).output('blob');
+        // 確実に「ダウンロードフォルダに保存」される形で trigger
+        // (ブラウザ側の "Open PDFs externally" 設定でも開かせないため、
+        //  application/octet-stream 相当の blob として download 属性で発火)
+        triggerDownload(blob, filename + '.pdf');
       } finally {
         try { iframe.remove(); } catch (_) {}
       }
+    }
+
+    function triggerDownload(blob, name) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.rel = 'noopener';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        try { document.body.removeChild(a); } catch (_) {}
+        URL.revokeObjectURL(url);
+      }, 1500);
     }
 
     // 「PDF として保存」のデフォルトファイル名: 「氏名_YYYYMMDD_書類名」
@@ -939,12 +959,24 @@
 
     function refreshUI() {
       const xmls = files.filter(f => f.kind === 'xml');
-      actionRow.style.display = (files.length > 0) ? '' : 'none';
+      const autoDl = document.getElementById('autoDl');
+      const isAuto = !!(autoDl && autoDl.checked);
+      // 自動ダウンロードモード時は、印刷ボタン / タブ / プレビューを表示せず、
+      // ファイル一覧だけ「処理履歴」として残す。次々にドロップするユース用。
+      actionRow.style.display = (files.length > 0 && !isAuto) ? '' : 'none';
       document.getElementById('printBtn').disabled = (xmls.length === 0);
       renderFileList();
-      renderTabs();
-      renderPreview();
+      if (isAuto) {
+        docTabs.innerHTML = '';
+        previewPane.innerHTML = '';
+      } else {
+        renderTabs();
+        renderPreview();
+      }
     }
+
+    // チェックボックスの切替で UI 更新
+    document.getElementById('autoDl').addEventListener('change', refreshUI);
 
     // 起動時 — 空状態を表示
     refreshUI();
