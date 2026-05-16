@@ -213,6 +213,19 @@
       }
       .xml-xsl-notice, .no-print { display: none !important; }
     }
+    /* XSLT 出力は Shadow DOM に入れて、ホストページの CSS と完全に隔離する。
+       XSL に含まれる body / div / pre / br などの "グローバル" な選択子が
+       ホスト側の要素 (実際の <body> や戦闘ログの <div> など) に漏れて
+       レイアウトを破壊しないようにするための処置。 */
+    .xml-xslt-host {
+      display: block;
+      background: #fff;
+      margin: 0 auto;
+      min-height: 50px;
+    }
+    @media print {
+      .xml-xslt-host { margin: 0; min-height: 0; }
+    }
 
     /* When printing, only the preview host should appear. The @page rule
        forces A4 portrait with tight margins so the browser's Print→PDF
@@ -830,39 +843,61 @@
       const label = all.length === 1 ? all[0] : `${all.length} files (${all.join(', ')})`;
       nameEl.textContent = label;
     }
-    // XML 文字列に XSL を適用して DocumentFragment を返す
+    // XML 文字列に XSL を適用して、Shadow DOM で隔離した表示ホストを返す。
+    // XSL が <HTML><HEAD><STYLE> を含む完全な HTML ドキュメントを出すケース
+    // (kagami.xsl / 年金機構の各種帳票 XSL など) では、その <style> と <body>
+    // をそのまま Shadow Root に持ち込むことで、ホストページに body{} や div{}
+    // などのグローバル CSS が漏れ出ないようにする。
     function applyXsltText(xmlText, xslText) {
       const xmlDoc = new DOMParser().parseFromString(xmlText, 'application/xml');
-      if (xmlDoc.querySelector('parsererror')) {
-        throw new Error('XML が解釈できませんでした');
-      }
+      if (xmlDoc.querySelector('parsererror')) throw new Error('XML が解釈できませんでした');
       const xslDoc = new DOMParser().parseFromString(xslText, 'application/xml');
-      if (xslDoc.querySelector('parsererror')) {
-        throw new Error('XSL が解釈できませんでした');
-      }
+      if (xslDoc.querySelector('parsererror')) throw new Error('XSL が解釈できませんでした');
       const proc = new XSLTProcessor();
       proc.importStylesheet(xslDoc);
       let frag;
       try {
         frag = proc.transformToFragment(xmlDoc, document);
       } catch (e) {
-        // 一部の XSL は XML 出力を返すので、フォールバックで document として受ける
         const out = proc.transformToDocument(xmlDoc);
         frag = document.createDocumentFragment();
         if (out && out.documentElement) frag.appendChild(out.documentElement);
       }
-      // XSL が <HTML><BODY>...</BODY></HTML> でラップしてくる場合 (kagami.xsl がそう)、
-      // 本物の <html>/<body> を二重に入れ子にしないように BODY の中身だけ取り出す。
       const first = frag.firstChild;
-      if (first && first.nodeType === 1 && first.tagName.toUpperCase() === 'HTML') {
+      const isHtmlWrap = first && first.nodeType === 1 && first.tagName.toUpperCase() === 'HTML';
+      if (isHtmlWrap) {
+        const head = first.querySelector('head') || first.querySelector('HEAD');
         const body = first.querySelector('body') || first.querySelector('BODY');
-        if (body) {
-          const inner = document.createDocumentFragment();
-          while (body.firstChild) inner.appendChild(body.firstChild);
-          return inner;
+        const hasOwnStyles = !!(head && head.querySelector('style, STYLE'));
+        if (hasOwnStyles) {
+          // XSL が <style> を持つ ⇒ Shadow DOM で完全隔離。
+          // ホストページの汎用 CSS が body{} / div{} / pre{} に当たるのを防ぎ、
+          // XSL のクラス指定どおりにテーブル / 罫線 / フォントを描画する。
+          const host = document.createElement('div');
+          host.className = 'xml-xslt-host';
+          const shadow = host.attachShadow({ mode: 'open' });
+          for (const child of Array.from(head.children)) {
+            const t = (child.tagName || '').toUpperCase();
+            if (t === 'STYLE' || t === 'LINK') shadow.appendChild(child.cloneNode(true));
+          }
+          if (body) shadow.appendChild(body.cloneNode(true));
+          return host;
         }
+        // XSL に style が無いケース (kagami.xsl など) ⇒ こちら側の .xml-page
+        // CSS (A4 レイアウト + <P ALIGN> 等の表示ルール) に乗せる。
+        const wrap = document.createElement('div');
+        wrap.className = 'xml-page';
+        if (body) {
+          if (body.getAttribute('style')) wrap.setAttribute('style', body.getAttribute('style'));
+          while (body.firstChild) wrap.appendChild(body.firstChild);
+        }
+        return wrap;
       }
-      return frag;
+      // <HTML> ラップが無い出力はそのまま .xml-page に投入
+      const wrap = document.createElement('div');
+      wrap.className = 'xml-page';
+      while (frag.firstChild) wrap.appendChild(frag.firstChild);
+      return wrap;
     }
 
     // XSL 追加ボタンの配線
@@ -938,11 +973,8 @@
 
       if (finalXslText) {
         try {
-          const frag = applyXsltText(raw, finalXslText);
+          const wrap = applyXsltText(raw, finalXslText);
           previewHost.innerHTML = '';
-          const wrap = document.createElement('div');
-          wrap.className = 'xml-page';
-          wrap.appendChild(frag);
           // どの XSL が適用されたかを画面でだけ告知 (印刷時は非表示)
           const notice = document.createElement('div');
           notice.className = 'xml-xsl-notice no-print';
