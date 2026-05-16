@@ -535,34 +535,15 @@
         p.replaceWith(div);
       }
 
-      // XSL が outline 間に挿入する空のページ区切り div を除去。
-      // (XSL 自前の page-break-after は両ブラウザで誤動作の原因になる)
-      for (const d of doc.querySelectorAll('div[style*="page-break-after"]')) {
-        d.remove();
-      }
-
-      // 各 outline テーブルに対し:
-      //   - td.outline の先頭に 6mm 高さの spacer div を入れて、A4 上部
-      //     余白に加えて outline 内側にも余裕を作る
-      //   - 2 番目以降の outline には page-break-before:always を直接付与
-      //     して kyoji を必ず新しい A4 ページ起点にする
-      // 外側 <table border="0" width="100%"> ラッパー / outline の固定 height /
-      // <br class="kaipage"> はいじらない (前回いじったら page 1 がはみ出す
-      // 副作用が出た)。
-      const outlines = Array.from(doc.querySelectorAll('table.outline'));
-      for (let i = 0; i < outlines.length; i++) {
-        const t = outlines[i];
-        const td = t.querySelector('td.outline') || t.querySelector('td');
-        if (td) {
-          const spacer = doc.createElement('div');
-          spacer.style.height = '6mm';
-          td.insertBefore(spacer, td.firstChild);
-        }
-        if (i > 0) {
-          t.style.setProperty('page-break-before', 'always');
-          t.style.setProperty('break-before', 'page');
-        }
-      }
+      // === ここでは layout の DOM 改変はしない ===
+      //
+      // XSL が用意した outline の高さ・page-break-after div・br.kaipage を
+      // そのままにする。inner spacer も追加しない。何度かこれらに手を入れた
+      // ところ、kagami の枠が縦長になって 1 ページに収まらなくなる副作用が
+      // 必ず出たため。XSL 本来のレイアウト判断を尊重し、印刷用 CSS で
+      // 必要な調整 (@page / zoom / cellpadding 0 / pre→div) だけを行う。
+      // (XSL 自前の page-break-after は kagami と kyoji の改ページ起点に
+      // ちゃんと使われているので、削除しない)
 
       // ===== ファイル名のデフォルト =====
       const filename = buildDocTitle(xmlText, doc, xmlEntry);
@@ -574,17 +555,15 @@
       titleEl.textContent = filename;
 
       // @page + 印刷用リセット CSS を head に注入。
-      //   - @page: A4 portrait, margin 3mm 3mm 13mm 3mm
-      //     bottom だけ +10mm (= 13mm) でユーザー要望の page 1 下余白増加
-      //   - body { zoom: 1.10 } で 640×940px の outline を A4 に近く拡大
-      //   - page-break-inside:avoid は outline 限定 (汎用 table に当てると
-      //     外側ラッパーまで巻き込んで空白ページ生成の原因になる)
+      //   - @page: A4 portrait, margin 5mm (左右上下とも 5mm)
+      //   - body { zoom: 1.10 } で 640×940px の outline を A4 に寄せる
+      //   - page-break-inside / page-break-before の操作は一切しない
+      //     (XSL 自前の改ページ指示に任せる)
       const inject = doc.createElement('style');
       inject.textContent = `
-        @page { size: A4 portrait; margin: 3mm 3mm 13mm 3mm; }
+        @page { size: A4 portrait; margin: 5mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
         body { zoom: 1.10; }
-        table.outline { page-break-inside: avoid; }
       `;
       (doc.head || doc.documentElement).appendChild(inject);
 
