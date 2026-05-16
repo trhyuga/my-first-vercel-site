@@ -535,42 +535,51 @@
         p.replaceWith(div);
       }
 
-      // XSL が <div style="page-break-after:always" /> を空のページ区切りと
-      // して挿入してくる。Edge の挙動が一貫しないので除去。
+      // === レイアウト整形 ===
+      //
+      // XSL は <body><table border="0" width="100%"><tr><td align="center">
+      // ...outlines...</td></tr></table></body> という構造で全 outline を
+      // センタリング用の 1 つのテーブルに包んでいる。これが Edge の改ページ
+      // 計算を狂わせて空白ページの原因になっているので、ラッパーを撤去して
+      // outline 群を body 直下に上げる。
+      for (const w of doc.querySelectorAll('body > table')) {
+        if (w.getAttribute('border') === '0' && /^100%?$/.test(w.getAttribute('width') || '')) {
+          const parent = w.parentNode;
+          const innerTds = w.querySelectorAll(':scope > tbody > tr > td, :scope > tr > td');
+          for (const td of innerTds) {
+            while (td.firstChild) parent.insertBefore(td.firstChild, w);
+          }
+          w.remove();
+        }
+      }
+
+      // XSL が outline 間に挿入する空ページ区切り要素を除去:
+      //   <div style="page-break-after:always" />
+      //   <br class="kaipage" />
       for (const d of doc.querySelectorAll('div[style*="page-break-after"]')) {
         d.remove();
       }
-      // <br class="kaipage" /> も outline 間の余分な空白原因になるので削除
       for (const b of doc.querySelectorAll('br.kaipage')) {
         b.remove();
       }
 
-      // 各 outline テーブルの中身を整える:
-      //   - 上下にスペーサー div を入れて余白を確保 (上 6mm / 下 10mm)
-      //   - height:940px の固定値を height:auto に上書き (固定値だと
-      //     Edge が outline 1 つで A4 1 枚ぶん高さ確保しようとして
-      //     ページ計算がおかしくなる)
-      //   - 最後の outline 以外には page-break-after:always を付与して
-      //     次の outline を新しい A4 ページ起点にする
-      //     (page-break-before を kyoji に付けると Edge が誤動作するので
-      //     break は kagami 側の後ろに置く)
+      // outline ごとに:
+      //   - td.outline の先頭に 6mm のスペーサー div を入れて上余白を確保
+      //   - 2 番目以降の outline は page-break-before:always で改ページ起点に
+      // outline の固定 height (940px) はそのまま尊重する (auto に書き換えると
+      // page 1 の中身が前詰めになって余白配置が崩れる)。
       const outlines = Array.from(doc.querySelectorAll('table.outline'));
       for (let i = 0; i < outlines.length; i++) {
         const t = outlines[i];
-        // 固定 height を解除して実コンテンツ高にする
-        t.style.height = 'auto';
         const td = t.querySelector('td.outline') || t.querySelector('td');
         if (td) {
-          const topSpacer = doc.createElement('div');
-          topSpacer.style.height = '6mm';
-          td.insertBefore(topSpacer, td.firstChild);
-          const bottomSpacer = doc.createElement('div');
-          bottomSpacer.style.height = '10mm';
-          td.appendChild(bottomSpacer);
+          const spacer = doc.createElement('div');
+          spacer.style.height = '6mm';
+          td.insertBefore(spacer, td.firstChild);
         }
-        if (i < outlines.length - 1) {
-          t.style.setProperty('page-break-after', 'always');
-          t.style.setProperty('break-after', 'page');
+        if (i > 0) {
+          t.style.setProperty('page-break-before', 'always');
+          t.style.setProperty('break-before', 'page');
         }
       }
 
@@ -584,20 +593,19 @@
       titleEl.textContent = filename;
 
       // @page + 印刷用リセット CSS を head に注入。
-      //   - margin: 3mm (本物の e-Gov 帳票に近い)
-      //   - body { zoom: 1.10 } で 640×940px の outline を A4 に近く拡大
-      //   - page-break-inside:avoid は table.outline 限定 (外側の
-      //     <table width="100%"> ラッパーに掛けると、ブラウザが全 outline を
-      //     1 ページに収めようとして余分な空白ページを挿入する)。
-      //   - 上余白は body padding-top ではなく outline 直前の spacer div で
-      //     入れる (上で挿入済み) ─ そうしないと kyoji 側 (2 ページ目) に
-      //     上余白が乗らない。
+      //   - margin: 3mm 3mm 13mm 3mm — bottom だけ +10mm (ユーザー要望)
+      //   - body { zoom: 1.10 } — 640×940px outline を A4 に近く拡大
+      //   - outline は外側ラッパー撤去後の body 直下に居るので、
+      //     margin: 0 auto で自前に水平センタリング
       const inject = doc.createElement('style');
       inject.textContent = `
-        @page { size: A4 portrait; margin: 3mm; }
+        @page { size: A4 portrait; margin: 3mm 3mm 13mm 3mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
         body { zoom: 1.10; }
-        table.outline { page-break-inside: avoid; }
+        table.outline {
+          page-break-inside: avoid;
+          margin: 0 auto;
+        }
       `;
       (doc.head || doc.documentElement).appendChild(inject);
 
