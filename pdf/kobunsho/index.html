@@ -119,7 +119,7 @@
        完全に消し、preview-pane を通常フローで A4 全幅に展開する方式に
        切り替えた。 */
     @media print {
-      @page { size: A4 portrait; margin: 8mm; }
+      @page { size: A4 portrait; margin: 5mm; }
       html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
       body > header,
       body > main > .intro-note,
@@ -394,11 +394,18 @@
       for (const td of doc.querySelectorAll('td.outline')) {
         td.style.setProperty('padding', '0', 'important');
       }
+      // <pre> も inline style で pre-wrap を強制 (screen 側と同じ理由)
+      for (const p of doc.querySelectorAll('pre')) {
+        p.style.setProperty('white-space', 'pre-wrap', 'important');
+        p.style.setProperty('overflow-wrap', 'anywhere', 'important');
+        p.style.setProperty('word-break', 'break-word', 'important');
+      }
 
-      // @page + 印刷用リセット CSS を head に注入
+      // @page + 印刷用リセット CSS を head に注入。余白は本物の e-Gov 帳票に
+      // 寄せるため 5mm に詰める (8mm では下と横が若干余り気味になる)。
       const inject = doc.createElement('style');
       inject.textContent = `
-        @page { size: A4 portrait; margin: 8mm; }
+        @page { size: A4 portrait; margin: 5mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
         pre { white-space: pre-wrap !important; overflow-wrap: anywhere; word-break: break-word; }
         table { page-break-inside: avoid; }
@@ -483,6 +490,16 @@
           }
           for (const td of wrap.querySelectorAll('td.outline')) {
             td.style.setProperty('padding', '0', 'important');
+          }
+          // <pre> の white-space:pre (UA 既定) は line-break:anywhere や
+          // overflow-wrap:break-word を無効化してしまうため、テキストが
+          // 右側にあふれる。inline style + !important で pre-wrap を強制し、
+          // CSS ルールでは覆せないようにする (Shadow 内の <style> override が
+          // 効かないブラウザ挙動への保険)。
+          for (const p of wrap.querySelectorAll('pre')) {
+            p.style.setProperty('white-space', 'pre-wrap', 'important');
+            p.style.setProperty('overflow-wrap', 'anywhere', 'important');
+            p.style.setProperty('word-break', 'break-word', 'important');
           }
           shadow.appendChild(wrap);
         }
