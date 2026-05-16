@@ -895,9 +895,22 @@
           reset.textContent = `
             body { margin: 0 !important; padding: 0 !important; background: transparent !important; }
             html { margin: 0 !important; padding: 0 !important; }
+            /* === 公的書類 XSL の構造的 overflow を救済 ===
+               この種の XSL では <table class="outline" cellpadding="20-22"> の
+               内側に CSS で width:640px のテーブルを差し込む構成になっており、
+               outline の cellpadding ぶん (40-44px) はみ出す。outline セルの
+               padding を 0 にすることで、内側 640px テーブルが outline 枠の
+               中にぴったり収まる。inner テーブルの widthも保険で固定。 */
+            td.outline { padding: 0 !important; }
+            table.outline { table-layout: fixed; }
+            table.detail, table.Lterritory, table.Rterritory {
+              max-width: 100%;
+            }
             @media print {
               body { margin: 0 !important; padding: 0 !important; }
               table { page-break-inside: avoid; }
+              /* 印刷時は overflow を絶対に内側に押し込む */
+              td.outline { padding: 0 !important; overflow: hidden; }
             }
           `;
           shadow.appendChild(reset);
