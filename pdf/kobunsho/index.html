@@ -112,23 +112,38 @@
     }
     .empty-state b { color: #475569; }
 
-    /* 印刷モード: プレビュー領域だけ A4 で書き出す。@page で余白を抑え、
-       Shadow DOM 内の <body style> がそのまま生きる。 */
+    /* 印刷モード: プレビュー領域だけ A4 で書き出す。
+       visibility: hidden + position: absolute 方式 (doc-pdf の旧版) は、
+       Edge の印刷エンジンで content area の幅を 60% 程度に勘違いして
+       縮小レンダリングする事象があったので、display: none で UI 要素を
+       完全に消し、preview-pane を通常フローで A4 全幅に展開する方式に
+       切り替えた。 */
     @media print {
       @page { size: A4 portrait; margin: 8mm; }
-      body * { visibility: hidden !important; }
-      .preview-pane, .preview-pane * { visibility: visible !important; }
+      html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+      body > header,
+      body > main > .intro-note,
+      body > main > .dropzone,
+      body > main > #fileListBox,
+      body > main > .action-row,
+      body > main > .doc-tabs,
+      body > main > #msg,
+      body > main > footer,
+      body > main > script {
+        display: none !important;
+      }
+      body > main { padding: 0 !important; margin: 0 !important; max-width: none !important; width: 100% !important; }
       .preview-pane {
-        position: absolute !important;
-        left: 0; top: 0; right: 0;
         max-height: none !important;
         overflow: visible !important;
-        border: none !important;
+        border: 0 !important;
         padding: 0 !important;
+        margin: 0 !important;
         background: transparent !important;
         box-shadow: none !important;
+        width: 100% !important;
       }
-      .doc-tabs, .action-row, .intro-note, .filelist, .empty-state { display: none !important; }
+      .xslt-host { width: 100% !important; max-width: none !important; }
     }
   </style>
 </head>
