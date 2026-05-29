@@ -141,6 +141,7 @@
     .tool.violet .icon { background: #ede9fe; }
     .tool.red .icon { background: #fee2e2; }
     .tool.slate .icon { background: #e2e8f0; }
+    .tool.teal .icon { background: #ccfbf1; }
     .tool .body { flex: 1; min-width: 0; padding-top: 0.05rem; }
     .tool .t {
       font-size: 0.98rem;
@@ -237,6 +238,14 @@
         <div class="body">
           <div class="t">録音 & 文字起こし</div>
           <div class="d">Opus極小ファイルで録音しつつリアルタイム文字起こし。話者も自動で分類、NotebookLM向けに出力。</div>
+        </div>
+        <span class="arrow">→</span>
+      </a>
+      <a class="tool teal" href="./transcribe/">
+        <div class="icon">🎧</div>
+        <div class="body">
+          <div class="t">音声ファイル文字起こし</div>
+          <div class="d">WAV等の音声をMP3に変換しつつ、端末内のWhisperで文字起こし。フィラー(えー・あのー等)も自動で除去。</div>
         </div>
         <span class="arrow">→</span>
       </a>

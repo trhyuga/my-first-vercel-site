@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>音声ファイル文字起こし | ひゅうがのTR-Labo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky; top: 0; z-index: 20;
+    }
+    .brand {
+      max-width: 760px; margin: 0 auto; padding: 0.7rem 1rem;
+      display: flex; align-items: center; gap: 0.6rem;
+    }
+    .back-btn {
+      width: 36px; height: 36px; border-radius: 9px;
+      border: 1px solid #e2e8f0; background: #fff; color: #475569;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem; -webkit-tap-highlight-color: transparent;
+    }
+    .back-btn:active { background: #f1f5f9; }
+    .logo {
+      width: 34px; height: 34px; border-radius: 9px;
+      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800; font-size: 0.78rem;
+      box-shadow: 0 4px 10px rgba(14,165,233,0.25);
+    }
+    .brand-name { font-weight: 700; font-size: 1rem; }
+
+    main { max-width: 760px; margin: 0 auto;
+      padding: 1.1rem 1rem calc(2rem + env(safe-area-inset-bottom)); }
+
+    .hero { margin-bottom: 1.1rem; }
+    .hero h1 { font-size: 1.35rem; line-height: 1.4; font-weight: 800; }
+    .hero h1 .accent { color: #0ea5e9; }
+    .hero p { margin-top: 0.5rem; color: #475569; font-size: 0.9rem; line-height: 1.7; }
+
+    .card {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 16px;
+      padding: 1rem; margin-bottom: 1rem;
+      box-shadow: 0 1px 2px rgba(15,23,42,0.04);
+    }
+
+    .dropzone {
+      border: 2px dashed #cbd5e1; border-radius: 16px; background: #fff;
+      padding: 1.6rem 1rem; text-align: center; cursor: pointer;
+      transition: border-color .15s, background .15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .dropzone:active, .dropzone.drag { border-color: #0ea5e9; background: #f0f9ff; }
+    .dropzone .icon { font-size: 2rem; }
+    .dropzone p { margin-top: 0.4rem; font-size: 0.92rem; }
+    .dropzone .sub { color: #64748b; font-size: 0.78rem; margin-top: 0.3rem; }
+
+    .opts { display: flex; flex-direction: column; gap: 0.8rem; }
+    .opt-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    .opt-row label.lbl { font-size: 0.86rem; color: #334155; font-weight: 600; }
+    .check { display: flex; align-items: center; gap: 0.55rem; cursor: pointer; }
+    .check input { width: 18px; height: 18px; accent-color: #0ea5e9; flex: 0 0 auto; }
+    .check span { font-size: 0.88rem; }
+    select {
+      font: inherit; font-size: 0.88rem; padding: 0.4rem 0.6rem;
+      border: 1px solid #cbd5e1; border-radius: 9px; background: #fff; color: #0f172a;
+    }
+    .hint { color: #64748b; font-size: 0.78rem; line-height: 1.6; }
+
+    .btn {
+      appearance: none; border: 0; border-radius: 11px; padding: 0.7rem 1rem;
+      font: inherit; font-weight: 700; font-size: 0.92rem; cursor: pointer;
+      min-height: 48px; display: inline-flex; align-items: center;
+      justify-content: center; gap: 0.4rem; -webkit-tap-highlight-color: transparent;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: linear-gradient(135deg, #0ea5e9, #06b6d4); color: #fff;
+      box-shadow: 0 4px 12px rgba(14,165,233,0.3); }
+    .btn-primary:active { transform: translateY(1px); }
+    .btn-secondary { background: #f1f5f9; color: #0f172a; border: 1px solid #e2e8f0; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+
+    .progress { margin-top: 0.8rem; }
+    .progress.hidden { display: none; }
+    .pbar-track { height: 8px; background: #e2e8f0; border-radius: 99px; overflow: hidden; }
+    .pbar-fill { height: 100%; width: 0%; background: linear-gradient(90deg,#0ea5e9,#06b6d4);
+      border-radius: 99px; transition: width .2s; }
+    .pstatus { margin-top: 0.45rem; font-size: 0.82rem; color: #475569; }
+
+    .filemeta { font-size: 0.85rem; color: #334155; }
+    .filemeta b { color: #0f172a; }
+
+    .result.hidden { display: none; }
+    .result h3 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+    textarea {
+      width: 100%; min-height: 220px; resize: vertical; font: inherit;
+      font-size: 0.92rem; line-height: 1.7; padding: 0.8rem;
+      border: 1px solid #cbd5e1; border-radius: 11px; background: #fff; color: #0f172a;
+      -webkit-appearance: none;
+    }
+
+    .alert { border-radius: 11px; padding: 0.7rem 0.85rem; font-size: 0.85rem;
+      line-height: 1.6; margin-bottom: 0.8rem; }
+    .alert.warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+    .alert.err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .alert.info { background: #f0f9ff; border: 1px solid #bae6fd; color: #075985; }
+    .alert.hidden { display: none; }
+
+    .footer-note { text-align: center; color: #64748b; font-size: 0.78rem;
+      margin-top: 0.5rem; line-height: 1.7; }
+
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%) translateY(20px);
+      bottom: calc(1.2rem + env(safe-area-inset-bottom));
+      background: #0f172a; color: #fff; padding: 0.6rem 1rem; border-radius: 11px;
+      font-size: 0.85rem; opacity: 0; pointer-events: none;
+      transition: opacity .2s, transform .2s; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">🎧 音声ファイル文字起こし</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>音声ファイルを、<span class="accent">MP3 + 文字起こし</span>へ。</h1>
+      <p>WAV などの音声をドロップすると、MP3 に変換しつつ、端末内の Whisper で文字起こしします。「えー」「あのー」などのフィラーは自動で除去できます。</p>
+    </section>
+
+    <div class="alert info" id="privacyNote">
+      🔒 <b>音声はこの端末から一切送信されません。</b> 文字起こしは端末内で実行します。初回のみ、音声認識モデル (約75MB) を取得します。
+    </div>
+    <div class="alert warn hidden" id="gpuNote"></div>
+
+    <!-- ドロップゾーン -->
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept=".wav,.mp3,.m4a,.aac,.ogg,.oga,.opus,.webm,.flac,audio/*" hidden />
+      <div class="icon">🎵</div>
+      <p><b>タップして音声を選択 / ドラッグ&ドロップ</b></p>
+      <div class="sub">WAV 推奨 (MP3 / M4A / OGG / FLAC 等も可)</div>
+    </div>
+
+    <!-- オプション -->
+    <div class="card">
+      <div class="opts">
+        <label class="check">
+          <input type="checkbox" id="stripFillers" checked />
+          <span>✂️ フィラー (えー・あのー・um 等) を除去する</span>
+        </label>
+        <div class="opt-row">
+          <label class="lbl" for="lang">言語</label>
+          <select id="lang">
+            <option value="japanese" selected>日本語</option>
+            <option value="english">英語</option>
+            <option value="auto">自動判定</option>
+          </select>
+          <label class="lbl" for="kbps" style="margin-left:0.4rem;">MP3 ビットレート</label>
+          <select id="kbps">
+            <option value="96">96 kbps</option>
+            <option value="128" selected>128 kbps</option>
+            <option value="192">192 kbps</option>
+          </select>
+        </div>
+        <div class="hint">長い音声ほど文字起こしに時間がかかります。WebGPU 対応ブラウザ (Chrome/Edge) だと高速です。</div>
+      </div>
+    </div>
+
+    <!-- 実行 -->
+    <div class="card" id="runCard" style="display:none;">
+      <div class="filemeta" id="filemeta"></div>
+      <div class="btn-row" style="margin-top:0.7rem;">
+        <button class="btn btn-primary" id="runBtn">▶ 変換 & 文字起こし</button>
+      </div>
+      <div class="progress hidden" id="progress">
+        <div class="pbar-track"><div class="pbar-fill" id="pbar"></div></div>
+        <div class="pstatus" id="pstatus"></div>
+      </div>
+    </div>
+
+    <!-- 結果 -->
+    <div class="card result hidden" id="result">
+      <div class="btn-row" style="margin-bottom:0.9rem;">
+        <button class="btn btn-secondary" id="dlMp3">🎵 MP3を保存</button>
+      </div>
+      <h3>📝 文字起こし結果</h3>
+      <textarea id="transcript" placeholder="ここに文字起こし結果が表示されます…"></textarea>
+      <div class="btn-row" style="margin-top:0.7rem;">
+        <button class="btn btn-secondary" id="copyBtn">📋 コピー</button>
+        <button class="btn btn-secondary" id="dlTxt">⬇ TXTを保存</button>
+      </div>
+    </div>
+
+    <p class="footer-note">すべて端末内処理・音声のサーバー送信なし<br>ひゅうがのTR-Labo</p>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- MP3 エンコーダ (UMD グローバル) -->
+  <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    // ===== DOM =====
+    const dz = document.getElementById('dz');
+    const fi = document.getElementById('fi');
+    const runCard = document.getElementById('runCard');
+    const filemeta = document.getElementById('filemeta');
+    const runBtn = document.getElementById('runBtn');
+    const progress = document.getElementById('progress');
+    const pbar = document.getElementById('pbar');
+    const pstatus = document.getElementById('pstatus');
+    const resultBox = document.getElementById('result');
+    const transcriptEl = document.getElementById('transcript');
+    const dlMp3 = document.getElementById('dlMp3');
+    const dlTxt = document.getElementById('dlTxt');
+    const copyBtn = document.getElementById('copyBtn');
+    const gpuNote = document.getElementById('gpuNote');
+    const toastEl = document.getElementById('toast');
+
+    let currentFile = null;
+    let mp3Blob = null;
+    let mp3Name = '';
+    let busy = false;
+
+    const hasWebGPU = !!navigator.gpu;
+    if (!hasWebGPU) {
+      gpuNote.classList.remove('hidden');
+      gpuNote.innerHTML = 'ℹ️ この環境では WebGPU が使えないため、文字起こしは CPU (WASM) で実行します。長い音声では時間がかかる場合があります。Chrome / Edge だと高速です。';
+    }
+
+    // ===== ユーティリティ =====
+    function toast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => toastEl.classList.remove('show'), 1800);
+    }
+    function setProgress(pct, label) {
+      progress.classList.remove('hidden');
+      if (pct != null) pbar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+      if (label != null) pstatus.textContent = label;
+    }
+    function fmtBytes(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      return (n / 1024 / 1024).toFixed(1) + ' MB';
+    }
+    function fmtHMS(sec) {
+      sec = Math.round(sec);
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      const p = (x) => String(x).padStart(2, '0');
+      return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+    }
+    function baseName(name) {
+      return name.replace(/\.[^.]+$/, '');
+    }
+    function triggerDownload(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+    }
+
+    // ===== 音声デコード =====
+    async function decodeAudio(blob) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      try {
+        const buf = await blob.arrayBuffer();
+        return await new Promise((resolve, reject) => {
+          // Safari は callback 形式しか受け付けない版があるため両対応
+          const p = ctx.decodeAudioData(buf.slice(0), resolve, reject);
+          if (p && typeof p.then === 'function') p.then(resolve, reject);
+        });
+      } finally {
+        try { ctx.close(); } catch (e) {}
+      }
+    }
+
+    // AudioBuffer -> モノラル Float32 (元サンプルレート) : MP3 用
+    function toMono(audioBuffer) {
+      const nCh = audioBuffer.numberOfChannels;
+      const n = audioBuffer.length;
+      const mono = new Float32Array(n);
+      for (let c = 0; c < nCh; c++) {
+        const ch = audioBuffer.getChannelData(c);
+        for (let i = 0; i < n; i++) mono[i] += ch[i];
+      }
+      if (nCh > 1) for (let i = 0; i < n; i++) mono[i] /= nCh;
+      return mono;
+    }
+
+    // AudioBuffer -> モノラル 16kHz Float32 : Whisper 用
+    async function toMono16k(audioBuffer) {
+      const target = 16000;
+      const length = Math.max(1, Math.ceil(audioBuffer.duration * target));
+      const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      const off = new OAC(1, length, target);
+      const src = off.createBufferSource();
+      src.buffer = audioBuffer;
+      src.connect(off.destination);
+      src.start();
+      const rendered = await off.startRendering();
+      return rendered.getChannelData(0);
+    }
+
+    // ===== MP3 エンコード (lamejs) =====
+    function primeLameGlobals() {
+      if (typeof lamejs === 'undefined') return false;
+      for (const k of ['MPEGMode', 'Lame', 'BitStream']) {
+        if (typeof window[k] === 'undefined' && lamejs[k]) window[k] = lamejs[k];
+      }
+      return typeof lamejs.Mp3Encoder === 'function';
+    }
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src; s.onload = resolve;
+        s.onerror = () => reject(new Error('script load failed: ' + src));
+        document.head.appendChild(s);
+      });
+    }
+    async function ensureLamejs() {
+      if (typeof lamejs !== 'undefined' && lamejs.Mp3Encoder) return;
+      for (const u of [
+        'https://unpkg.com/lamejs@1.2.1/lame.min.js',
+        'https://cdn.jsdelivr.net/gh/zhuker/lamejs@master/lame.min.js',
+      ]) {
+        if (typeof lamejs !== 'undefined' && lamejs.Mp3Encoder) return;
+        try { await loadScript(u); } catch (e) {}
+      }
+    }
+    function floatToInt16(f) {
+      const out = new Int16Array(f.length);
+      for (let i = 0; i < f.length; i++) {
+        const v = Math.max(-1, Math.min(1, f[i]));
+        out[i] = v < 0 ? v * 32768 : v * 32767;
+      }
+      return out;
+    }
+    async function encodeMP3(samples, sampleRate, kbps, onProgress) {
+      await ensureLamejs();
+      if (typeof lamejs === 'undefined' || !primeLameGlobals()) {
+        throw new Error('MP3エンコーダを読み込めませんでした。');
+      }
+      const encoder = new lamejs.Mp3Encoder(1, sampleRate, kbps);
+      const int16 = floatToInt16(samples);
+      const chunks = [];
+      const blockSize = 1152;
+      const total = Math.ceil(int16.length / blockSize);
+      let done = 0;
+      for (let i = 0; i < int16.length; i += blockSize) {
+        const buf = encoder.encodeBuffer(int16.subarray(i, i + blockSize));
+        if (buf.length > 0) chunks.push(buf);
+        if (++done % 64 === 0) {
+          if (onProgress) onProgress(done / total);
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+      const end = encoder.flush();
+      if (end.length > 0) chunks.push(end);
+      return new Blob(chunks, { type: 'audio/mpeg' });
+    }
+
+    // ===== フィラー除去 (voice/ ツールと同等) =====
+    function stripFillers(text) {
+      if (!text) return text;
+      const patterns = [
+        /あー+/g, /ああー+/g,
+        /えー+/g, /ええー+/g,
+        /おー+/g,
+        /うーん+/g, /うーー+ん/g,
+        /えっと[ー]?/g, /えと[ー]/g,
+        /えー*っ?と[ー]?/g,
+        /あのー+/g, /あのう+/g,
+        /そのー+/g, /そのう+/g,
+        /まあー+/g, /まー+あ/g, /まあっ+/g,
+        /んー+/g,
+        /\b(um+|uh+|er+|erm+|ah+|hmm+|mm+)\b/gi,
+      ];
+      let out = text;
+      for (const p of patterns) out = out.replace(p, '');
+      out = out.replace(/[、,][\s、,]+/g, '、');
+      out = out.replace(/([。!?])\s*[、,]/g, '$1');
+      out = out.replace(/^\s*[、。,.\s]+/, '');
+      out = out.replace(/\s{2,}/g, ' ');
+      return out.trim();
+    }
+
+    // ===== 文字起こし (transformers.js / Whisper) =====
+    const MODEL_ID = 'Xenova/whisper-base';
+    let transcriberPromise = null;
+
+    async function loadTransformers() {
+      const urls = [
+        'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.0',
+        'https://cdn.jsdelivr.net/npm/@huggingface/transformers',
+        'https://unpkg.com/@huggingface/transformers',
+      ];
+      let lastErr;
+      for (const u of urls) {
+        try { return await import(/* @vite-ignore */ u); }
+        catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('文字起こしライブラリを読み込めませんでした。');
+    }
+
+    async function getTranscriber(onProgress) {
+      if (transcriberPromise) return transcriberPromise;
+      transcriberPromise = (async () => {
+        const tf = await loadTransformers();
+        tf.env.allowLocalModels = false;
+        const device = hasWebGPU ? 'webgpu' : 'wasm';
+        const opts = {
+          dtype: 'q8',
+          device,
+          progress_callback: (p) => {
+            if (!p) return;
+            if (p.status === 'progress' && typeof p.progress === 'number') {
+              onProgress(p.progress, p.file || '');
+            } else if (p.status === 'ready') {
+              onProgress(100, '');
+            }
+          },
+        };
+        try {
+          return await tf.pipeline('automatic-speech-recognition', MODEL_ID, opts);
+        } catch (e) {
+          // WebGPU で失敗したら WASM に落とす
+          if (device === 'webgpu') {
+            opts.device = 'wasm';
+            return await tf.pipeline('automatic-speech-recognition', MODEL_ID, opts);
+          }
+          throw e;
+        }
+      })().catch((e) => { transcriberPromise = null; throw e; });
+      return transcriberPromise;
+    }
+
+    async function transcribe(audio16k, langValue, onModelProgress) {
+      const transcriber = await getTranscriber(onModelProgress);
+      const callOpts = {
+        task: 'transcribe',
+        chunk_length_s: 30,
+        stride_length_s: 5,
+        return_timestamps: false,
+      };
+      if (langValue && langValue !== 'auto') callOpts.language = langValue;
+      const out = await transcriber(audio16k, callOpts);
+      return (out && typeof out.text === 'string') ? out.text.trim() : '';
+    }
+
+    // ===== メイン処理 =====
+    function setFile(file) {
+      currentFile = file;
+      mp3Blob = null;
+      resultBox.classList.add('hidden');
+      transcriptEl.value = '';
+      runCard.style.display = '';
+      filemeta.innerHTML = `🎵 <b>${escapeHtml(file.name)}</b> — ${fmtBytes(file.size)}`;
+      runBtn.disabled = false;
+      progress.classList.add('hidden');
+      pbar.style.width = '0%';
+    }
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    async function run() {
+      if (!currentFile || busy) return;
+      busy = true;
+      runBtn.disabled = true;
+      resultBox.classList.add('hidden');
+      try {
+        setProgress(2, '音声を読み込み中…');
+        const audioBuffer = await decodeAudio(currentFile);
+        const durLabel = fmtHMS(audioBuffer.duration);
+
+        // 1) MP3 変換
+        setProgress(5, `MP3に変換中… (長さ ${durLabel})`);
+        const monoOrig = toMono(audioBuffer);
+        const kbps = parseInt(document.getElementById('kbps').value, 10) || 128;
+        mp3Blob = await encodeMP3(monoOrig, audioBuffer.sampleRate, kbps,
+          (f) => setProgress(5 + f * 25, `MP3に変換中… ${Math.round(f * 100)}%`));
+        mp3Name = baseName(currentFile.name) + '.mp3';
+
+        // 2) Whisper 用に 16kHz モノラル
+        setProgress(32, '文字起こしの前処理中…');
+        const audio16k = await toMono16k(audioBuffer);
+
+        // 3) モデル準備 (初回のみDL) + 文字起こし
+        setProgress(35, '文字起こしモデルを準備中…');
+        let modelReady = false;
+        const langValue = document.getElementById('lang').value;
+        let text = await transcribe(audio16k, langValue, (prog) => {
+          if (modelReady) return;
+          if (prog >= 100) { modelReady = true; setProgress(78, '文字起こし中…'); }
+          else setProgress(35 + (prog / 100) * 40, `モデルを取得中… ${Math.round(prog)}%`);
+        });
+        setProgress(92, '仕上げ中…');
+
+        // 4) フィラー除去
+        if (document.getElementById('stripFillers').checked) text = stripFillers(text);
+
+        transcriptEl.value = text || '(文字起こし結果が空でした)';
+        setProgress(100, '完了');
+        resultBox.classList.remove('hidden');
+        setTimeout(() => progress.classList.add('hidden'), 600);
+        toast('完了しました');
+      } catch (e) {
+        console.error(e);
+        setProgress(0, '');
+        progress.classList.add('hidden');
+        showError(e);
+      } finally {
+        busy = false;
+        runBtn.disabled = false;
+      }
+    }
+
+    function showError(e) {
+      const existing = document.getElementById('runError');
+      if (existing) existing.remove();
+      const div = document.createElement('div');
+      div.id = 'runError';
+      div.className = 'alert err';
+      div.textContent = '⚠️ エラー: ' + (e && e.message ? e.message : String(e));
+      runCard.appendChild(div);
+    }
+
+    // ===== 入力ハンドラ =====
+    dz.addEventListener('click', () => fi.click());
+    fi.addEventListener('change', () => { if (fi.files[0]) setFile(fi.files[0]); });
+    ['dragenter', 'dragover'].forEach(ev =>
+      dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('drag'); }));
+    ['dragleave', 'drop'].forEach(ev =>
+      dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('drag'); }));
+    dz.addEventListener('drop', (e) => {
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) setFile(f);
+    });
+
+    runBtn.addEventListener('click', run);
+    dlMp3.addEventListener('click', () => {
+      if (mp3Blob) triggerDownload(mp3Blob, mp3Name);
+    });
+    dlTxt.addEventListener('click', () => {
+      const name = baseName(currentFile ? currentFile.name : '文字起こし') + '.txt';
+      triggerDownload(new Blob([transcriptEl.value], { type: 'text/plain;charset=utf-8' }), name);
+    });
+    copyBtn.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(transcriptEl.value); toast('コピーしました'); }
+      catch (e) {
+        transcriptEl.select();
+        document.execCommand('copy');
+        toast('コピーしました');
+      }
+    });
+  })();
+  </script>
+</body>
+</html>
