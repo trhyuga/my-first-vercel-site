@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0ea5e9" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-  <title>音声ファイル文字起こし | ひゅうがのTR-Labo</title>
+  <title>音声ファイル MP3 変換 | ひゅうがのTR-Labo</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { min-height: 100%; }
@@ -142,20 +142,22 @@
     <div class="brand">
       <a class="back-btn" href="../" aria-label="戻る">←</a>
       <div class="logo">TR</div>
-      <div class="brand-name">🎧 音声ファイル文字起こし</div>
+      <div class="brand-name">🎵 音声ファイル MP3 変換</div>
     </div>
   </header>
 
   <main>
     <section class="hero">
-      <h1>音声ファイルを、<span class="accent">MP3 + 文字起こし</span>へ。</h1>
-      <p>WAV などの音声をドロップすると、MP3 に変換しつつ、端末内の Whisper で文字起こしします。「えー」「あのー」などのフィラーは自動で除去できます。</p>
+      <h1>音声ファイルを、<span class="accent">MP3</span> へ。</h1>
+      <p>WAV などの大きな音声ファイルをドロップすると、端末内で MP3 に変換します。サーバーには一切送信されません。</p>
     </section>
 
     <div class="alert info" id="privacyNote">
-      🔒 <b>音声はこの端末から一切送信されません。</b> 文字起こしは端末内で実行します。初回のみ、音声認識モデル (約75MB) を取得します。
+      🔒 <b>音声はこの端末から一切送信されません。</b> すべてブラウザ内で処理します。
     </div>
-    <div class="alert warn hidden" id="gpuNote"></div>
+    <div class="alert warn hidden" id="freezeNote">
+      ⏸ 文字起こし機能は現在凍結中です (メモリ問題のため調整中)。MP3 変換のみご利用いただけます。
+    </div>
 
     <!-- ドロップゾーン -->
     <div class="dropzone" id="dz">
@@ -168,25 +170,15 @@
     <!-- オプション -->
     <div class="card">
       <div class="opts">
-        <label class="check">
-          <input type="checkbox" id="stripFillers" checked />
-          <span>✂️ フィラー (えー・あのー・um 等) を除去する</span>
-        </label>
         <div class="opt-row">
-          <label class="lbl" for="lang">言語</label>
-          <select id="lang">
-            <option value="japanese" selected>日本語</option>
-            <option value="english">英語</option>
-            <option value="auto">自動判定</option>
-          </select>
-          <label class="lbl" for="kbps" style="margin-left:0.4rem;">MP3 ビットレート</label>
+          <label class="lbl" for="kbps">MP3 ビットレート</label>
           <select id="kbps">
             <option value="96">96 kbps</option>
             <option value="128" selected>128 kbps</option>
             <option value="192">192 kbps</option>
           </select>
         </div>
-        <div class="hint">長い音声ほど文字起こしに時間がかかります。WebGPU 対応ブラウザ (Chrome/Edge) だと高速です。</div>
+        <div class="hint">長い WAV はストリーム処理するので、ファイルサイズの大きい録音もそのまま投入できます。</div>
       </div>
     </div>
 
@@ -194,7 +186,7 @@
     <div class="card" id="runCard" style="display:none;">
       <div class="filemeta" id="filemeta"></div>
       <div class="btn-row" style="margin-top:0.7rem;">
-        <button class="btn btn-primary" id="runBtn">▶ 変換 & 文字起こし</button>
+        <button class="btn btn-primary" id="runBtn">▶ MP3 に変換</button>
       </div>
       <div class="progress hidden" id="progress">
         <div class="pbar-track"><div class="pbar-fill" id="pbar"></div></div>
@@ -204,14 +196,10 @@
 
     <!-- 結果 -->
     <div class="card result hidden" id="result">
-      <div class="btn-row" style="margin-bottom:0.9rem;">
-        <button class="btn btn-secondary" id="dlMp3">🎵 MP3を保存</button>
-      </div>
-      <h3>📝 文字起こし結果</h3>
-      <textarea id="transcript" placeholder="ここに文字起こし結果が表示されます…"></textarea>
-      <div class="btn-row" style="margin-top:0.7rem;">
-        <button class="btn btn-secondary" id="copyBtn">📋 コピー</button>
-        <button class="btn btn-secondary" id="dlTxt">⬇ TXTを保存</button>
+      <h3>✅ 変換完了</h3>
+      <div class="filemeta" id="resultmeta" style="margin:0.5rem 0 0.9rem;"></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="dlMp3">🎵 MP3 を保存</button>
       </div>
     </div>
 
@@ -236,23 +224,14 @@
     const pbar = document.getElementById('pbar');
     const pstatus = document.getElementById('pstatus');
     const resultBox = document.getElementById('result');
-    const transcriptEl = document.getElementById('transcript');
+    const resultmeta = document.getElementById('resultmeta');
     const dlMp3 = document.getElementById('dlMp3');
-    const dlTxt = document.getElementById('dlTxt');
-    const copyBtn = document.getElementById('copyBtn');
-    const gpuNote = document.getElementById('gpuNote');
     const toastEl = document.getElementById('toast');
 
     let currentFile = null;
     let mp3Blob = null;
     let mp3Name = '';
     let busy = false;
-
-    const hasWebGPU = !!navigator.gpu;
-    if (!hasWebGPU) {
-      gpuNote.classList.remove('hidden');
-      gpuNote.innerHTML = 'ℹ️ この環境では WebGPU が使えないため、文字起こしは CPU (WASM) で実行します。長い音声では時間がかかる場合があります。Chrome / Edge だと高速です。';
-    }
 
     // ===== ユーティリティ =====
     function toast(msg) {
@@ -401,71 +380,6 @@
       return mono;
     }
 
-    // ===== 線形補間リサンプラ (チャンク間継続) =====
-    // OfflineAudioContext を全体に展開せずに 16kHz へ落とすため。
-    class LinearResampler {
-      constructor(srcRate, dstRate) {
-        this.ratio = srcRate / dstRate;
-        this.nextT = 0;
-        this.carry = new Float32Array(0);
-      }
-      process(chunk, out) {
-        let buf;
-        if (this.carry.length === 0) {
-          buf = chunk;
-        } else {
-          buf = new Float32Array(this.carry.length + chunk.length);
-          buf.set(this.carry, 0);
-          buf.set(chunk, this.carry.length);
-        }
-        const N = buf.length;
-        let t = this.nextT;
-        let pos = out.pos;
-        const arr = out.array;
-        const ratio = this.ratio;
-        while (Math.floor(t) + 1 < N) {
-          const i = Math.floor(t);
-          const w = t - i;
-          arr[pos++] = (1 - w) * buf[i] + w * buf[i + 1];
-          t += ratio;
-        }
-        out.pos = pos;
-        const keepFrom = Math.max(0, Math.floor(t));
-        this.carry = buf.slice(keepFrom);
-        this.nextT = t - keepFrom;
-      }
-      flush(out) {
-        // 末尾の最後の 1 サンプルを必要に応じて吐く
-        const buf = this.carry;
-        if (buf.length === 0) return;
-        let t = this.nextT;
-        let pos = out.pos;
-        while (t < buf.length) {
-          const i = Math.floor(t);
-          if (i + 1 < buf.length) {
-            const w = t - i;
-            out.array[pos++] = (1 - w) * buf[i] + w * buf[i + 1];
-          } else if (i < buf.length) {
-            out.array[pos++] = buf[i];
-          } else break;
-          t += this.ratio;
-        }
-        out.pos = pos;
-        this.carry = new Float32Array(0);
-      }
-    }
-
-    function resampleMono(mono, srcRate, dstRate) {
-      if (srcRate === dstRate) return new Float32Array(mono);
-      const resampler = new LinearResampler(srcRate, dstRate);
-      const estimated = Math.ceil(mono.length * dstRate / srcRate) + 16;
-      const audio = new Float32Array(estimated);
-      const out = { array: audio, pos: 0 };
-      resampler.process(mono, out);
-      resampler.flush(out);
-      return audio.slice(0, out.pos);
-    }
-
     // ===== MP3 エンコード (lamejs) =====
     function primeLameGlobals() {
       if (typeof lamejs === 'undefined') return false;
@@ -524,76 +438,24 @@
       return new Blob(chunks, { type: 'audio/mpeg' });
     }
 
-    // ===== WAV ストリーミング処理 + 逐次文字起こし =====
+    // ===== WAV ストリーミング → MP3 =====
     // ファイル全体を AudioBuffer に展開せず、30 秒ウィンドウで PCM を切り出して
-    // (a) MP3 をストリーミング・エンコードしつつ、
-    // (b) 16kHz Float32 を約 10 分単位の文字起こしバッファに溜め、
-    // (c) 一杯になったら Whisper に渡して即解放する。
-    // これによりピーク時のメモリは「リード用 PCM 1 ウィンドウ + 10 分の 16k Float32
-    // + Whisper モデル + 圧縮済み MP3 チャンク」のみで、全体長に依存しなくなる。
-    // 戻り値: { mp3Blob, text }
-    async function processWavPipeline(file, fmt, kbps, langValue, transcriber, setStatus) {
+    // MP3 を逐次エンコードする。ピーク時メモリは「1 ウィンドウの PCM
+    // + 圧縮済み MP3 チャンク」のみで、全体長に依存しない。
+    async function processWavToMp3(file, fmt, kbps, setStatus) {
       await ensureLamejs();
       if (typeof lamejs === 'undefined' || !primeLameGlobals()) {
         throw new Error('MP3エンコーダを読み込めませんでした。');
       }
       const mp3Encoder = new lamejs.Mp3Encoder(1, fmt.sampleRate, kbps);
       const mp3Chunks = [];
-      const targetSr = 16000;
-      const resampler = new LinearResampler(fmt.sampleRate, targetSr);
-
-      // 1 回の Whisper 呼び出しに与える長さ (5 分 ≒ 19MB の Float32)
-      // モバイル考慮で短め。Whisper 内部は chunk_length_s=30 で更に細分化される。
-      const winSec = 5 * 60;
-      const winSamples = winSec * targetSr;
-      // 1 リード窓 (30s) 分のオーバーシュート余裕
-      const audio16kBuf = new Float32Array(winSamples + 60 * targetSr + 4096);
-      let bufPos = 0;
 
       const frameSize = (fmt.bitsPerSample / 8) * fmt.numChannels;
       const readFrames = Math.max(1, Math.floor(30 * fmt.sampleRate));
       const readBytes = readFrames * frameSize;
       const dataEnd = fmt.dataOff + fmt.dataLen;
       const mp3BlockSize = 1152;
-
-      const transcribeOpts = {
-        task: 'transcribe',
-        chunk_length_s: 30,
-        stride_length_s: 5,
-        return_timestamps: false,
-      };
-      if (langValue && langValue !== 'auto') transcribeOpts.language = langValue;
-
-      const texts = [];
       const totalSec = fmt.duration;
-      let transcribedSec = 0;
-      // 進捗バーが巻き戻らないように max を保持
-      let lastPct = 0;
-      const reportPct = (pct, label) => {
-        if (pct < lastPct) pct = lastPct;
-        else lastPct = pct;
-        if (setStatus) setStatus(pct, label);
-      };
-
-      const flushTranscribe = async () => {
-        if (bufPos === 0) return;
-        const chunkSec = bufPos / targetSr;
-        const pending = transcribedSec + chunkSec; // この呼び出しが終わったときの累積
-        reportPct(
-          (pending / totalSec) * 100,
-          `文字起こし中… (${fmtHMS(transcribedSec)} → ${fmtHMS(pending)} / ${fmtHMS(totalSec)})`
-        );
-        // subarray はビュー (新規確保なし)。await 中は audio16kBuf に書き込まないので安全。
-        const view = audio16kBuf.subarray(0, bufPos);
-        const localBufPos = bufPos;
-        const result = await transcriber(view, transcribeOpts);
-        const t = (result && typeof result.text === 'string') ? result.text.trim() : '';
-        if (t) texts.push(t);
-        transcribedSec += chunkSec;
-        bufPos = 0; // ビュー使用が終わったので共有バッファを先頭から再利用
-        // GC に少し息継ぎを与える
-        await new Promise(r => setTimeout(r, 50));
-      };
 
       let p = fmt.dataOff;
       while (p < dataEnd) {
@@ -604,76 +466,25 @@
         const buf = await file.slice(p, p + thisBytes).arrayBuffer();
         p += thisBytes;
         const monoChunk = pcmBytesToMonoFloat32(new Uint8Array(buf), fmt);
-
-        // MP3 をストリーム・エンコード
         const int16 = floatToInt16(monoChunk);
         for (let off = 0; off < int16.length; off += mp3BlockSize) {
           const blk = int16.subarray(off, Math.min(off + mp3BlockSize, int16.length));
           const enc = mp3Encoder.encodeBuffer(blk);
           if (enc.length > 0) mp3Chunks.push(enc);
         }
-
-        // 16kHz へリサンプルして文字起こしバッファに追記
-        const out = { array: audio16kBuf, pos: bufPos };
-        resampler.process(monoChunk, out);
-        bufPos = out.pos;
-
-        {
+        if (setStatus) {
           const readSec = (p - fmt.dataOff) / fmt.dataLen * totalSec;
-          reportPct(
+          setStatus(
             (readSec / totalSec) * 100,
-            `WAV読み込み中… (${fmtHMS(readSec)} / ${fmtHMS(totalSec)})`
+            `変換中… (${fmtHMS(readSec)} / ${fmtHMS(totalSec)})`
           );
         }
-
-        if (bufPos >= winSamples) {
-          await flushTranscribe();
-        }
-        await new Promise(r => setTimeout(r, 0)); // UI 譲渡
+        await new Promise(r => setTimeout(r, 0));
       }
-
-      // リサンプラ末尾を吐く
-      {
-        const out = { array: audio16kBuf, pos: bufPos };
-        resampler.flush(out);
-        bufPos = out.pos;
-      }
-      // 最後の窓を文字起こし
-      await flushTranscribe();
 
       const endBuf = mp3Encoder.flush();
       if (endBuf.length > 0) mp3Chunks.push(endBuf);
-      const mp3Blob = new Blob(mp3Chunks, { type: 'audio/mpeg' });
-      return { mp3Blob, text: texts.join('\n') };
-    }
-
-    // 既に確保済みの 16k Float32 を 10 分窓で分割して文字起こし (非WAV fallback 用)
-    async function transcribeInChunks(audio16k, langValue, transcriber, onProgress) {
-      const winSamples = 10 * 60 * 16000;
-      const transcribeOpts = {
-        task: 'transcribe',
-        chunk_length_s: 30,
-        stride_length_s: 5,
-        return_timestamps: false,
-      };
-      if (langValue && langValue !== 'auto') transcribeOpts.language = langValue;
-      const total = audio16k.length;
-      if (total <= winSamples) {
-        const result = await transcriber(audio16k, transcribeOpts);
-        if (onProgress) onProgress(1);
-        return (result && typeof result.text === 'string') ? result.text.trim() : '';
-      }
-      const texts = [];
-      for (let off = 0; off < total; off += winSamples) {
-        const end = Math.min(off + winSamples, total);
-        const slice = audio16k.slice(off, end);
-        const result = await transcriber(slice, transcribeOpts);
-        const t = (result && typeof result.text === 'string') ? result.text.trim() : '';
-        if (t) texts.push(t);
-        if (onProgress) onProgress(end / total);
-        await new Promise(r => setTimeout(r, 0));
-      }
-      return texts.join('\n');
+      return new Blob(mp3Chunks, { type: 'audio/mpeg' });
     }
 
     // 長尺向けの事前案内
@@ -683,100 +494,11 @@
       }
     }
 
-    // ===== フィラー除去 (voice/ ツールと同等) =====
-    function stripFillers(text) {
-      if (!text) return text;
-      const patterns = [
-        /あー+/g, /ああー+/g,
-        /えー+/g, /ええー+/g,
-        /おー+/g,
-        /うーん+/g, /うーー+ん/g,
-        /えっと[ー]?/g, /えと[ー]/g,
-        /えー*っ?と[ー]?/g,
-        /あのー+/g, /あのう+/g,
-        /そのー+/g, /そのう+/g,
-        /まあー+/g, /まー+あ/g, /まあっ+/g,
-        /んー+/g,
-        /\b(um+|uh+|er+|erm+|ah+|hmm+|mm+)\b/gi,
-      ];
-      let out = text;
-      for (const p of patterns) out = out.replace(p, '');
-      out = out.replace(/[、,][\s、,]+/g, '、');
-      out = out.replace(/([。!?])\s*[、,]/g, '$1');
-      out = out.replace(/^\s*[、。,.\s]+/, '');
-      out = out.replace(/\s{2,}/g, ' ');
-      return out.trim();
-    }
-
-    // ===== 文字起こし (transformers.js / Whisper) =====
-    const MODEL_ID = 'Xenova/whisper-base';
-    let transcriberPromise = null;
-
-    async function loadTransformers() {
-      const urls = [
-        'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.0',
-        'https://cdn.jsdelivr.net/npm/@huggingface/transformers',
-        'https://unpkg.com/@huggingface/transformers',
-      ];
-      let lastErr;
-      for (const u of urls) {
-        try { return await import(/* @vite-ignore */ u); }
-        catch (e) { lastErr = e; }
-      }
-      throw lastErr || new Error('文字起こしライブラリを読み込めませんでした。');
-    }
-
-    async function getTranscriber(onProgress) {
-      if (transcriberPromise) return transcriberPromise;
-      transcriberPromise = (async () => {
-        const tf = await loadTransformers();
-        tf.env.allowLocalModels = false;
-        const device = hasWebGPU ? 'webgpu' : 'wasm';
-        const opts = {
-          dtype: 'q8',
-          device,
-          progress_callback: (p) => {
-            if (!p) return;
-            if (p.status === 'progress' && typeof p.progress === 'number') {
-              onProgress(p.progress, p.file || '');
-            } else if (p.status === 'ready') {
-              onProgress(100, '');
-            }
-          },
-        };
-        try {
-          return await tf.pipeline('automatic-speech-recognition', MODEL_ID, opts);
-        } catch (e) {
-          // WebGPU で失敗したら WASM に落とす
-          if (device === 'webgpu') {
-            opts.device = 'wasm';
-            return await tf.pipeline('automatic-speech-recognition', MODEL_ID, opts);
-          }
-          throw e;
-        }
-      })().catch((e) => { transcriberPromise = null; throw e; });
-      return transcriberPromise;
-    }
-
-    async function transcribe(audio16k, langValue, onModelProgress) {
-      const transcriber = await getTranscriber(onModelProgress);
-      const callOpts = {
-        task: 'transcribe',
-        chunk_length_s: 30,
-        stride_length_s: 5,
-        return_timestamps: false,
-      };
-      if (langValue && langValue !== 'auto') callOpts.language = langValue;
-      const out = await transcriber(audio16k, callOpts);
-      return (out && typeof out.text === 'string') ? out.text.trim() : '';
-    }
-
     // ===== メイン処理 =====
     function setFile(file) {
       currentFile = file;
       mp3Blob = null;
       resultBox.classList.add('hidden');
-      transcriptEl.value = '';
       runCard.style.display = '';
       filemeta.innerHTML = `🎵 <b>${escapeHtml(file.name)}</b> — ${fmtBytes(file.size)}`;
       runBtn.disabled = false;
@@ -798,43 +520,26 @@
       if (oldErr) oldErr.remove();
       try {
         const kbps = parseInt(document.getElementById('kbps').value, 10) || 128;
-        const langValue = document.getElementById('lang').value;
         setProgress(2, '音声を確認中…');
 
-        // ====== WAV ストリーム経路を優先判定 ======
+        // WAV はストリーミング、それ以外は AudioContext で一括デコード
         let fmt = null;
         if (/\.wav$/i.test(currentFile.name)) {
           try { fmt = await parseWavHeader(currentFile); } catch (_) { fmt = null; }
         }
 
-        // ====== 先に Whisper モデルをロード (進捗あり) ======
-        // ストリーミング経路では各 10 分窓ごとに transcriber を呼ぶため、
-        // モデル DL を事前に終わらせておく。
-        setProgress(3, '文字起こしモデルを準備中…');
-        let modelLoaded = false;
-        const transcriber = await getTranscriber((prog) => {
-          if (modelLoaded) return;
-          if (prog >= 100) { modelLoaded = true; setProgress(12, 'モデル準備完了'); }
-          else setProgress(3 + (prog / 100) * 9, `モデル取得中… ${Math.round(prog)}%`);
-        });
-        if (!modelLoaded) setProgress(12, 'モデル準備完了');
-
-        let localMp3Blob, text, durLabel;
+        let localMp3Blob, durLabel;
 
         if (fmt) {
-          // ====== WAV: ストリーム読込 → MP3 + 16k + 逐次文字起こしを 1 パスで ======
           durLabel = fmtHMS(fmt.duration);
           maybeShowLongWarning(fmt.duration);
-          setProgress(13, `WAVをストリーム処理中… (長さ ${durLabel})`);
-          const r = await processWavPipeline(
-            currentFile, fmt, kbps, langValue, transcriber,
-            (pct, label) => setProgress(13 + (pct / 100) * 80, label)
+          setProgress(5, `WAVをストリーム変換中… (長さ ${durLabel})`);
+          localMp3Blob = await processWavToMp3(
+            currentFile, fmt, kbps,
+            (pct, label) => setProgress(5 + (pct / 100) * 90, label)
           );
-          localMp3Blob = r.mp3Blob;
-          text = r.text;
         } else {
-          // ====== Fallback (MP3 / M4A / OGG / FLAC など) ======
-          setProgress(13, '音声をデコード中…');
+          setProgress(5, '音声をデコード中…');
           let audioBuffer = await decodeFallback(currentFile);
           const dur = audioBuffer.duration;
           durLabel = fmtHMS(dur);
@@ -843,30 +548,22 @@
 
           setProgress(20, `前処理中… (長さ ${durLabel})`);
           let monoOrig = bufferToMono(audioBuffer);
-          let mono16k = resampleMono(monoOrig, origSr, 16000);
           audioBuffer = null;
 
           setProgress(30, `MP3に変換中… (長さ ${durLabel})`);
           localMp3Blob = await encodeMP3(monoOrig, origSr, kbps, (f) =>
-            setProgress(30 + f * 25, `MP3に変換中… ${Math.round(f * 100)}%`));
+            setProgress(30 + f * 65, `MP3に変換中… ${Math.round(f * 100)}%`));
           monoOrig = null;
-
-          setProgress(56, '文字起こし中…');
-          text = await transcribeInChunks(mono16k, langValue, transcriber, (frac) =>
-            setProgress(56 + frac * 37, `文字起こし中… ${Math.round(frac * 100)}%`));
-          mono16k = null;
         }
 
         mp3Blob = localMp3Blob;
         mp3Name = baseName(currentFile.name) + '.mp3';
 
-        setProgress(95, '仕上げ中…');
-        if (document.getElementById('stripFillers').checked) text = stripFillers(text);
-        transcriptEl.value = text || '(文字起こし結果が空でした)';
         setProgress(100, '完了');
+        resultmeta.innerHTML = `🎵 <b>${escapeHtml(mp3Name)}</b> — ${fmtBytes(mp3Blob.size)}`;
         resultBox.classList.remove('hidden');
         setTimeout(() => progress.classList.add('hidden'), 600);
-        toast('完了しました');
+        toast('変換しました');
       } catch (e) {
         console.error(e);
         setProgress(0, '');
@@ -903,18 +600,6 @@
     runBtn.addEventListener('click', run);
     dlMp3.addEventListener('click', () => {
       if (mp3Blob) triggerDownload(mp3Blob, mp3Name);
-    });
-    dlTxt.addEventListener('click', () => {
-      const name = baseName(currentFile ? currentFile.name : '文字起こし') + '.txt';
-      triggerDownload(new Blob([transcriptEl.value], { type: 'text/plain;charset=utf-8' }), name);
-    });
-    copyBtn.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(transcriptEl.value); toast('コピーしました'); }
-      catch (e) {
-        transcriptEl.select();
-        document.execCommand('copy');
-        toast('コピーしました');
-      }
     });
   })();
   </script>
