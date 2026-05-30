@@ -388,16 +388,27 @@
 
     async function shareBlob(blob, name, mime) {
       const file = new File([blob], name, { type: mime });
-      try {
-        await navigator.share({ files: [file], title: name });
-        toast('保存しました');
-        return true;
-      } catch (e) {
-        if (e && e.name === 'AbortError') return false;
-        console.error('share failed:', e);
-        toast('共有できませんでした');
-        return false;
+      const data = { files: [file] }; // title/text は付けない (※下記注意)
+      // ※ title を一緒に渡すと、ファイル非対応の共有先 (Notes 等) が
+      //    title をテキストとして拾って ".txt" を保存してしまう iOS の罠がある。
+      //    files だけにすれば、対応していない共有先は最初から表示されない。
+
+      // canShare で「この MIME のファイル共有が可能か」を最終確認
+      const canShare = navigator.canShare && navigator.canShare(data);
+      if (canShare) {
+        try {
+          await navigator.share(data);
+          toast('保存しました');
+          return true;
+        } catch (e) {
+          if (e && e.name === 'AbortError') return false;
+          console.warn('share failed, falling back to download:', e);
+        }
       }
+      // 共有不可 / 失敗 → ダウンロードに退避
+      triggerDownload(blob, name);
+      toast('ダウンロードしました');
+      return false;
     }
 
     // ===== 7. 音声デコード (非 WAV 経路) =====
@@ -681,7 +692,7 @@
       dlMp3.style.display = '';
       if (canShareFile(name, MP3_MIME)) {
         shareBtn.style.display = '';
-        saveHint.innerHTML = '📤 「共有して保存」をタップすると、ファイル名や保存場所を選べます (iOS の「ファイル」アプリなど)。';
+        saveHint.innerHTML = '📤 「共有して保存」をタップ → 共有シートで <b>「ファイルに保存」</b> を選ぶと、フォルダとファイル名を指定して保存できます。';
       } else {
         shareBtn.style.display = 'none';
         saveHint.textContent = '';
