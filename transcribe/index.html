@@ -156,7 +156,7 @@
       🔒 <b>音声はこの端末から一切送信されません。</b> すべてブラウザ内で処理します。
     </div>
     <div class="alert warn" id="trNote">
-      📝 <b>文字起こし機能は実験中 (β)</b> です。長い音声 (目安 1 時間以上) や iPhone のメモリが厳しい環境ではタブが落ちることがあります。短めの音声・軽量モデル (tiny) からお試しを。
+      📝 <b>文字起こし機能は実験中 (β)</b>。Whisper を Web Worker で隔離し、30 秒ごとに分割実行します。それでも iPhone Safari はメモリ制限が厳しいため、長い音声では「ワーカーが停止しました」というエラーが出る場合があります (タブ自体は落ちないはず)。短めの音声 + tiny モデルから試してください。
     </div>
 
     <!-- ドロップゾーン -->
@@ -619,197 +619,287 @@
       return out.trim();
     }
 
-    // ===== 文字起こし (transformers.js / Whisper) =====
-    const transcriberCache = Object.create(null);
-
-    async function loadTransformers() {
-      const urls = [
+    // ===== 文字起こし: Whisper を Web Worker で隔離実行 =====
+    // 狙い: Worker は独立コンテキストなので、Whisper の WASM テンソルが
+    // メインタブのメモリを直接圧迫しない。Worker が OOM で停止しても
+    // タブは生存し、エラーメッセージを出せる。
+    // Worker 終了時に WASM ヒープも回収されるので、転写終了後は確実に開放できる。
+    const WHISPER_WORKER_CODE = `
+let pipe = null;
+self.onmessage = async (e) => {
+  const msg = e.data || {};
+  const id = msg.id;
+  try {
+    if (msg.type === 'init') {
+      const cdns = [
         'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.0',
         'https://cdn.jsdelivr.net/npm/@huggingface/transformers',
         'https://unpkg.com/@huggingface/transformers',
       ];
-      let lastErr;
-      for (const u of urls) {
-        try { return await import(/* @vite-ignore */ u); }
-        catch (e) { lastErr = e; }
+      let tf = null, lastErr = null;
+      for (const u of cdns) {
+        try { tf = await import(u); break; } catch (err) { lastErr = err; }
       }
-      throw lastErr || new Error('文字起こしライブラリを読み込めませんでした。');
-    }
-
-    async function ensureTranscriber(modelId, onProgress) {
-      if (transcriberCache[modelId]) return transcriberCache[modelId];
-      const tf = await loadTransformers();
+      if (!tf) throw lastErr || new Error('transformers.js load failed');
       tf.env.allowLocalModels = false;
-      const device = hasWebGPU ? 'webgpu' : 'wasm';
-      const opts = {
+      pipe = await tf.pipeline('automatic-speech-recognition', msg.modelId, {
         dtype: 'q8',
-        device,
-        progress_callback: (p) => {
-          if (!p || !onProgress) return;
-          if (p.status === 'progress' && typeof p.progress === 'number') onProgress(p.progress);
-          else if (p.status === 'ready') onProgress(100);
-        },
-      };
-      let pipe;
-      try {
-        pipe = await tf.pipeline('automatic-speech-recognition', modelId, opts);
-      } catch (e) {
-        if (device === 'webgpu') {
-          opts.device = 'wasm';
-          pipe = await tf.pipeline('automatic-speech-recognition', modelId, opts);
-        } else throw e;
-      }
-      transcriberCache[modelId] = pipe;
-      return pipe;
-    }
-
-    // WAV をストリーミング読込しながら 2 分窓で Whisper にかける。
-    // 各 Whisper 呼び出しの直前後にバッファをリセット (subarray = 新規確保なし)、
-    // 1 ループあたり「PCM 1 ウィンドウ + 2 分の 16k Float32 (~7.7MB)」だけがピーク。
-    async function transcribeWavStream(file, fmt, langValue, modelId, setStatus) {
-      let modelLoaded = false;
-      const transcriber = await ensureTranscriber(modelId, (p) => {
-        if (modelLoaded) return;
-        if (p >= 100) { modelLoaded = true; setStatus(15, 'モデル準備完了'); }
-        else setStatus(2 + (p / 100) * 12, `モデル取得中… ${Math.round(p)}%`);
+        device: 'wasm',
+        progress_callback: (p) => self.postMessage({ type: 'progress', payload: p }),
       });
-      if (!modelLoaded) setStatus(15, 'モデル準備完了');
+      self.postMessage({ type: 'ready', id });
+    } else if (msg.type === 'transcribe') {
+      if (!pipe) throw new Error('not initialized');
+      const result = await pipe(msg.audio, msg.opts);
+      const text = (result && typeof result.text === 'string') ? result.text : '';
+      self.postMessage({ type: 'result', payload: { text }, id });
+    } else if (msg.type === 'close') {
+      pipe = null;
+      self.close();
+    }
+  } catch (err) {
+    self.postMessage({ type: 'error', payload: { message: (err && err.message) || String(err) }, id });
+  }
+};
+`;
 
-      const targetSr = 16000;
-      const winSec = 2 * 60; // モバイル向けに短め (~7.7MB)
-      const winSamples = winSec * targetSr;
-      const audio16kBuf = new Float32Array(winSamples + 30 * targetSr + 4096);
-      let bufPos = 0;
-      const resampler = new LinearResampler(fmt.sampleRate, targetSr);
-
-      const frameSize = (fmt.bitsPerSample / 8) * fmt.numChannels;
-      const readFrames = Math.max(1, Math.floor(20 * fmt.sampleRate));
-      const readBytes = readFrames * frameSize;
-      const dataEnd = fmt.dataOff + fmt.dataLen;
-      const totalSec = fmt.duration;
-
-      const transcribeOpts = {
-        task: 'transcribe',
-        chunk_length_s: 30,
-        stride_length_s: 5,
-        return_timestamps: false,
-      };
-      if (langValue && langValue !== 'auto') transcribeOpts.language = langValue;
-
-      const texts = [];
-      let transcribedSec = 0;
-      let lastPct = 15;
-      const reportPct = (pct, label) => {
-        if (pct < lastPct) pct = lastPct;
-        else lastPct = pct;
-        setStatus(pct, label);
-      };
-
-      const flushChunk = async () => {
-        if (bufPos === 0) return;
-        const sec = bufPos / targetSr;
-        const pending = transcribedSec + sec;
-        reportPct(
-          15 + (pending / totalSec) * 80,
-          `文字起こし中… (${fmtHMS(transcribedSec)} → ${fmtHMS(pending)} / ${fmtHMS(totalSec)})`
+    class WhisperWorker {
+      constructor() {
+        this.worker = null;
+        this.nextId = 1;
+        this.pending = new Map();
+        this.progressListener = null;
+      }
+      async init(modelId, onProgress) {
+        this.dispose();
+        const url = URL.createObjectURL(
+          new Blob([WHISPER_WORKER_CODE], { type: 'application/javascript' })
         );
-        const view = audio16kBuf.subarray(0, bufPos);
-        const result = await transcriber(view, transcribeOpts);
-        const t = (result && typeof result.text === 'string') ? result.text.trim() : '';
-        if (t) texts.push(t);
-        transcribedSec += sec;
-        bufPos = 0;
-        await new Promise(r => setTimeout(r, 100)); // GC 猶予
-      };
-
-      let p = fmt.dataOff;
-      while (p < dataEnd) {
-        const remaining = dataEnd - p;
-        let thisBytes = Math.min(readBytes, remaining);
-        thisBytes -= thisBytes % frameSize;
-        if (thisBytes <= 0) break;
-        const buf = await file.slice(p, p + thisBytes).arrayBuffer();
-        p += thisBytes;
-        const monoChunk = pcmBytesToMonoFloat32(new Uint8Array(buf), fmt);
-        const out = { array: audio16kBuf, pos: bufPos };
-        resampler.process(monoChunk, out);
-        bufPos = out.pos;
-
-        const readSec = (p - fmt.dataOff) / fmt.dataLen * totalSec;
-        reportPct(
-          15 + (readSec / totalSec) * 80,
-          `WAV 読込中… (${fmtHMS(readSec)} / ${fmtHMS(totalSec)})`
-        );
-
-        if (bufPos >= winSamples) {
-          await flushChunk();
+        this.worker = new Worker(url, { type: 'module' });
+        URL.revokeObjectURL(url);
+        this.worker.onmessage = (e) => this._onMessage(e);
+        this.worker.onerror = (e) => this._onError(e);
+        this.progressListener = onProgress || null;
+        try {
+          await this._call({ type: 'init', modelId });
+        } finally {
+          this.progressListener = null;
         }
-        await new Promise(r => setTimeout(r, 0));
       }
-      {
-        const out = { array: audio16kBuf, pos: bufPos };
-        resampler.flush(out);
-        bufPos = out.pos;
+      async transcribe(audio, opts) {
+        // audio.buffer を transfer リストに入れてゼロコピー受け渡し
+        return await this._call({ type: 'transcribe', audio, opts }, [audio.buffer]);
       }
-      await flushChunk();
-      return texts.join('\n');
+      _call(msg, transfer) {
+        return new Promise((resolve, reject) => {
+          if (!this.worker) { reject(new Error('worker not available')); return; }
+          const id = this.nextId++;
+          this.pending.set(id, { resolve, reject });
+          try {
+            this.worker.postMessage({ ...msg, id }, transfer || []);
+          } catch (e) {
+            this.pending.delete(id);
+            reject(e);
+          }
+        });
+      }
+      _onMessage(e) {
+        const { type, payload, id } = e.data || {};
+        if (type === 'progress') {
+          if (this.progressListener && payload) {
+            if (payload.status === 'progress' && typeof payload.progress === 'number') {
+              this.progressListener(payload.progress);
+            } else if (payload.status === 'ready') {
+              this.progressListener(100);
+            }
+          }
+          return;
+        }
+        if (id == null) return;
+        const h = this.pending.get(id);
+        if (!h) return;
+        this.pending.delete(id);
+        if (type === 'error') {
+          h.reject(new Error((payload && payload.message) || 'worker error'));
+        } else {
+          h.resolve(payload);
+        }
+      }
+      _onError(_e) {
+        const err = new Error('文字起こしワーカーが停止しました (iPhone のメモリ制限に達した可能性)');
+        for (const h of this.pending.values()) h.reject(err);
+        this.pending.clear();
+        if (this.worker) {
+          try { this.worker.terminate(); } catch (_) {}
+        }
+        this.worker = null;
+      }
+      dispose() {
+        if (this.worker) {
+          try { this.worker.postMessage({ type: 'close' }); } catch (_) {}
+          try { this.worker.terminate(); } catch (_) {}
+          this.worker = null;
+        }
+        for (const h of this.pending.values()) h.reject(new Error('worker disposed'));
+        this.pending.clear();
+      }
     }
 
-    // 非 WAV: 一旦デコードして 16k 化、その後 2 分窓ずつ Whisper にかける。
-    async function transcribeFallback(blob, langValue, modelId, setStatus) {
-      let modelLoaded = false;
-      const transcriber = await ensureTranscriber(modelId, (p) => {
-        if (modelLoaded) return;
-        if (p >= 100) { modelLoaded = true; setStatus(15, 'モデル準備完了'); }
-        else setStatus(2 + (p / 100) * 12, `モデル取得中… ${Math.round(p)}%`);
-      });
-      if (!modelLoaded) setStatus(15, 'モデル準備完了');
-
-      setStatus(18, '音声をデコード中…');
-      let audioBuffer = await decodeFallback(blob);
-      const totalSec = audioBuffer.duration;
-      const origSr = audioBuffer.sampleRate;
-      let monoOrig = bufferToMono(audioBuffer);
-      audioBuffer = null;
-
-      setStatus(24, '16kHz にリサンプリング中…');
-      let mono16k = resampleMono(monoOrig, origSr, 16000);
-      monoOrig = null;
-
-      const winSamples = 2 * 60 * 16000;
-      const transcribeOpts = {
+    // 共通の Whisper 呼び出しオプション
+    function buildTranscribeOpts(langValue) {
+      const opts = {
         task: 'transcribe',
         chunk_length_s: 30,
         stride_length_s: 5,
         return_timestamps: false,
       };
-      if (langValue && langValue !== 'auto') transcribeOpts.language = langValue;
+      if (langValue && langValue !== 'auto') opts.language = langValue;
+      return opts;
+    }
 
-      const texts = [];
-      const total = mono16k.length;
-      let lastPct = 24;
-      const reportPct = (pct, label) => {
-        if (pct < lastPct) pct = lastPct;
-        else lastPct = pct;
-        setStatus(pct, label);
-      };
+    // WAV をストリーム読込 → 30 秒窓ごとに Worker に丸ごと転送して文字起こし
+    async function transcribeWavStream(file, fmt, langValue, modelId, setStatus) {
+      const worker = new WhisperWorker();
+      try {
+        let modelLoaded = false;
+        await worker.init(modelId, (p) => {
+          if (modelLoaded) return;
+          if (p >= 100) { modelLoaded = true; setStatus(15, 'モデル準備完了'); }
+          else setStatus(2 + (p / 100) * 12, `モデル取得中… ${Math.round(p)}%`);
+        });
+        if (!modelLoaded) setStatus(15, 'モデル準備完了');
 
-      for (let off = 0; off < total; off += winSamples) {
-        const end = Math.min(off + winSamples, total);
-        const fromSec = off / 16000;
-        const toSec = end / 16000;
-        reportPct(
-          24 + (off / total) * 70,
-          `文字起こし中… (${fmtHMS(fromSec)} → ${fmtHMS(toSec)} / ${fmtHMS(totalSec)})`
-        );
-        const view = mono16k.subarray(off, end);
-        const result = await transcriber(view, transcribeOpts);
-        const t = (result && typeof result.text === 'string') ? result.text.trim() : '';
-        if (t) texts.push(t);
-        await new Promise(r => setTimeout(r, 100));
+        const targetSr = 16000;
+        const winSec = 30; // ★ iPhone Safari 向けに極小チャンク (~1.9MB)
+        const winSamples = winSec * targetSr;
+        // sticky な ring buffer は transfer すると detach されるので、毎回 slice → 転送
+        const audio16kBuf = new Float32Array(winSamples + 30 * targetSr + 4096);
+        let bufPos = 0;
+        const resampler = new LinearResampler(fmt.sampleRate, targetSr);
+
+        const frameSize = (fmt.bitsPerSample / 8) * fmt.numChannels;
+        const readFrames = Math.max(1, Math.floor(15 * fmt.sampleRate));
+        const readBytes = readFrames * frameSize;
+        const dataEnd = fmt.dataOff + fmt.dataLen;
+        const totalSec = fmt.duration;
+
+        const transcribeOpts = buildTranscribeOpts(langValue);
+        const texts = [];
+        let transcribedSec = 0;
+        let lastPct = 15;
+        const reportPct = (pct, label) => {
+          if (pct < lastPct) pct = lastPct;
+          else lastPct = pct;
+          setStatus(pct, label);
+        };
+
+        const flushChunk = async () => {
+          if (bufPos === 0) return;
+          const sec = bufPos / targetSr;
+          const pending = transcribedSec + sec;
+          reportPct(
+            15 + (pending / totalSec) * 80,
+            `文字起こし中… (${fmtHMS(transcribedSec)} → ${fmtHMS(pending)} / ${fmtHMS(totalSec)})`
+          );
+          // 適切なサイズに切り出して転送 (Worker 側で受け取り後、メイン側は detach 済み)
+          const audio = audio16kBuf.slice(0, bufPos);
+          bufPos = 0;
+          const r = await worker.transcribe(audio, transcribeOpts);
+          const t = (r && typeof r.text === 'string') ? r.text.trim() : '';
+          if (t) texts.push(t);
+          transcribedSec += sec;
+          await new Promise(r2 => setTimeout(r2, 80)); // GC 猶予
+        };
+
+        let p = fmt.dataOff;
+        while (p < dataEnd) {
+          const remaining = dataEnd - p;
+          let thisBytes = Math.min(readBytes, remaining);
+          thisBytes -= thisBytes % frameSize;
+          if (thisBytes <= 0) break;
+          const buf = await file.slice(p, p + thisBytes).arrayBuffer();
+          p += thisBytes;
+          const monoChunk = pcmBytesToMonoFloat32(new Uint8Array(buf), fmt);
+          const out = { array: audio16kBuf, pos: bufPos };
+          resampler.process(monoChunk, out);
+          bufPos = out.pos;
+
+          const readSec = (p - fmt.dataOff) / fmt.dataLen * totalSec;
+          reportPct(
+            15 + (readSec / totalSec) * 80,
+            `WAV 読込中… (${fmtHMS(readSec)} / ${fmtHMS(totalSec)})`
+          );
+
+          if (bufPos >= winSamples) {
+            await flushChunk();
+          }
+          await new Promise(r2 => setTimeout(r2, 0));
+        }
+        {
+          const out = { array: audio16kBuf, pos: bufPos };
+          resampler.flush(out);
+          bufPos = out.pos;
+        }
+        await flushChunk();
+        return texts.join('\n');
+      } finally {
+        worker.dispose();
       }
-      mono16k = null;
-      return texts.join('\n');
+    }
+
+    // 非 WAV: デコード → 16k → 30 秒窓ずつ Worker へ
+    async function transcribeFallback(blob, langValue, modelId, setStatus) {
+      const worker = new WhisperWorker();
+      try {
+        let modelLoaded = false;
+        await worker.init(modelId, (p) => {
+          if (modelLoaded) return;
+          if (p >= 100) { modelLoaded = true; setStatus(15, 'モデル準備完了'); }
+          else setStatus(2 + (p / 100) * 12, `モデル取得中… ${Math.round(p)}%`);
+        });
+        if (!modelLoaded) setStatus(15, 'モデル準備完了');
+
+        setStatus(18, '音声をデコード中…');
+        let audioBuffer = await decodeFallback(blob);
+        const totalSec = audioBuffer.duration;
+        const origSr = audioBuffer.sampleRate;
+        let monoOrig = bufferToMono(audioBuffer);
+        audioBuffer = null;
+
+        setStatus(24, '16kHz にリサンプリング中…');
+        let mono16k = resampleMono(monoOrig, origSr, 16000);
+        monoOrig = null;
+
+        const winSamples = 30 * 16000;
+        const transcribeOpts = buildTranscribeOpts(langValue);
+        const texts = [];
+        const total = mono16k.length;
+        let lastPct = 24;
+        const reportPct = (pct, label) => {
+          if (pct < lastPct) pct = lastPct;
+          else lastPct = pct;
+          setStatus(pct, label);
+        };
+
+        for (let off = 0; off < total; off += winSamples) {
+          const end = Math.min(off + winSamples, total);
+          const fromSec = off / 16000;
+          const toSec = end / 16000;
+          reportPct(
+            24 + (off / total) * 70,
+            `文字起こし中… (${fmtHMS(fromSec)} → ${fmtHMS(toSec)} / ${fmtHMS(totalSec)})`
+          );
+          const audio = mono16k.slice(off, end); // 転送用にコピー
+          const r = await worker.transcribe(audio, transcribeOpts);
+          const t = (r && typeof r.text === 'string') ? r.text.trim() : '';
+          if (t) texts.push(t);
+          await new Promise(r2 => setTimeout(r2, 80));
+        }
+        mono16k = null;
+        return texts.join('\n');
+      } finally {
+        worker.dispose();
+      }
     }
 
     // ===== メイン処理 =====
