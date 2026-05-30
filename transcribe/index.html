@@ -156,7 +156,7 @@
       🔒 <b>音声はこの端末から一切送信されません。</b> すべてブラウザ内で処理します。
     </div>
     <div class="alert warn" id="trNote">
-      📝 <b>文字起こし機能は実験中 (β)</b>。Whisper を Web Worker で隔離 + 30 秒ごとに VAD で無音区間をスキップしながら処理します。tiny モデルは日本語精度が低く幻覚 (「ありがとうございます」連発など) を起こしやすいので、まずは base を推奨。PC なら small が一番きれいです。
+      📝 <b>文字起こし機能は実験中 (β)</b>。Whisper を Web Worker で隔離して 90 秒ごとに処理 (内部で 30 秒 × 5 秒オーバーラップ stride)。tiny は日本語幻覚が多いので base を推奨、PC なら small が最も自然です。捏造された括弧ラベル ((知事) など) は自動で除去します。
     </div>
 
     <!-- ドロップゾーン -->
@@ -195,6 +195,10 @@
         <label class="check">
           <input type="checkbox" id="stripFillers" checked />
           <span>✂️ フィラー (えー・あのー・um 等) を除去する</span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="stripParens" checked />
+          <span>🗑 括弧内 (例:「(知事)」「(徳島新聞)」など Whisper の捏造ラベル) を除去する</span>
         </label>
         <div class="hint">
           <b>MP3 変換</b>: PC の Chrome / Edge は変換前に保存ダイアログ、iPhone は「📤 共有して保存」で保存先を選べます。<br>
@@ -747,8 +751,8 @@ self.onmessage = async (e) => {
     }
 
     // 共通の Whisper 呼び出しオプション
-    // no_repeat_ngram_size でデコーダが同じ 3-gram を 2 度生成しないよう抑制
-    // (これがないと「お前、お前、…」のような幻覚ループが発生)
+    // - no_repeat_ngram_size: 同じ 3-gram を 2 度生成させない
+    // - repetition_penalty: 直近に生成したトークンへの確率にペナルティ
     function buildTranscribeOpts(langValue) {
       const opts = {
         task: 'transcribe',
@@ -756,19 +760,19 @@ self.onmessage = async (e) => {
         stride_length_s: 5,
         return_timestamps: false,
         no_repeat_ngram_size: 3,
+        repetition_penalty: 1.1,
       };
       if (langValue && langValue !== 'auto') opts.language = langValue;
       return opts;
     }
 
-    // 簡易 VAD: チャンク中に閾値を超えるサンプルが一定割合あるかで判定
-    // 無音 / ノイズだけの 30 秒を Whisper に渡すと幻覚を起こすため事前にスキップ
+    // 簡易 VAD: チャンクに十分な音量サンプルがあるかで判定
+    // 厳しすぎると小声や遠めの音声を捨ててしまうので緩めに設定
     function hasSpeech(audio) {
-      const threshold = 0.01; // ≒ -40dBFS
-      const minRatio = 0.02;  // 2% 以上のサンプルが閾値超え
+      const threshold = 0.005; // ≒ -46dBFS
+      const minRatio = 0.01;   // 1% 以上のサンプルが閾値超え
       const N = audio.length;
       if (N === 0) return false;
-      // 端折りサンプリング (毎サンプル見ると遅いので 4 つに 1 つ)
       let active = 0, checked = 0;
       for (let i = 0; i < N; i += 4) {
         const v = audio[i];
@@ -793,6 +797,27 @@ self.onmessage = async (e) => {
       return out;
     }
 
+    // Whisper が音声を理解できない時に挿入する括弧ラベル
+    // 例: (知事)(徳島新聞社)(山本)(JR東日本E233系電車) など
+    // (笑)(拍手)(音楽) のような有用な音響注釈は残す
+    function stripParentheticals(text) {
+      if (!text) return text;
+      const keep = new Set([
+        '笑', '拍手', '音楽', '雑音', '咳', '無音', '間', '沈黙', 'ため息',
+        'laughter', 'applause', 'music', 'silence', 'noise', 'cough',
+      ]);
+      const reBoth = /[\(（]\s*([^()()\n]+?)\s*[\)）]/g;
+      let out = text.replace(reBoth, (match, inner) => {
+        const norm = inner.trim().toLowerCase();
+        return keep.has(norm) ? match : '';
+      });
+      // 余分な空白・空行を整形
+      out = out.replace(/[ \t]{2,}/g, ' ');
+      out = out.replace(/\n[ \t]+/g, '\n');
+      out = out.replace(/\n{3,}/g, '\n\n');
+      return out.trim();
+    }
+
     // WAV をストリーム読込 → 30 秒窓ごとに Worker に丸ごと転送して文字起こし
     async function transcribeWavStream(file, fmt, langValue, modelId, setStatus) {
       const worker = new WhisperWorker();
@@ -806,7 +831,11 @@ self.onmessage = async (e) => {
         if (!modelLoaded) setStatus(15, 'モデル準備完了');
 
         const targetSr = 16000;
-        const winSec = 30; // ★ iPhone Safari 向けに極小チャンク (~1.9MB)
+        // ★ Whisper の内部 stride (chunk_length_s=30, stride_length_s=5) を
+        //   ちゃんと働かせるため 90 秒。30秒ぶつ切りだとコンテキストが切れて
+        //   モデルが「(知事)」「JR東日本E233系電車」のような幻覚に逃げる。
+        //   90秒 × 16kHz × 4B = 5.76MB / 呼び出し (Worker 側のみ)。
+        const winSec = 90;
         const winSamples = winSec * targetSr;
         // sticky な ring buffer は transfer すると detach されるので、毎回 slice → 転送
         const audio16kBuf = new Float32Array(winSamples + 30 * targetSr + 4096);
@@ -914,7 +943,7 @@ self.onmessage = async (e) => {
         let mono16k = resampleMono(monoOrig, origSr, 16000);
         monoOrig = null;
 
-        const winSamples = 30 * 16000;
+        const winSamples = 90 * 16000;
         const transcribeOpts = buildTranscribeOpts(langValue);
         const texts = [];
         const total = mono16k.length;
@@ -1182,6 +1211,7 @@ self.onmessage = async (e) => {
 
         setStatus(96, '仕上げ中…');
         text = collapseHallucinations(text);
+        if (document.getElementById('stripParens').checked) text = stripParentheticals(text);
         if (document.getElementById('stripFillers').checked) text = stripFillers(text);
         transcriptText = text || '';
         transcriptEl.value = transcriptText || '(文字起こし結果が空でした)';
