@@ -213,80 +213,206 @@
   <!-- MP3 エンコーダ (UMD グローバル) -->
   <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
   <script>
+  /*
+   * 音声ファイル MP3 変換ツール — 全処理ブラウザ内で完結
+   *
+   * モジュール構成 (このファイル内、上から):
+   *   1. 設定値      — マジックナンバーをここに集約
+   *   2. DOM 参照    — 一度だけ取得
+   *   3. 状態         — currentFile, mp3Blob 等
+   *   4. UI ユーティリティ — toast / setProgress
+   *   5. フォーマッタ — fmtBytes / fmtHMS / baseName / escapeHtml
+   *   6. ファイル保存ヘルパー — triggerDownload / saveBlobAs / shareBlob
+   *   7. 音声デコード — decodeFallback / bufferToMono (非 WAV 用)
+   *   8. WAV パーサ  — parseWavHeader / pcmBytesToMonoFloat32
+   *   9. MP3 エンコーダ — ensureLamejs / encodeMP3 / processWavToMp3
+   *  10. UI 状態   — setFile / setBusy / showError / show*Result
+   *  11. 変換パイプライン — convertFileToMp3 / pickMp3WritableTarget
+   *  12. メインアクション — run / saveExistingMp3 / shareMp3
+   *  13. イベントハンドラ — setupHandlers
+   *
+   * 変換アーキテクチャ:
+   *   入力ファイル → onChunk(Uint8Array) コールバック経由で MP3 バイト列を吐く
+   *   onChunk の振り先:
+   *     - showSaveFilePicker で取得した writable.write (Chrome/Edge desktop)
+   *     - メモリに溜めて最後に Blob 化 (iPhone Safari / Firefox 等)
+   *   どちらも MP3 を一度にメモリに乗せないので、長尺 WAV も安全。
+   */
   (function () {
     'use strict';
 
-    // ===== DOM =====
-    const dz = document.getElementById('dz');
-    const fi = document.getElementById('fi');
-    const runCard = document.getElementById('runCard');
-    const filemeta = document.getElementById('filemeta');
-    const runBtn = document.getElementById('runBtn');
-    const progress = document.getElementById('progress');
-    const pbar = document.getElementById('pbar');
-    const pstatus = document.getElementById('pstatus');
-    const resultBox = document.getElementById('result');
-    const resultmeta = document.getElementById('resultmeta');
-    const dlMp3 = document.getElementById('dlMp3');
-    const shareBtn = document.getElementById('shareBtn');
-    const saveHint = document.getElementById('saveHint');
-    const toastEl = document.getElementById('toast');
+    // ===== 1. 設定値 =====
+    const WAV_READ_WINDOW_SEC   = 30;          // WAV ストリーミング読込の窓
+    const MP3_BLOCK_SIZE        = 1152;        // lamejs の標準ブロック (MP3 のフレーム単位)
+    const MAX_WAV_HEADER_BYTES  = 8192;        // WAV ヘッダ走査の上限
+    const MIN_SAMPLE_RATE       = 8000;        // サポート最低サンプルレート
+    const LONG_AUDIO_WARN_SEC   = 30 * 60;     // この長さ以上で事前 toast
+    const TOAST_DURATION_MS     = 1800;
+    const DOWNLOAD_CLEANUP_MS   = 60 * 1000;   // blob URL を保持する時間 (大ファイル対応)
+    const PROGRESS_FADE_MS      = 600;
+    const DEFAULT_KBPS          = 128;
+    const MP3_MIME              = 'audio/mpeg';
+    const MP3_PICKER_TYPE       = {
+      description: 'MP3 オーディオ',
+      accept: { [MP3_MIME]: ['.mp3'] },
+    };
+    const LAMEJS_FALLBACK_URLS  = [
+      'https://unpkg.com/lamejs@1.2.1/lame.min.js',
+      'https://cdn.jsdelivr.net/gh/zhuker/lamejs@master/lame.min.js',
+    ];
 
+    // ===== 2. DOM 参照 =====
+    const $ = (id) => document.getElementById(id);
+    const dz         = $('dz');
+    const fi         = $('fi');
+    const runCard    = $('runCard');
+    const filemeta   = $('filemeta');
+    const runBtn     = $('runBtn');
+    const kbpsSelect = $('kbps');
+    const progress   = $('progress');
+    const pbar       = $('pbar');
+    const pstatus    = $('pstatus');
+    const resultBox  = $('result');
+    const resultmeta = $('resultmeta');
+    const dlMp3      = $('dlMp3');
+    const shareBtn   = $('shareBtn');
+    const saveHint   = $('saveHint');
+    const toastEl    = $('toast');
+
+    // ===== 3. 状態 =====
     let currentFile = null;
-    let mp3Blob = null;
-    let mp3Name = '';
-    let busy = false;
+    let mp3Blob     = null;
+    let mp3Name     = '';
+    let busy        = false;
+    let toastTimer  = null;
 
-    // ===== ユーティリティ =====
+    // ===== 4. UI ユーティリティ =====
     function toast(msg) {
       toastEl.textContent = msg;
       toastEl.classList.add('show');
-      clearTimeout(toast._t);
-      toast._t = setTimeout(() => toastEl.classList.remove('show'), 1800);
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove('show'), TOAST_DURATION_MS);
     }
+
     function setProgress(pct, label) {
       progress.classList.remove('hidden');
       if (pct != null) pbar.style.width = Math.max(0, Math.min(100, pct)) + '%';
       if (label != null) pstatus.textContent = label;
     }
+
+    function hideProgressSoon() {
+      setTimeout(() => progress.classList.add('hidden'), PROGRESS_FADE_MS);
+    }
+
+    // ===== 5. フォーマッタ =====
     function fmtBytes(n) {
-      if (n < 1024) return n + ' B';
+      if (!isFinite(n) || n < 0) return '0 B';
+      if (n < 1024) return Math.round(n) + ' B';
       if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
       return (n / 1024 / 1024).toFixed(1) + ' MB';
     }
+
     function fmtHMS(sec) {
+      if (!isFinite(sec) || sec < 0) sec = 0;
       sec = Math.round(sec);
-      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-      const p = (x) => String(x).padStart(2, '0');
-      return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      const pad2 = (x) => String(x).padStart(2, '0');
+      return h > 0 ? `${h}:${pad2(m)}:${pad2(s)}` : `${m}:${pad2(s)}`;
     }
+
     function baseName(name) {
-      return name.replace(/\.[^.]+$/, '');
+      // 拡張子だけの ".hidden" などは元の名前を返す
+      const stripped = name.replace(/\.[^.]+$/, '');
+      return stripped || name;
     }
+
+    function escapeHtml(s) {
+      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+      return String(s).replace(/[&<>"']/g, (c) => map[c]);
+    }
+
+    // ===== 6. ファイル保存ヘルパー =====
     function triggerDownload(blob, filename) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = filename;
+      a.href = url;
+      a.download = filename;
       a.style.display = 'none';
       document.body.appendChild(a);
       a.click();
-      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+      // 大きいファイルだとブラウザがダウンロードを始めるまで時間がかかるので余裕を持って revoke
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, DOWNLOAD_CLEANUP_MS);
     }
 
-    // ===== 音声デコード (fallback: WAV以外) =====
-    // 非WAV は AudioContext で一括デコード。WAV はストリーミング処理 (後述) を優先。
+    function canShareFile(name, mime) {
+      if (!navigator.canShare) return false;
+      try {
+        const probe = new File([new Blob([])], name, { type: mime });
+        return navigator.canShare({ files: [probe] });
+      } catch (_) {
+        return false;
+      }
+    }
+
+    /**
+     * 既存の Blob を保存。showSaveFilePicker → ダウンロード の順にフォールバック。
+     * 内部 write 失敗時は writable を確実に abort する。
+     */
+    async function saveBlobAs(blob, name, pickerType) {
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: name,
+            types: [pickerType],
+          });
+          const w = await handle.createWritable();
+          try {
+            await w.write(blob);
+            await w.close();
+            toast('保存しました');
+            return 'saved';
+          } catch (e) {
+            try { await w.abort(); } catch (_) {}
+            throw e;
+          }
+        } catch (e) {
+          if (e && e.name === 'AbortError') return 'cancelled';
+          console.warn('showSaveFilePicker failed, falling back to download:', e);
+        }
+      }
+      triggerDownload(blob, name);
+      return 'downloaded';
+    }
+
+    async function shareBlob(blob, name, mime) {
+      const file = new File([blob], name, { type: mime });
+      try {
+        await navigator.share({ files: [file], title: name });
+        toast('保存しました');
+        return true;
+      } catch (e) {
+        if (e && e.name === 'AbortError') return false;
+        console.error('share failed:', e);
+        toast('共有できませんでした');
+        return false;
+      }
+    }
+
+    // ===== 7. 音声デコード (非 WAV 経路) =====
     async function decodeFallback(blob) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       const ctx = new Ctx();
       try {
         const buf = await blob.arrayBuffer();
         return await new Promise((resolve, reject) => {
-          // Safari は callback 形式しか受け付けない版があるため両対応
+          // Safari 旧版は callback 形式のみ対応のため両対応
           const p = ctx.decodeAudioData(buf.slice(0), resolve, reject);
           if (p && typeof p.then === 'function') p.then(resolve, reject);
         });
       } finally {
-        try { ctx.close(); } catch (e) {}
+        try { ctx.close(); } catch (_) {}
       }
     }
 
@@ -302,10 +428,12 @@
       return mono;
     }
 
-    // ===== WAV ヘッダ解析 =====
-    // 戻り値が null なら fallback (AudioContext) 経路へ。
+    // ===== 8. WAV パーサ =====
+    /**
+     * @returns {object|null} 解析できた format 情報、または null (fallback 経路へ)
+     */
     async function parseWavHeader(file) {
-      const headBuf = await file.slice(0, 8192).arrayBuffer();
+      const headBuf = await file.slice(0, MAX_WAV_HEADER_BYTES).arrayBuffer();
       const view = new DataView(headBuf);
       const ascii = (off, n) => {
         let s = '';
@@ -313,6 +441,7 @@
         return s;
       };
       if (view.byteLength < 12 || ascii(0, 4) !== 'RIFF' || ascii(8, 4) !== 'WAVE') return null;
+
       let p = 12;
       let fmt = null, dataOff = -1, dataLen = -1;
       while (p + 8 <= view.byteLength) {
@@ -320,13 +449,13 @@
         const sz = view.getUint32(p + 4, true);
         if (id === 'fmt ' && p + 8 + 16 <= view.byteLength) {
           fmt = {
-            audioFormat: view.getUint16(p + 8, true),
-            numChannels: view.getUint16(p + 10, true),
-            sampleRate: view.getUint32(p + 12, true),
+            audioFormat:   view.getUint16(p + 8,  true),
+            numChannels:   view.getUint16(p + 10, true),
+            sampleRate:    view.getUint32(p + 12, true),
             bitsPerSample: view.getUint16(p + 22, true),
           };
+          // WAVE_FORMAT_EXTENSIBLE: 実フォーマットは extension の subFormat 先頭 2 バイト
           if (fmt.audioFormat === 0xFFFE && sz >= 40 && p + 8 + 24 + 2 <= view.byteLength) {
-            // WAVE_FORMAT_EXTENSIBLE — sub format
             fmt.audioFormat = view.getUint16(p + 8 + 24, true);
           }
         } else if (id === 'data') {
@@ -334,27 +463,27 @@
           dataLen = sz;
           break;
         }
-        p += 8 + sz + (sz & 1);
+        p += 8 + sz + (sz & 1); // 奇数長 chunk はパディング 1B
       }
       if (!fmt || dataOff < 0) return null;
-      // サポートする形式に絞る
-      const okPCM = fmt.audioFormat === 1 && [8, 16, 24, 32].includes(fmt.bitsPerSample);
+
+      const okPCM   = fmt.audioFormat === 1 && [8, 16, 24, 32].includes(fmt.bitsPerSample);
       const okFloat = fmt.audioFormat === 3 && (fmt.bitsPerSample === 32 || fmt.bitsPerSample === 64);
-      if (!(okPCM || okFloat) || fmt.numChannels < 1 || fmt.sampleRate < 8000) return null;
+      if (!(okPCM || okFloat) || fmt.numChannels < 1 || fmt.sampleRate < MIN_SAMPLE_RATE) return null;
+
       fmt.dataOff = dataOff;
-      // dataLen が 0xFFFFFFFF や過大な場合はファイル末尾までに切り詰め
+      // dataLen が 0xFFFFFFFF (長さ不明 WAV) や過大な場合はファイル末尾までに切り詰め
       fmt.dataLen = Math.min(dataLen >>> 0, file.size - dataOff);
-      const frameSize = (fmt.bitsPerSample / 8) * fmt.numChannels;
-      fmt.totalFrames = Math.floor(fmt.dataLen / frameSize);
-      fmt.duration = fmt.totalFrames / fmt.sampleRate;
+      fmt.frameSize   = (fmt.bitsPerSample / 8) * fmt.numChannels;
+      fmt.totalFrames = Math.floor(fmt.dataLen / fmt.frameSize);
+      fmt.duration    = fmt.totalFrames / fmt.sampleRate;
       return fmt;
     }
 
-    // PCM バイト列 (WAV のデータチャンク) → モノラル Float32
+    /** WAV の data chunk バイト列 → モノラル Float32 (チャンネルは単純平均でダウンミックス) */
     function pcmBytesToMonoFloat32(uint8, fmt) {
-      const { audioFormat, bitsPerSample, numChannels } = fmt;
+      const { audioFormat, bitsPerSample, numChannels, frameSize } = fmt;
       const bytesPerSample = bitsPerSample / 8;
-      const frameSize = bytesPerSample * numChannels;
       const numFrames = Math.floor(uint8.byteLength / frameSize);
       const view = new DataView(uint8.buffer, uint8.byteOffset, uint8.byteLength);
       const mono = new Float32Array(numFrames);
@@ -363,143 +492,148 @@
         let sum = 0;
         const baseOff = f * frameSize;
         for (let c = 0; c < numChannels; c++) {
-          const off = baseOff + c * bytesPerSample;
-          let v = 0;
-          if (audioFormat === 3) {
-            v = bitsPerSample === 64 ? view.getFloat64(off, true) : view.getFloat32(off, true);
-          } else if (audioFormat === 1) {
-            if (bitsPerSample === 16) v = view.getInt16(off, true) / 32768;
-            else if (bitsPerSample === 24) {
-              const b0 = view.getUint8(off);
-              const b1 = view.getUint8(off + 1);
-              const b2 = view.getInt8(off + 2); // top byte signed
-              v = ((b2 << 16) | (b1 << 8) | b0) / 8388608;
-            } else if (bitsPerSample === 32) v = view.getInt32(off, true) / 2147483648;
-            else if (bitsPerSample === 8) v = (view.getUint8(off) - 128) / 128;
-          }
-          sum += v;
+          sum += readPcmSample(view, baseOff + c * bytesPerSample, audioFormat, bitsPerSample);
         }
         mono[f] = sum * invCh;
       }
       return mono;
     }
 
-    // ===== MP3 エンコード (lamejs) =====
+    function readPcmSample(view, off, audioFormat, bitsPerSample) {
+      if (audioFormat === 3) {
+        return bitsPerSample === 64 ? view.getFloat64(off, true) : view.getFloat32(off, true);
+      }
+      // PCM
+      switch (bitsPerSample) {
+        case 16: return view.getInt16(off, true) / 32768;
+        case 24: {
+          const b0 = view.getUint8(off);
+          const b1 = view.getUint8(off + 1);
+          const b2 = view.getInt8(off + 2); // 上位バイトは符号付き
+          return ((b2 << 16) | (b1 << 8) | b0) / 8388608;
+        }
+        case 32: return view.getInt32(off, true) / 2147483648;
+        case 8:  return (view.getUint8(off) - 128) / 128;
+        default: return 0;
+      }
+    }
+
+    // ===== 9. MP3 エンコーダ =====
     function primeLameGlobals() {
       if (typeof lamejs === 'undefined') return false;
+      // lamejs UMD は内部クラスを window グローバルから引くので注入する
       for (const k of ['MPEGMode', 'Lame', 'BitStream']) {
         if (typeof window[k] === 'undefined' && lamejs[k]) window[k] = lamejs[k];
       }
       return typeof lamejs.Mp3Encoder === 'function';
     }
+
     function loadScript(src) {
       return new Promise((resolve, reject) => {
         const s = document.createElement('script');
-        s.src = src; s.onload = resolve;
+        s.src = src;
+        s.onload = resolve;
         s.onerror = () => reject(new Error('script load failed: ' + src));
         document.head.appendChild(s);
       });
     }
+
     async function ensureLamejs() {
-      if (typeof lamejs !== 'undefined' && lamejs.Mp3Encoder) return;
-      for (const u of [
-        'https://unpkg.com/lamejs@1.2.1/lame.min.js',
-        'https://cdn.jsdelivr.net/gh/zhuker/lamejs@master/lame.min.js',
-      ]) {
-        if (typeof lamejs !== 'undefined' && lamejs.Mp3Encoder) return;
-        try { await loadScript(u); } catch (e) {}
+      if (primeLameGlobals()) return;
+      for (const url of LAMEJS_FALLBACK_URLS) {
+        try { await loadScript(url); } catch (_) {}
+        if (primeLameGlobals()) return;
       }
+      throw new Error('MP3 エンコーダを読み込めませんでした (ネットワークを確認してください)');
     }
-    function floatToInt16(f) {
-      const out = new Int16Array(f.length);
-      for (let i = 0; i < f.length; i++) {
-        const v = Math.max(-1, Math.min(1, f[i]));
-        out[i] = v < 0 ? v * 32768 : v * 32767;
-      }
-      return out;
-    }
-    // MP3 を 1 ブロックずつ onChunk(Uint8Array) に渡す。
-    // onChunk は同期/非同期どちらでも OK (async でストリーム書き込みできる)。
+
+    /**
+     * MP3 を 1152 サンプル単位でエンコードして onChunk に流す。
+     * 巨大な Int16Array を一度に確保しないため、長尺の非 WAV 音声でもメモリが膨らまない。
+     */
     async function encodeMP3(samples, sampleRate, kbps, onChunk, onProgress) {
       await ensureLamejs();
-      if (typeof lamejs === 'undefined' || !primeLameGlobals()) {
-        throw new Error('MP3エンコーダを読み込めませんでした。');
-      }
       const encoder = new lamejs.Mp3Encoder(1, sampleRate, kbps);
-      const int16 = floatToInt16(samples);
-      const blockSize = 1152;
-      const total = Math.ceil(int16.length / blockSize);
+      const block = new Int16Array(MP3_BLOCK_SIZE);
+      const total = Math.ceil(samples.length / MP3_BLOCK_SIZE);
       let done = 0;
-      for (let i = 0; i < int16.length; i += blockSize) {
-        const buf = encoder.encodeBuffer(int16.subarray(i, i + blockSize));
+      for (let i = 0; i < samples.length; i += MP3_BLOCK_SIZE) {
+        const len = Math.min(MP3_BLOCK_SIZE, samples.length - i);
+        floatToInt16Block(samples, i, block, len);
+        const buf = encoder.encodeBuffer(len === MP3_BLOCK_SIZE ? block : block.subarray(0, len));
         if (buf.length > 0) await onChunk(buf);
         if (++done % 64 === 0) {
           if (onProgress) onProgress(done / total);
-          await new Promise(r => setTimeout(r, 0));
+          await new Promise((r) => setTimeout(r, 0));
         }
       }
-      const end = encoder.flush();
-      if (end.length > 0) await onChunk(end);
+      const tail = encoder.flush();
+      if (tail.length > 0) await onChunk(tail);
     }
 
-    // ===== WAV ストリーミング → MP3 =====
-    // ファイル全体を AudioBuffer に展開せず、30 秒ウィンドウで PCM を切り出して
-    // MP3 を逐次エンコードし、onChunk(Uint8Array) に流し込む。
-    // onChunk が writableStream.write なら、メモリ上に MP3 全体を持たずに済む。
+    function floatToInt16Block(src, srcOff, dst, count) {
+      for (let i = 0; i < count; i++) {
+        const v = Math.max(-1, Math.min(1, src[srcOff + i]));
+        dst[i] = v < 0 ? v * 32768 : v * 32767;
+      }
+    }
+
+    /**
+     * WAV をストリーム読込しつつ MP3 を逐次エンコード。
+     * ピーク時メモリは「1 ウィンドウの PCM (~5MB) + 圧縮済み MP3 チャンク」のみで、
+     * 元ファイルの長さに依存しない。
+     */
     async function processWavToMp3(file, fmt, kbps, onChunk, setStatus) {
       await ensureLamejs();
-      if (typeof lamejs === 'undefined' || !primeLameGlobals()) {
-        throw new Error('MP3エンコーダを読み込めませんでした。');
-      }
-      const mp3Encoder = new lamejs.Mp3Encoder(1, fmt.sampleRate, kbps);
-
-      const frameSize = (fmt.bitsPerSample / 8) * fmt.numChannels;
-      const readFrames = Math.max(1, Math.floor(30 * fmt.sampleRate));
-      const readBytes = readFrames * frameSize;
-      const dataEnd = fmt.dataOff + fmt.dataLen;
-      const mp3BlockSize = 1152;
-      const totalSec = fmt.duration;
+      const encoder = new lamejs.Mp3Encoder(1, fmt.sampleRate, kbps);
+      const readFrames = Math.max(1, Math.floor(WAV_READ_WINDOW_SEC * fmt.sampleRate));
+      const readBytes  = readFrames * fmt.frameSize;
+      const dataEnd    = fmt.dataOff + fmt.dataLen;
+      const totalSec   = fmt.duration;
+      const block      = new Int16Array(MP3_BLOCK_SIZE);
 
       let p = fmt.dataOff;
       while (p < dataEnd) {
         const remaining = dataEnd - p;
-        let thisBytes = Math.min(readBytes, remaining);
-        thisBytes -= thisBytes % frameSize;
-        if (thisBytes <= 0) break;
-        const buf = await file.slice(p, p + thisBytes).arrayBuffer();
-        p += thisBytes;
-        const monoChunk = pcmBytesToMonoFloat32(new Uint8Array(buf), fmt);
-        const int16 = floatToInt16(monoChunk);
-        for (let off = 0; off < int16.length; off += mp3BlockSize) {
-          const blk = int16.subarray(off, Math.min(off + mp3BlockSize, int16.length));
-          const enc = mp3Encoder.encodeBuffer(blk);
+        let take = Math.min(readBytes, remaining);
+        take -= take % fmt.frameSize; // フレーム境界に揃える
+        if (take <= 0) break;
+
+        const buf = await file.slice(p, p + take).arrayBuffer();
+        p += take;
+        const mono = pcmBytesToMonoFloat32(new Uint8Array(buf), fmt);
+
+        // ウィンドウを 1152 ブロックずつエンコード
+        for (let i = 0; i < mono.length; i += MP3_BLOCK_SIZE) {
+          const len = Math.min(MP3_BLOCK_SIZE, mono.length - i);
+          floatToInt16Block(mono, i, block, len);
+          const enc = encoder.encodeBuffer(len === MP3_BLOCK_SIZE ? block : block.subarray(0, len));
           if (enc.length > 0) await onChunk(enc);
         }
+
         if (setStatus) {
           const readSec = (p - fmt.dataOff) / fmt.dataLen * totalSec;
-          setStatus(
-            (readSec / totalSec) * 100,
-            `変換中… (${fmtHMS(readSec)} / ${fmtHMS(totalSec)})`
-          );
+          setStatus((readSec / totalSec) * 100, `変換中… (${fmtHMS(readSec)} / ${fmtHMS(totalSec)})`);
         }
-        await new Promise(r => setTimeout(r, 0));
+        await new Promise((r) => setTimeout(r, 0)); // メインスレッドを譲る
       }
 
-      const endBuf = mp3Encoder.flush();
-      if (endBuf.length > 0) await onChunk(endBuf);
+      const tail = encoder.flush();
+      if (tail.length > 0) await onChunk(tail);
     }
 
-    // 長尺向けの事前案内
     function maybeShowLongWarning(durationSec) {
-      if (durationSec > 30 * 60) {
+      if (durationSec > LONG_AUDIO_WARN_SEC) {
         toast(`長い音声 (${fmtHMS(durationSec)}) です。数分かかります`);
       }
     }
 
-    // ===== メイン処理 =====
+    // ===== 10. UI 状態 =====
     function setFile(file) {
+      if (busy) return; // 変換中はファイル切替を無効化 (currentFile 競合防止)
       currentFile = file;
       mp3Blob = null;
+      mp3Name = '';
       resultBox.classList.add('hidden');
       dlMp3.style.display = '';
       shareBtn.style.display = 'none';
@@ -509,187 +643,24 @@
       runBtn.disabled = false;
       progress.classList.add('hidden');
       pbar.style.width = '0%';
-    }
-    function escapeHtml(s) {
-      return s.replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-      ));
+      removeError();
     }
 
-    async function run() {
-      if (!currentFile || busy) return;
-      const kbps = parseInt(document.getElementById('kbps').value, 10) || 128;
-      const suggestedName = baseName(currentFile.name) + '.mp3';
-
-      // === 変換前にユーザーから保存先を取得 ===
-      // showSaveFilePicker は "transient activation" (直近のユーザー操作) を必要とする。
-      // 変換完了 (数十秒〜数分後) には期限切れになるため、ボタンを押した直後のここで
-      // 保存ダイアログを開く。ユーザーはファイル名と保存場所を選べる。
-      // 取得した writable に MP3 をストリーム書き込みするので、メモリにも残らない。
-      let writable = null;
-      let savedFileName = suggestedName;
-      let usingFsApi = false;
-
-      if (window.showSaveFilePicker) {
-        try {
-          const handle = await window.showSaveFilePicker({
-            suggestedName,
-            types: [{
-              description: 'MP3 オーディオ',
-              accept: { 'audio/mpeg': ['.mp3'] },
-            }],
-          });
-          writable = await handle.createWritable();
-          savedFileName = handle.name || suggestedName;
-          usingFsApi = true;
-        } catch (e) {
-          if (e && e.name === 'AbortError') {
-            // ユーザーが保存ダイアログをキャンセル → 変換も中止
-            toast('キャンセルしました');
-            return;
-          }
-          // それ以外のエラー (権限失敗など) はフォールバックへ
-          console.warn('showSaveFilePicker failed:', e);
-        }
-      }
-
-      busy = true;
-      runBtn.disabled = true;
-      resultBox.classList.add('hidden');
-      const oldErr = document.getElementById('runError');
-      if (oldErr) oldErr.remove();
-
-      // ストリーム書き込みできる時は writable に流す。
-      // できない時はメモリに溜めて最後に通常ダウンロード。
-      const memChunks = [];
-      let writtenBytes = 0;
-      const onChunk = async (chunk) => {
-        writtenBytes += chunk.byteLength || chunk.length || 0;
-        if (writable) {
-          await writable.write(chunk);
-        } else {
-          memChunks.push(chunk);
-        }
-      };
-
-      try {
-        setProgress(2, '音声を確認中…');
-        let fmt = null;
-        if (/\.wav$/i.test(currentFile.name)) {
-          try { fmt = await parseWavHeader(currentFile); } catch (_) { fmt = null; }
-        }
-
-        let durLabel;
-        if (fmt) {
-          durLabel = fmtHMS(fmt.duration);
-          maybeShowLongWarning(fmt.duration);
-          setProgress(5, `WAVをストリーム変換中… (長さ ${durLabel})`);
-          await processWavToMp3(
-            currentFile, fmt, kbps, onChunk,
-            (pct, label) => setProgress(5 + (pct / 100) * 90, label)
-          );
-        } else {
-          setProgress(5, '音声をデコード中…');
-          let audioBuffer = await decodeFallback(currentFile);
-          const dur = audioBuffer.duration;
-          durLabel = fmtHMS(dur);
-          maybeShowLongWarning(dur);
-          const origSr = audioBuffer.sampleRate;
-
-          setProgress(20, `前処理中… (長さ ${durLabel})`);
-          let monoOrig = bufferToMono(audioBuffer);
-          audioBuffer = null;
-
-          setProgress(30, `MP3に変換中… (長さ ${durLabel})`);
-          await encodeMP3(monoOrig, origSr, kbps, onChunk, (f) =>
-            setProgress(30 + f * 65, `MP3に変換中… ${Math.round(f * 100)}%`));
-          monoOrig = null;
-        }
-
-        // 仕上げ
-        if (writable) {
-          await writable.close();
-          writable = null;
-          mp3Blob = null; // ファイルは既に書き出し済み、メモリに残さない
-          mp3Name = savedFileName;
-          setProgress(100, '完了');
-          resultmeta.innerHTML =
-            `✅ 保存しました: <b>${escapeHtml(mp3Name)}</b> — ${fmtBytes(writtenBytes)}`;
-          dlMp3.style.display = 'none';
-          shareBtn.style.display = 'none';
-          saveHint.textContent = '';
-          toast('保存しました');
-        } else {
-          mp3Blob = new Blob(memChunks, { type: 'audio/mpeg' });
-          mp3Name = suggestedName;
-          memChunks.length = 0;
-          setProgress(100, '完了');
-          resultmeta.innerHTML =
-            `🎵 <b>${escapeHtml(mp3Name)}</b> — ${fmtBytes(mp3Blob.size)}`;
-          // 共有 (Web Share API + files) が使えるかチェック
-          let canShareFile = false;
-          try {
-            const probe = new File([new Blob([])], mp3Name, { type: 'audio/mpeg' });
-            canShareFile = !!(navigator.canShare && navigator.canShare({ files: [probe] }));
-          } catch (_) { canShareFile = false; }
-          if (canShareFile) {
-            // iOS Safari/Chrome/Edge など: 共有シート → "ファイルに保存" で名前&場所選択可
-            shareBtn.style.display = '';
-            dlMp3.style.display = '';
-            saveHint.innerHTML = '📤 「共有して保存」をタップすると、ファイル名や保存場所を選べます (iOS の「ファイル」アプリなど)。';
-            toast('変換しました');
-          } else {
-            // 共有 API もない: 従来通り自動ダウンロード
-            shareBtn.style.display = 'none';
-            dlMp3.style.display = '';
-            saveHint.textContent = '';
-            triggerDownload(mp3Blob, mp3Name);
-            toast('ダウンロードを開始しました');
-          }
-        }
-        resultBox.classList.remove('hidden');
-        setTimeout(() => progress.classList.add('hidden'), 600);
-      } catch (e) {
-        console.error(e);
-        if (writable) {
-          try { await writable.abort(); } catch (_) {}
-        }
-        setProgress(0, '');
-        progress.classList.add('hidden');
-        showError(e);
-      } finally {
-        busy = false;
-        runBtn.disabled = false;
-      }
+    function setBusy(isBusy) {
+      busy = isBusy;
+      runBtn.disabled = isBusy;
+      // ドロップゾーンを視覚的にも操作上もロック
+      dz.style.pointerEvents = isBusy ? 'none' : '';
+      dz.style.opacity       = isBusy ? '0.6'  : '';
     }
 
-    // 既に変換済みの mp3Blob を再保存 (フォールバック経路のみ)
-    async function saveExistingMp3() {
-      if (!mp3Blob) return;
-      if (window.showSaveFilePicker) {
-        try {
-          const handle = await window.showSaveFilePicker({
-            suggestedName: mp3Name,
-            types: [{
-              description: 'MP3 オーディオ',
-              accept: { 'audio/mpeg': ['.mp3'] },
-            }],
-          });
-          const w = await handle.createWritable();
-          await w.write(mp3Blob);
-          await w.close();
-          toast('保存しました');
-          return;
-        } catch (e) {
-          if (e && e.name === 'AbortError') return;
-        }
-      }
-      triggerDownload(mp3Blob, mp3Name);
+    function removeError() {
+      const existing = document.getElementById('runError');
+      if (existing) existing.remove();
     }
 
     function showError(e) {
-      const existing = document.getElementById('runError');
-      if (existing) existing.remove();
+      removeError();
       const div = document.createElement('div');
       div.id = 'runError';
       div.className = 'alert err';
@@ -697,32 +668,193 @@
       runCard.appendChild(div);
     }
 
-    // ===== 入力ハンドラ =====
-    dz.addEventListener('click', () => fi.click());
-    fi.addEventListener('change', () => { if (fi.files[0]) setFile(fi.files[0]); });
-    ['dragenter', 'dragover'].forEach(ev =>
-      dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('drag'); }));
-    ['dragleave', 'drop'].forEach(ev =>
-      dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('drag'); }));
-    dz.addEventListener('drop', (e) => {
-      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-      if (f) setFile(f);
-    });
+    function showStreamedResult(name, bytes) {
+      resultmeta.innerHTML = `✅ 保存しました: <b>${escapeHtml(name)}</b> — ${fmtBytes(bytes)}`;
+      dlMp3.style.display = 'none';
+      shareBtn.style.display = 'none';
+      saveHint.textContent = '';
+      resultBox.classList.remove('hidden');
+    }
 
-    runBtn.addEventListener('click', run);
-    dlMp3.addEventListener('click', saveExistingMp3);
-    shareBtn.addEventListener('click', async () => {
-      if (!mp3Blob) return;
-      const file = new File([mp3Blob], mp3Name, { type: 'audio/mpeg' });
-      try {
-        await navigator.share({ files: [file], title: mp3Name });
-        toast('保存しました');
-      } catch (e) {
-        if (e && e.name === 'AbortError') return;
-        console.error(e);
-        toast('共有できませんでした');
+    function showInMemoryResult(blob, name) {
+      resultmeta.innerHTML = `🎵 <b>${escapeHtml(name)}</b> — ${fmtBytes(blob.size)}`;
+      dlMp3.style.display = '';
+      if (canShareFile(name, MP3_MIME)) {
+        shareBtn.style.display = '';
+        saveHint.innerHTML = '📤 「共有して保存」をタップすると、ファイル名や保存場所を選べます (iOS の「ファイル」アプリなど)。';
+      } else {
+        shareBtn.style.display = 'none';
+        saveHint.textContent = '';
       }
-    });
+      resultBox.classList.remove('hidden');
+    }
+
+    // ===== 11. 変換パイプライン =====
+    /**
+     * 変換前に保存先を確定する (Chrome/Edge のみ)。
+     * @returns {Promise<{writable, name} | 'cancelled' | null>}
+     *   - writable 取得成功: {writable, name}
+     *   - ユーザーがキャンセル: 'cancelled'
+     *   - API 非対応 or その他失敗: null (メモリ蓄積 → 後で share/download)
+     */
+    async function pickMp3WritableTarget(suggestedName) {
+      if (!window.showSaveFilePicker) return null;
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName,
+          types: [MP3_PICKER_TYPE],
+        });
+        const writable = await handle.createWritable();
+        return { writable, name: handle.name || suggestedName };
+      } catch (e) {
+        if (e && e.name === 'AbortError') return 'cancelled';
+        console.warn('showSaveFilePicker failed, falling back to in-memory:', e);
+        return null;
+      }
+    }
+
+    /**
+     * ファイル → MP3 バイト列を onChunk で吐き出す。
+     * WAV はストリーミング、それ以外は AudioContext で一括デコード後にエンコード。
+     */
+    async function convertFileToMp3(file, kbps, onChunk, setStatus) {
+      setStatus(2, '音声を確認中…');
+
+      // WAV ヘッダが解析できればストリーミング経路 (メモリ効率良)
+      let fmt = null;
+      if (/\.wav$/i.test(file.name)) {
+        try { fmt = await parseWavHeader(file); } catch (_) { fmt = null; }
+      }
+      if (fmt) {
+        const durLabel = fmtHMS(fmt.duration);
+        maybeShowLongWarning(fmt.duration);
+        setStatus(5, `WAVをストリーム変換中… (長さ ${durLabel})`);
+        await processWavToMp3(file, fmt, kbps, onChunk, (pct, label) => {
+          setStatus(5 + (pct / 100) * 90, label);
+        });
+        return;
+      }
+
+      // 非 WAV: 一括デコード → MP3 エンコード
+      setStatus(5, '音声をデコード中…');
+      let audioBuffer = await decodeFallback(file);
+      const durLabel = fmtHMS(audioBuffer.duration);
+      maybeShowLongWarning(audioBuffer.duration);
+      const sr = audioBuffer.sampleRate;
+
+      setStatus(20, `前処理中… (長さ ${durLabel})`);
+      let mono = bufferToMono(audioBuffer);
+      audioBuffer = null; // 解放を促す
+
+      setStatus(30, `MP3に変換中… (長さ ${durLabel})`);
+      await encodeMP3(mono, sr, kbps, onChunk, (f) => {
+        setStatus(30 + f * 65, `MP3に変換中… ${Math.round(f * 100)}%`);
+      });
+    }
+
+    // ===== 12. メインアクション =====
+    async function run() {
+      if (!currentFile || busy) return;
+
+      // run() の途中で setFile されても影響を受けないよう、ファイル参照をローカルキャプチャ
+      const file = currentFile;
+      const kbps = parseInt(kbpsSelect.value, 10) || DEFAULT_KBPS;
+      const suggestedName = baseName(file.name) + '.mp3';
+
+      setBusy(true);
+      let writable = null; // catch から参照するため try の外で宣言
+      try {
+        // 変換前に保存先を確定 (transient activation を使い切る前に呼ぶ必要がある)
+        const target = await pickMp3WritableTarget(suggestedName);
+        if (target === 'cancelled') {
+          toast('キャンセルしました');
+          return;
+        }
+
+        resultBox.classList.add('hidden');
+        removeError();
+
+        // 出力先: writable があれば直接ディスクへ、無ければメモリに蓄積
+        writable          = target ? target.writable : null;
+        const finalName   = target ? target.name     : suggestedName;
+        const memChunks   = [];
+        let writtenBytes  = 0;
+        const onChunk = async (chunk) => {
+          writtenBytes += chunk.byteLength || chunk.length || 0;
+          if (writable) await writable.write(chunk);
+          else          memChunks.push(chunk);
+        };
+
+        await convertFileToMp3(file, kbps, onChunk, setProgress);
+        setProgress(100, '完了');
+
+        // 仕上げ: ディスク書き出し経路とメモリ経路で UI と動作が異なる
+        if (writable) {
+          await writable.close();
+          writable = null; // 正常 close: 以降の catch で abort されないように
+          mp3Blob = null;  // ディスクに書き出し済みなのでメモリには持たない
+          mp3Name = finalName;
+          showStreamedResult(mp3Name, writtenBytes);
+          toast('保存しました');
+        } else {
+          mp3Blob = new Blob(memChunks, { type: MP3_MIME });
+          mp3Name = suggestedName;
+          memChunks.length = 0; // 参照外す
+          showInMemoryResult(mp3Blob, mp3Name);
+          if (canShareFile(mp3Name, MP3_MIME)) {
+            toast('変換しました');
+          } else {
+            // share API もない: 従来通り自動ダウンロード
+            triggerDownload(mp3Blob, mp3Name);
+            toast('ダウンロードを開始しました');
+          }
+        }
+        hideProgressSoon();
+      } catch (e) {
+        console.error(e);
+        if (writable) {
+          // 途中で失敗 → 書きかけのファイルを破棄
+          try { await writable.abort(); } catch (_) {}
+        }
+        setProgress(0, '');
+        progress.classList.add('hidden');
+        showError(e);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function saveExistingMp3() {
+      if (!mp3Blob) return;
+      await saveBlobAs(mp3Blob, mp3Name, MP3_PICKER_TYPE);
+    }
+
+    async function shareMp3() {
+      if (!mp3Blob) return;
+      await shareBlob(mp3Blob, mp3Name, MP3_MIME);
+    }
+
+    // ===== 13. イベントハンドラ =====
+    function setupHandlers() {
+      dz.addEventListener('click', () => { if (!busy) fi.click(); });
+      fi.addEventListener('change', () => { if (fi.files[0]) setFile(fi.files[0]); });
+      ['dragenter', 'dragover'].forEach((ev) =>
+        dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('drag'); })
+      );
+      ['dragleave', 'drop'].forEach((ev) =>
+        dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('drag'); })
+      );
+      dz.addEventListener('drop', (e) => {
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) setFile(f);
+      });
+
+      runBtn.addEventListener('click', run);
+      dlMp3.addEventListener('click', saveExistingMp3);
+      shareBtn.addEventListener('click', shareMp3);
+    }
+
+    setupHandlers();
   })();
   </script>
 </body>
