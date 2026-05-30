@@ -178,7 +178,10 @@
             <option value="192">192 kbps</option>
           </select>
         </div>
-        <div class="hint">変換ボタンを押すと、まず保存先を聞かれます (Chrome / Edge)。ファイル名と保存場所を自由に指定でき、変換結果はそのままディスクに書き込まれます。<br>Safari / iOS では自動的にダウンロードフォルダに保存されます。</div>
+        <div class="hint">
+          PC の Chrome / Edge: 変換ボタンを押すとすぐ保存ダイアログが出て、名前と場所を指定できます。<br>
+          iPhone / iPad (Safari・Chrome 含む): 変換後に「📤 共有して保存」をタップ → 「ファイルに保存」で名前と場所を選べます。
+        </div>
       </div>
     </div>
 
@@ -199,8 +202,10 @@
       <h3>✅ 変換完了</h3>
       <div class="filemeta" id="resultmeta" style="margin:0.5rem 0 0.9rem;"></div>
       <div class="btn-row">
-        <button class="btn btn-primary" id="dlMp3">🎵 MP3 を保存</button>
+        <button class="btn btn-primary" id="shareBtn" style="display:none;">📤 共有して保存</button>
+        <button class="btn btn-secondary" id="dlMp3">⬇ ダウンロード</button>
       </div>
+      <div class="hint" id="saveHint" style="margin-top:0.6rem;"></div>
     </div>
 
     <p class="footer-note">すべて端末内処理・音声のサーバー送信なし<br>ひゅうがのTR-Labo</p>
@@ -226,6 +231,8 @@
     const resultBox = document.getElementById('result');
     const resultmeta = document.getElementById('resultmeta');
     const dlMp3 = document.getElementById('dlMp3');
+    const shareBtn = document.getElementById('shareBtn');
+    const saveHint = document.getElementById('saveHint');
     const toastEl = document.getElementById('toast');
 
     let currentFile = null;
@@ -498,6 +505,8 @@
       mp3Blob = null;
       resultBox.classList.add('hidden');
       dlMp3.style.display = '';
+      shareBtn.style.display = 'none';
+      saveHint.textContent = '';
       runCard.style.display = '';
       filemeta.innerHTML = `🎵 <b>${escapeHtml(file.name)}</b> — ${fmtBytes(file.size)}`;
       runBtn.disabled = false;
@@ -610,6 +619,8 @@
           resultmeta.innerHTML =
             `✅ 保存しました: <b>${escapeHtml(mp3Name)}</b> — ${fmtBytes(writtenBytes)}`;
           dlMp3.style.display = 'none';
+          shareBtn.style.display = 'none';
+          saveHint.textContent = '';
           toast('保存しました');
         } else {
           mp3Blob = new Blob(memChunks, { type: 'audio/mpeg' });
@@ -618,10 +629,26 @@
           setProgress(100, '完了');
           resultmeta.innerHTML =
             `🎵 <b>${escapeHtml(mp3Name)}</b> — ${fmtBytes(mp3Blob.size)}`;
-          dlMp3.style.display = '';
-          // File System Access API 非対応環境では自動ダウンロード
-          triggerDownload(mp3Blob, mp3Name);
-          toast('ダウンロードを開始しました');
+          // 共有 (Web Share API + files) が使えるかチェック
+          let canShareFile = false;
+          try {
+            const probe = new File([new Blob([])], mp3Name, { type: 'audio/mpeg' });
+            canShareFile = !!(navigator.canShare && navigator.canShare({ files: [probe] }));
+          } catch (_) { canShareFile = false; }
+          if (canShareFile) {
+            // iOS Safari/Chrome/Edge など: 共有シート → "ファイルに保存" で名前&場所選択可
+            shareBtn.style.display = '';
+            dlMp3.style.display = '';
+            saveHint.innerHTML = '📤 「共有して保存」をタップすると、ファイル名や保存場所を選べます (iOS の「ファイル」アプリなど)。';
+            toast('変換しました');
+          } else {
+            // 共有 API もない: 従来通り自動ダウンロード
+            shareBtn.style.display = 'none';
+            dlMp3.style.display = '';
+            saveHint.textContent = '';
+            triggerDownload(mp3Blob, mp3Name);
+            toast('ダウンロードを開始しました');
+          }
         }
         resultBox.classList.remove('hidden');
         setTimeout(() => progress.classList.add('hidden'), 600);
@@ -687,6 +714,18 @@
 
     runBtn.addEventListener('click', run);
     dlMp3.addEventListener('click', saveExistingMp3);
+    shareBtn.addEventListener('click', async () => {
+      if (!mp3Blob) return;
+      const file = new File([mp3Blob], mp3Name, { type: 'audio/mpeg' });
+      try {
+        await navigator.share({ files: [file], title: mp3Name });
+        toast('保存しました');
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+        console.error(e);
+        toast('共有できませんでした');
+      }
+    });
   })();
   </script>
 </body>
