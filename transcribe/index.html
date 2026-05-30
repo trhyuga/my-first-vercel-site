@@ -178,7 +178,7 @@
             <option value="192">192 kbps</option>
           </select>
         </div>
-        <div class="hint">長い WAV はストリーム処理するので、ファイルサイズの大きい録音もそのまま投入できます。</div>
+        <div class="hint">変換ボタンを押すと、まず保存先を聞かれます (Chrome / Edge)。ファイル名と保存場所を自由に指定でき、変換結果はそのままディスクに書き込まれます。<br>Safari / iOS では自動的にダウンロードフォルダに保存されます。</div>
       </div>
     </div>
 
@@ -414,41 +414,40 @@
       }
       return out;
     }
-    async function encodeMP3(samples, sampleRate, kbps, onProgress) {
+    // MP3 を 1 ブロックずつ onChunk(Uint8Array) に渡す。
+    // onChunk は同期/非同期どちらでも OK (async でストリーム書き込みできる)。
+    async function encodeMP3(samples, sampleRate, kbps, onChunk, onProgress) {
       await ensureLamejs();
       if (typeof lamejs === 'undefined' || !primeLameGlobals()) {
         throw new Error('MP3エンコーダを読み込めませんでした。');
       }
       const encoder = new lamejs.Mp3Encoder(1, sampleRate, kbps);
       const int16 = floatToInt16(samples);
-      const chunks = [];
       const blockSize = 1152;
       const total = Math.ceil(int16.length / blockSize);
       let done = 0;
       for (let i = 0; i < int16.length; i += blockSize) {
         const buf = encoder.encodeBuffer(int16.subarray(i, i + blockSize));
-        if (buf.length > 0) chunks.push(buf);
+        if (buf.length > 0) await onChunk(buf);
         if (++done % 64 === 0) {
           if (onProgress) onProgress(done / total);
           await new Promise(r => setTimeout(r, 0));
         }
       }
       const end = encoder.flush();
-      if (end.length > 0) chunks.push(end);
-      return new Blob(chunks, { type: 'audio/mpeg' });
+      if (end.length > 0) await onChunk(end);
     }
 
     // ===== WAV ストリーミング → MP3 =====
     // ファイル全体を AudioBuffer に展開せず、30 秒ウィンドウで PCM を切り出して
-    // MP3 を逐次エンコードする。ピーク時メモリは「1 ウィンドウの PCM
-    // + 圧縮済み MP3 チャンク」のみで、全体長に依存しない。
-    async function processWavToMp3(file, fmt, kbps, setStatus) {
+    // MP3 を逐次エンコードし、onChunk(Uint8Array) に流し込む。
+    // onChunk が writableStream.write なら、メモリ上に MP3 全体を持たずに済む。
+    async function processWavToMp3(file, fmt, kbps, onChunk, setStatus) {
       await ensureLamejs();
       if (typeof lamejs === 'undefined' || !primeLameGlobals()) {
         throw new Error('MP3エンコーダを読み込めませんでした。');
       }
       const mp3Encoder = new lamejs.Mp3Encoder(1, fmt.sampleRate, kbps);
-      const mp3Chunks = [];
 
       const frameSize = (fmt.bitsPerSample / 8) * fmt.numChannels;
       const readFrames = Math.max(1, Math.floor(30 * fmt.sampleRate));
@@ -470,7 +469,7 @@
         for (let off = 0; off < int16.length; off += mp3BlockSize) {
           const blk = int16.subarray(off, Math.min(off + mp3BlockSize, int16.length));
           const enc = mp3Encoder.encodeBuffer(blk);
-          if (enc.length > 0) mp3Chunks.push(enc);
+          if (enc.length > 0) await onChunk(enc);
         }
         if (setStatus) {
           const readSec = (p - fmt.dataOff) / fmt.dataLen * totalSec;
@@ -483,8 +482,7 @@
       }
 
       const endBuf = mp3Encoder.flush();
-      if (endBuf.length > 0) mp3Chunks.push(endBuf);
-      return new Blob(mp3Chunks, { type: 'audio/mpeg' });
+      if (endBuf.length > 0) await onChunk(endBuf);
     }
 
     // 長尺向けの事前案内
@@ -499,6 +497,7 @@
       currentFile = file;
       mp3Blob = null;
       resultBox.classList.add('hidden');
+      dlMp3.style.display = '';
       runCard.style.display = '';
       filemeta.innerHTML = `🎵 <b>${escapeHtml(file.name)}</b> — ${fmtBytes(file.size)}`;
       runBtn.disabled = false;
@@ -513,29 +512,74 @@
 
     async function run() {
       if (!currentFile || busy) return;
+      const kbps = parseInt(document.getElementById('kbps').value, 10) || 128;
+      const suggestedName = baseName(currentFile.name) + '.mp3';
+
+      // === 変換前にユーザーから保存先を取得 ===
+      // showSaveFilePicker は "transient activation" (直近のユーザー操作) を必要とする。
+      // 変換完了 (数十秒〜数分後) には期限切れになるため、ボタンを押した直後のここで
+      // 保存ダイアログを開く。ユーザーはファイル名と保存場所を選べる。
+      // 取得した writable に MP3 をストリーム書き込みするので、メモリにも残らない。
+      let writable = null;
+      let savedFileName = suggestedName;
+      let usingFsApi = false;
+
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName,
+            types: [{
+              description: 'MP3 オーディオ',
+              accept: { 'audio/mpeg': ['.mp3'] },
+            }],
+          });
+          writable = await handle.createWritable();
+          savedFileName = handle.name || suggestedName;
+          usingFsApi = true;
+        } catch (e) {
+          if (e && e.name === 'AbortError') {
+            // ユーザーが保存ダイアログをキャンセル → 変換も中止
+            toast('キャンセルしました');
+            return;
+          }
+          // それ以外のエラー (権限失敗など) はフォールバックへ
+          console.warn('showSaveFilePicker failed:', e);
+        }
+      }
+
       busy = true;
       runBtn.disabled = true;
       resultBox.classList.add('hidden');
       const oldErr = document.getElementById('runError');
       if (oldErr) oldErr.remove();
-      try {
-        const kbps = parseInt(document.getElementById('kbps').value, 10) || 128;
-        setProgress(2, '音声を確認中…');
 
-        // WAV はストリーミング、それ以外は AudioContext で一括デコード
+      // ストリーム書き込みできる時は writable に流す。
+      // できない時はメモリに溜めて最後に通常ダウンロード。
+      const memChunks = [];
+      let writtenBytes = 0;
+      const onChunk = async (chunk) => {
+        writtenBytes += chunk.byteLength || chunk.length || 0;
+        if (writable) {
+          await writable.write(chunk);
+        } else {
+          memChunks.push(chunk);
+        }
+      };
+
+      try {
+        setProgress(2, '音声を確認中…');
         let fmt = null;
         if (/\.wav$/i.test(currentFile.name)) {
           try { fmt = await parseWavHeader(currentFile); } catch (_) { fmt = null; }
         }
 
-        let localMp3Blob, durLabel;
-
+        let durLabel;
         if (fmt) {
           durLabel = fmtHMS(fmt.duration);
           maybeShowLongWarning(fmt.duration);
           setProgress(5, `WAVをストリーム変換中… (長さ ${durLabel})`);
-          localMp3Blob = await processWavToMp3(
-            currentFile, fmt, kbps,
+          await processWavToMp3(
+            currentFile, fmt, kbps, onChunk,
             (pct, label) => setProgress(5 + (pct / 100) * 90, label)
           );
         } else {
@@ -551,21 +595,41 @@
           audioBuffer = null;
 
           setProgress(30, `MP3に変換中… (長さ ${durLabel})`);
-          localMp3Blob = await encodeMP3(monoOrig, origSr, kbps, (f) =>
+          await encodeMP3(monoOrig, origSr, kbps, onChunk, (f) =>
             setProgress(30 + f * 65, `MP3に変換中… ${Math.round(f * 100)}%`));
           monoOrig = null;
         }
 
-        mp3Blob = localMp3Blob;
-        mp3Name = baseName(currentFile.name) + '.mp3';
-
-        setProgress(100, '完了');
-        resultmeta.innerHTML = `🎵 <b>${escapeHtml(mp3Name)}</b> — ${fmtBytes(mp3Blob.size)}`;
+        // 仕上げ
+        if (writable) {
+          await writable.close();
+          writable = null;
+          mp3Blob = null; // ファイルは既に書き出し済み、メモリに残さない
+          mp3Name = savedFileName;
+          setProgress(100, '完了');
+          resultmeta.innerHTML =
+            `✅ 保存しました: <b>${escapeHtml(mp3Name)}</b> — ${fmtBytes(writtenBytes)}`;
+          dlMp3.style.display = 'none';
+          toast('保存しました');
+        } else {
+          mp3Blob = new Blob(memChunks, { type: 'audio/mpeg' });
+          mp3Name = suggestedName;
+          memChunks.length = 0;
+          setProgress(100, '完了');
+          resultmeta.innerHTML =
+            `🎵 <b>${escapeHtml(mp3Name)}</b> — ${fmtBytes(mp3Blob.size)}`;
+          dlMp3.style.display = '';
+          // File System Access API 非対応環境では自動ダウンロード
+          triggerDownload(mp3Blob, mp3Name);
+          toast('ダウンロードを開始しました');
+        }
         resultBox.classList.remove('hidden');
         setTimeout(() => progress.classList.add('hidden'), 600);
-        toast('変換しました');
       } catch (e) {
         console.error(e);
+        if (writable) {
+          try { await writable.abort(); } catch (_) {}
+        }
         setProgress(0, '');
         progress.classList.add('hidden');
         showError(e);
@@ -573,6 +637,30 @@
         busy = false;
         runBtn.disabled = false;
       }
+    }
+
+    // 既に変換済みの mp3Blob を再保存 (フォールバック経路のみ)
+    async function saveExistingMp3() {
+      if (!mp3Blob) return;
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: mp3Name,
+            types: [{
+              description: 'MP3 オーディオ',
+              accept: { 'audio/mpeg': ['.mp3'] },
+            }],
+          });
+          const w = await handle.createWritable();
+          await w.write(mp3Blob);
+          await w.close();
+          toast('保存しました');
+          return;
+        } catch (e) {
+          if (e && e.name === 'AbortError') return;
+        }
+      }
+      triggerDownload(mp3Blob, mp3Name);
     }
 
     function showError(e) {
@@ -598,9 +686,7 @@
     });
 
     runBtn.addEventListener('click', run);
-    dlMp3.addEventListener('click', () => {
-      if (mp3Blob) triggerDownload(mp3Blob, mp3Name);
-    });
+    dlMp3.addEventListener('click', saveExistingMp3);
   })();
   </script>
 </body>
