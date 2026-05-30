@@ -542,8 +542,9 @@
       const targetSr = 16000;
       const resampler = new LinearResampler(fmt.sampleRate, targetSr);
 
-      // 1 回の Whisper 呼び出しに与える長さ (10 分 ≒ 38MB の Float32)
-      const winSec = 10 * 60;
+      // 1 回の Whisper 呼び出しに与える長さ (5 分 ≒ 19MB の Float32)
+      // モバイル考慮で短め。Whisper 内部は chunk_length_s=30 で更に細分化される。
+      const winSec = 5 * 60;
       const winSamples = winSec * targetSr;
       // 1 リード窓 (30s) 分のオーバーシュート余裕
       const audio16kBuf = new Float32Array(winSamples + 60 * targetSr + 4096);
@@ -566,22 +567,32 @@
       const texts = [];
       const totalSec = fmt.duration;
       let transcribedSec = 0;
+      // 進捗バーが巻き戻らないように max を保持
+      let lastPct = 0;
+      const reportPct = (pct, label) => {
+        if (pct < lastPct) pct = lastPct;
+        else lastPct = pct;
+        if (setStatus) setStatus(pct, label);
+      };
 
       const flushTranscribe = async () => {
         if (bufPos === 0) return;
         const chunkSec = bufPos / targetSr;
-        if (setStatus) setStatus(
-          (transcribedSec / totalSec) * 100,
-          `文字起こし中… (${fmtHMS(transcribedSec)} / ${fmtHMS(totalSec)})`
+        const pending = transcribedSec + chunkSec; // この呼び出しが終わったときの累積
+        reportPct(
+          (pending / totalSec) * 100,
+          `文字起こし中… (${fmtHMS(transcribedSec)} → ${fmtHMS(pending)} / ${fmtHMS(totalSec)})`
         );
-        // slice で必要分のみ取り出して、共有バッファを再利用
-        const slice = audio16kBuf.slice(0, bufPos);
-        bufPos = 0;
-        const result = await transcriber(slice, transcribeOpts);
+        // subarray はビュー (新規確保なし)。await 中は audio16kBuf に書き込まないので安全。
+        const view = audio16kBuf.subarray(0, bufPos);
+        const localBufPos = bufPos;
+        const result = await transcriber(view, transcribeOpts);
         const t = (result && typeof result.text === 'string') ? result.text.trim() : '';
         if (t) texts.push(t);
         transcribedSec += chunkSec;
-        // slice はここでスコープアウト → GC 対象
+        bufPos = 0; // ビュー使用が終わったので共有バッファを先頭から再利用
+        // GC に少し息継ぎを与える
+        await new Promise(r => setTimeout(r, 50));
       };
 
       let p = fmt.dataOff;
@@ -607,9 +618,9 @@
         resampler.process(monoChunk, out);
         bufPos = out.pos;
 
-        if (setStatus) {
+        {
           const readSec = (p - fmt.dataOff) / fmt.dataLen * totalSec;
-          setStatus(
+          reportPct(
             (readSec / totalSec) * 100,
             `WAV読み込み中… (${fmtHMS(readSec)} / ${fmtHMS(totalSec)})`
           );
