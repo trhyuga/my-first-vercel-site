@@ -156,7 +156,7 @@
       🔒 <b>音声はこの端末から一切送信されません。</b> すべてブラウザ内で処理します。
     </div>
     <div class="alert warn" id="trNote">
-      📝 <b>文字起こし機能は実験中 (β)</b>。Whisper を Web Worker で隔離して 90 秒ごとに処理 (内部で 30 秒 × 5 秒オーバーラップ stride)。tiny は日本語幻覚が多いので base を推奨、PC なら small が最も自然です。捏造された括弧ラベル ((知事) など) は自動で除去します。
+      📝 <b>文字起こし機能は実験中 (β)</b>。Whisper を Web Worker で 90 秒ごとに処理 + 3 チャンクごとに Worker 再起動して WASM ヒープを開放します。途中結果は完了したチャンクから順にテキスト欄に出るので、万一タブが落ちてもそこまでの結果はコピーできます。tiny は日本語幻覚が多いので base 以上を推奨。
     </div>
 
     <!-- ドロップゾーン -->
@@ -818,9 +818,26 @@ self.onmessage = async (e) => {
       return out.trim();
     }
 
+    // 1 チャンク分の Whisper 出力に対する後処理
+    // (チェックボックスの状態を毎チャンク読んでオン/オフ切替を即時反映)
+    function postProcessChunk(text) {
+      let out = collapseHallucinations(text);
+      const stripParensEl = document.getElementById('stripParens');
+      const stripFillersEl = document.getElementById('stripFillers');
+      if (stripParensEl && stripParensEl.checked) out = stripParentheticals(out);
+      if (stripFillersEl && stripFillersEl.checked) out = stripFillers(out);
+      return out;
+    }
+
     // WAV をストリーム読込 → 30 秒窓ごとに Worker に丸ごと転送して文字起こし
-    async function transcribeWavStream(file, fmt, langValue, modelId, setStatus) {
-      const worker = new WhisperWorker();
+    // 3 チャンクごとに Worker を破棄して作り直す。
+    // ONNX/WASM ヒープは推論を重ねるうちに肥大化して GC されないので、
+    // Worker ごと終了させて WASM ヒープごと開放するのが一番確実。
+    // モデルは IndexedDB に残るので 2 回目以降の init は数秒で済む (DL なし)。
+    const RECYCLE_EVERY = 3;
+
+    async function transcribeWavStream(file, fmt, langValue, modelId, setStatus, onPartial) {
+      let worker = new WhisperWorker();
       try {
         let modelLoaded = false;
         await worker.init(modelId, (p) => {
@@ -831,13 +848,8 @@ self.onmessage = async (e) => {
         if (!modelLoaded) setStatus(15, 'モデル準備完了');
 
         const targetSr = 16000;
-        // ★ Whisper の内部 stride (chunk_length_s=30, stride_length_s=5) を
-        //   ちゃんと働かせるため 90 秒。30秒ぶつ切りだとコンテキストが切れて
-        //   モデルが「(知事)」「JR東日本E233系電車」のような幻覚に逃げる。
-        //   90秒 × 16kHz × 4B = 5.76MB / 呼び出し (Worker 側のみ)。
         const winSec = 90;
         const winSamples = winSec * targetSr;
-        // sticky な ring buffer は transfer すると detach されるので、毎回 slice → 転送
         const audio16kBuf = new Float32Array(winSamples + 30 * targetSr + 4096);
         let bufPos = 0;
         const resampler = new LinearResampler(fmt.sampleRate, targetSr);
@@ -852,17 +864,34 @@ self.onmessage = async (e) => {
         const texts = [];
         let transcribedSec = 0;
         let lastPct = 15;
+        let chunksSinceRecycle = 0;
         const reportPct = (pct, label) => {
           if (pct < lastPct) pct = lastPct;
           else lastPct = pct;
           setStatus(pct, label);
         };
 
+        const maybeRecycle = async () => {
+          chunksSinceRecycle++;
+          const remainingSec = totalSec - transcribedSec;
+          // 残り時間が短ければ再起動コストの方が高くつくのでスキップ
+          if (chunksSinceRecycle >= RECYCLE_EVERY && remainingSec > 45) {
+            chunksSinceRecycle = 0;
+            reportPct(lastPct, 'メモリ整理中… (Worker再起動)');
+            try {
+              worker.dispose();
+              worker = new WhisperWorker();
+              await worker.init(modelId, () => {}); // 静かに再初期化 (キャッシュから即読込)
+            } catch (e) {
+              console.warn('worker recycle failed:', e);
+            }
+          }
+        };
+
         const flushChunk = async () => {
           if (bufPos === 0) return;
           const sec = bufPos / targetSr;
           const pending = transcribedSec + sec;
-          // VAD: 無音チャンクは Whisper に渡さない (幻覚予防)
           const audio = audio16kBuf.slice(0, bufPos);
           bufPos = 0;
           if (!hasSpeech(audio)) {
@@ -878,10 +907,18 @@ self.onmessage = async (e) => {
             `文字起こし中… (${fmtHMS(transcribedSec)} → ${fmtHMS(pending)} / ${fmtHMS(totalSec)})`
           );
           const r = await worker.transcribe(audio, transcribeOpts);
-          const t = (r && typeof r.text === 'string') ? r.text.trim() : '';
-          if (t) texts.push(t);
+          let t = (r && typeof r.text === 'string') ? r.text.trim() : '';
+          if (t) {
+            // チャンクごとに後処理を済ませて即時表示 (途中で落ちても結果が見える)
+            t = postProcessChunk(t);
+            if (t) {
+              texts.push(t);
+              if (onPartial) onPartial(t);
+            }
+          }
           transcribedSec += sec;
-          await new Promise(r2 => setTimeout(r2, 80)); // GC 猶予
+          await maybeRecycle();
+          await new Promise(r2 => setTimeout(r2, 80));
         };
 
         let p = fmt.dataOff;
@@ -920,9 +957,8 @@ self.onmessage = async (e) => {
       }
     }
 
-    // 非 WAV: デコード → 16k → 30 秒窓ずつ Worker へ
-    async function transcribeFallback(blob, langValue, modelId, setStatus) {
-      const worker = new WhisperWorker();
+    async function transcribeFallback(blob, langValue, modelId, setStatus, onPartial) {
+      let worker = new WhisperWorker();
       try {
         let modelLoaded = false;
         await worker.init(modelId, (p) => {
@@ -948,10 +984,27 @@ self.onmessage = async (e) => {
         const texts = [];
         const total = mono16k.length;
         let lastPct = 24;
+        let chunksSinceRecycle = 0;
         const reportPct = (pct, label) => {
           if (pct < lastPct) pct = lastPct;
           else lastPct = pct;
           setStatus(pct, label);
+        };
+
+        const maybeRecycle = async (currentSec) => {
+          chunksSinceRecycle++;
+          const remainingSec = totalSec - currentSec;
+          if (chunksSinceRecycle >= RECYCLE_EVERY && remainingSec > 45) {
+            chunksSinceRecycle = 0;
+            reportPct(lastPct, 'メモリ整理中… (Worker再起動)');
+            try {
+              worker.dispose();
+              worker = new WhisperWorker();
+              await worker.init(modelId, () => {});
+            } catch (e) {
+              console.warn('worker recycle failed:', e);
+            }
+          }
         };
 
         for (let off = 0; off < total; off += winSamples) {
@@ -971,8 +1024,15 @@ self.onmessage = async (e) => {
             `文字起こし中… (${fmtHMS(fromSec)} → ${fmtHMS(toSec)} / ${fmtHMS(totalSec)})`
           );
           const r = await worker.transcribe(audio, transcribeOpts);
-          const t = (r && typeof r.text === 'string') ? r.text.trim() : '';
-          if (t) texts.push(t);
+          let t = (r && typeof r.text === 'string') ? r.text.trim() : '';
+          if (t) {
+            t = postProcessChunk(t);
+            if (t) {
+              texts.push(t);
+              if (onPartial) onPartial(t);
+            }
+          }
+          await maybeRecycle(toSec);
           await new Promise(r2 => setTimeout(r2, 80));
         }
         mono16k = null;
@@ -1196,24 +1256,45 @@ self.onmessage = async (e) => {
         const setStatus = (pct, label) => setProgress(pct, label);
         setStatus(1, '準備中…');
 
+        // 結果カードを最初から表示 (途中結果がリアルタイムで見える)
+        const partialTexts = [];
+        transcriptText = '';
+        transcriptEl.value = '(モデル準備中… 完了したチャンクから順に表示されます)';
+        trResultBox.classList.remove('hidden');
+        // 「途中で落ちても下のテキストはコピーできます」の案内
+        let savedHintShown = false;
+
+        const onPartial = (chunkText) => {
+          if (!chunkText) return;
+          partialTexts.push(chunkText);
+          transcriptText = partialTexts.join('\n');
+          transcriptEl.value = transcriptText;
+          // localStorage に逐次バックアップ (タブ落ち対策)
+          try {
+            localStorage.setItem('transcribe.lastPartial', transcriptText);
+            localStorage.setItem('transcribe.lastFile', currentFile ? currentFile.name : '');
+            localStorage.setItem('transcribe.lastTime', String(Date.now()));
+          } catch (_) {}
+          if (!savedHintShown) {
+            savedHintShown = true;
+            toast('途中結果が表示されています');
+          }
+        };
+
         let fmt = null;
         if (/\.wav$/i.test(currentFile.name)) {
           try { fmt = await parseWavHeader(currentFile); } catch (_) { fmt = null; }
         }
 
-        let text;
         if (fmt) {
           maybeShowLongWarning(fmt.duration);
-          text = await transcribeWavStream(currentFile, fmt, langValue, modelId, setStatus);
+          await transcribeWavStream(currentFile, fmt, langValue, modelId, setStatus, onPartial);
         } else {
-          text = await transcribeFallback(currentFile, langValue, modelId, setStatus);
+          await transcribeFallback(currentFile, langValue, modelId, setStatus, onPartial);
         }
 
-        setStatus(96, '仕上げ中…');
-        text = collapseHallucinations(text);
-        if (document.getElementById('stripParens').checked) text = stripParentheticals(text);
-        if (document.getElementById('stripFillers').checked) text = stripFillers(text);
-        transcriptText = text || '';
+        // 最終出力は途中結果と同じ (各チャンクで後処理済み)
+        transcriptText = partialTexts.join('\n').trim();
         transcriptEl.value = transcriptText || '(文字起こし結果が空でした)';
 
         // TXT 保存 UI の調整 (Web Share API 対応なら共有ボタンも見せる)
@@ -1225,14 +1306,18 @@ self.onmessage = async (e) => {
         shareTxtBtn.style.display = canShareTxt ? '' : 'none';
 
         setStatus(100, '完了');
-        trResultBox.classList.remove('hidden');
         setTimeout(() => progress.classList.add('hidden'), 600);
         toast('文字起こし完了');
       } catch (e) {
         console.error(e);
         setProgress(0, '');
         progress.classList.add('hidden');
-        showError(e);
+        // 途中結果は textarea に残しておく (catch で消さない)
+        if (transcriptText) {
+          showError(new Error((e && e.message ? e.message : String(e)) + ' (途中まで取得できた結果は下に残っています)'));
+        } else {
+          showError(e);
+        }
       } finally {
         busy = false;
         runBtn.disabled = false;
