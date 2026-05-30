@@ -290,8 +290,9 @@
       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
     }
 
-    // ===== 音声デコード =====
-    async function decodeAudio(blob) {
+    // ===== 音声デコード (fallback: WAV以外) =====
+    // 非WAV は AudioContext で一括デコード。WAV はストリーミング処理 (後述) を優先。
+    async function decodeFallback(blob) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       const ctx = new Ctx();
       try {
@@ -306,8 +307,7 @@
       }
     }
 
-    // AudioBuffer -> モノラル Float32 (元サンプルレート) : MP3 用
-    function toMono(audioBuffer) {
+    function bufferToMono(audioBuffer) {
       const nCh = audioBuffer.numberOfChannels;
       const n = audioBuffer.length;
       const mono = new Float32Array(n);
@@ -319,18 +319,151 @@
       return mono;
     }
 
-    // AudioBuffer -> モノラル 16kHz Float32 : Whisper 用
-    async function toMono16k(audioBuffer) {
-      const target = 16000;
-      const length = Math.max(1, Math.ceil(audioBuffer.duration * target));
-      const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-      const off = new OAC(1, length, target);
-      const src = off.createBufferSource();
-      src.buffer = audioBuffer;
-      src.connect(off.destination);
-      src.start();
-      const rendered = await off.startRendering();
-      return rendered.getChannelData(0);
+    // ===== WAV ヘッダ解析 =====
+    // 戻り値が null なら fallback (AudioContext) 経路へ。
+    async function parseWavHeader(file) {
+      const headBuf = await file.slice(0, 8192).arrayBuffer();
+      const view = new DataView(headBuf);
+      const ascii = (off, n) => {
+        let s = '';
+        for (let i = 0; i < n; i++) s += String.fromCharCode(view.getUint8(off + i));
+        return s;
+      };
+      if (view.byteLength < 12 || ascii(0, 4) !== 'RIFF' || ascii(8, 4) !== 'WAVE') return null;
+      let p = 12;
+      let fmt = null, dataOff = -1, dataLen = -1;
+      while (p + 8 <= view.byteLength) {
+        const id = ascii(p, 4);
+        const sz = view.getUint32(p + 4, true);
+        if (id === 'fmt ' && p + 8 + 16 <= view.byteLength) {
+          fmt = {
+            audioFormat: view.getUint16(p + 8, true),
+            numChannels: view.getUint16(p + 10, true),
+            sampleRate: view.getUint32(p + 12, true),
+            bitsPerSample: view.getUint16(p + 22, true),
+          };
+          if (fmt.audioFormat === 0xFFFE && sz >= 40 && p + 8 + 24 + 2 <= view.byteLength) {
+            // WAVE_FORMAT_EXTENSIBLE — sub format
+            fmt.audioFormat = view.getUint16(p + 8 + 24, true);
+          }
+        } else if (id === 'data') {
+          dataOff = p + 8;
+          dataLen = sz;
+          break;
+        }
+        p += 8 + sz + (sz & 1);
+      }
+      if (!fmt || dataOff < 0) return null;
+      // サポートする形式に絞る
+      const okPCM = fmt.audioFormat === 1 && [8, 16, 24, 32].includes(fmt.bitsPerSample);
+      const okFloat = fmt.audioFormat === 3 && (fmt.bitsPerSample === 32 || fmt.bitsPerSample === 64);
+      if (!(okPCM || okFloat) || fmt.numChannels < 1 || fmt.sampleRate < 8000) return null;
+      fmt.dataOff = dataOff;
+      // dataLen が 0xFFFFFFFF や過大な場合はファイル末尾までに切り詰め
+      fmt.dataLen = Math.min(dataLen >>> 0, file.size - dataOff);
+      const frameSize = (fmt.bitsPerSample / 8) * fmt.numChannels;
+      fmt.totalFrames = Math.floor(fmt.dataLen / frameSize);
+      fmt.duration = fmt.totalFrames / fmt.sampleRate;
+      return fmt;
+    }
+
+    // PCM バイト列 (WAV のデータチャンク) → モノラル Float32
+    function pcmBytesToMonoFloat32(uint8, fmt) {
+      const { audioFormat, bitsPerSample, numChannels } = fmt;
+      const bytesPerSample = bitsPerSample / 8;
+      const frameSize = bytesPerSample * numChannels;
+      const numFrames = Math.floor(uint8.byteLength / frameSize);
+      const view = new DataView(uint8.buffer, uint8.byteOffset, uint8.byteLength);
+      const mono = new Float32Array(numFrames);
+      const invCh = 1 / numChannels;
+      for (let f = 0; f < numFrames; f++) {
+        let sum = 0;
+        const baseOff = f * frameSize;
+        for (let c = 0; c < numChannels; c++) {
+          const off = baseOff + c * bytesPerSample;
+          let v = 0;
+          if (audioFormat === 3) {
+            v = bitsPerSample === 64 ? view.getFloat64(off, true) : view.getFloat32(off, true);
+          } else if (audioFormat === 1) {
+            if (bitsPerSample === 16) v = view.getInt16(off, true) / 32768;
+            else if (bitsPerSample === 24) {
+              const b0 = view.getUint8(off);
+              const b1 = view.getUint8(off + 1);
+              const b2 = view.getInt8(off + 2); // top byte signed
+              v = ((b2 << 16) | (b1 << 8) | b0) / 8388608;
+            } else if (bitsPerSample === 32) v = view.getInt32(off, true) / 2147483648;
+            else if (bitsPerSample === 8) v = (view.getUint8(off) - 128) / 128;
+          }
+          sum += v;
+        }
+        mono[f] = sum * invCh;
+      }
+      return mono;
+    }
+
+    // ===== 線形補間リサンプラ (チャンク間継続) =====
+    // OfflineAudioContext を全体に展開せずに 16kHz へ落とすため。
+    class LinearResampler {
+      constructor(srcRate, dstRate) {
+        this.ratio = srcRate / dstRate;
+        this.nextT = 0;
+        this.carry = new Float32Array(0);
+      }
+      process(chunk, out) {
+        let buf;
+        if (this.carry.length === 0) {
+          buf = chunk;
+        } else {
+          buf = new Float32Array(this.carry.length + chunk.length);
+          buf.set(this.carry, 0);
+          buf.set(chunk, this.carry.length);
+        }
+        const N = buf.length;
+        let t = this.nextT;
+        let pos = out.pos;
+        const arr = out.array;
+        const ratio = this.ratio;
+        while (Math.floor(t) + 1 < N) {
+          const i = Math.floor(t);
+          const w = t - i;
+          arr[pos++] = (1 - w) * buf[i] + w * buf[i + 1];
+          t += ratio;
+        }
+        out.pos = pos;
+        const keepFrom = Math.max(0, Math.floor(t));
+        this.carry = buf.slice(keepFrom);
+        this.nextT = t - keepFrom;
+      }
+      flush(out) {
+        // 末尾の最後の 1 サンプルを必要に応じて吐く
+        const buf = this.carry;
+        if (buf.length === 0) return;
+        let t = this.nextT;
+        let pos = out.pos;
+        while (t < buf.length) {
+          const i = Math.floor(t);
+          if (i + 1 < buf.length) {
+            const w = t - i;
+            out.array[pos++] = (1 - w) * buf[i] + w * buf[i + 1];
+          } else if (i < buf.length) {
+            out.array[pos++] = buf[i];
+          } else break;
+          t += this.ratio;
+        }
+        out.pos = pos;
+        this.carry = new Float32Array(0);
+      }
+    }
+
+    function resampleMono(mono, srcRate, dstRate) {
+      if (srcRate === dstRate) return new Float32Array(mono);
+      const resampler = new LinearResampler(srcRate, dstRate);
+      const estimated = Math.ceil(mono.length * dstRate / srcRate) + 16;
+      const audio = new Float32Array(estimated);
+      const out = { array: audio, pos: 0 };
+      resampler.process(mono, out);
+      resampler.flush(out);
+      return audio.slice(0, out.pos);
     }
 
     // ===== MP3 エンコード (lamejs) =====
@@ -389,6 +522,69 @@
       const end = encoder.flush();
       if (end.length > 0) chunks.push(end);
       return new Blob(chunks, { type: 'audio/mpeg' });
+    }
+
+    // ===== WAV ストリーミング処理 =====
+    // ファイル全体を AudioBuffer に展開せず、30 秒ウィンドウで PCM を切り出し、
+    // (a) MP3 エンコードを逐次進める、(b) 16kHz Float32 に逐次リサンプルする。
+    // 戻り値: { mp3Blob, audio16k }
+    async function processWavStream(file, fmt, kbps, onProgress) {
+      await ensureLamejs();
+      if (typeof lamejs === 'undefined' || !primeLameGlobals()) {
+        throw new Error('MP3エンコーダを読み込めませんでした。');
+      }
+      const mp3Encoder = new lamejs.Mp3Encoder(1, fmt.sampleRate, kbps);
+      const mp3Chunks = [];
+      const targetSr = 16000;
+      const estimated16k = Math.ceil(fmt.duration * targetSr) + 64;
+      const audio16k = new Float32Array(estimated16k);
+      const out = { array: audio16k, pos: 0 };
+      const resampler = new LinearResampler(fmt.sampleRate, targetSr);
+
+      const frameSize = (fmt.bitsPerSample / 8) * fmt.numChannels;
+      const winFrames = Math.max(1, Math.floor(30 * fmt.sampleRate));
+      const winBytes = winFrames * frameSize;
+      const dataEnd = fmt.dataOff + fmt.dataLen;
+      const mp3BlockSize = 1152;
+      let p = fmt.dataOff;
+
+      while (p < dataEnd) {
+        const remaining = dataEnd - p;
+        let thisBytes = Math.min(winBytes, remaining);
+        thisBytes -= thisBytes % frameSize; // フレーム境界に揃える
+        if (thisBytes <= 0) break;
+        const buf = await file.slice(p, p + thisBytes).arrayBuffer();
+        p += thisBytes;
+        const monoChunk = pcmBytesToMonoFloat32(new Uint8Array(buf), fmt);
+
+        // MP3 を 1152 サンプル単位でストリーム的にエンコード
+        const int16 = floatToInt16(monoChunk);
+        for (let off = 0; off < int16.length; off += mp3BlockSize) {
+          const blk = int16.subarray(off, Math.min(off + mp3BlockSize, int16.length));
+          const enc = mp3Encoder.encodeBuffer(blk);
+          if (enc.length > 0) mp3Chunks.push(enc);
+        }
+
+        // 16kHz へリサンプリングして audio16k に追記
+        resampler.process(monoChunk, out);
+
+        if (onProgress) onProgress((p - fmt.dataOff) / fmt.dataLen);
+        await new Promise(r => setTimeout(r, 0)); // メインスレッドを譲る
+      }
+      resampler.flush(out);
+      const endBuf = mp3Encoder.flush();
+      if (endBuf.length > 0) mp3Chunks.push(endBuf);
+      const mp3Blob = new Blob(mp3Chunks, { type: 'audio/mpeg' });
+      // 余ったバッファを開放する形で実サイズに切り詰め
+      const trimmed = audio16k.slice(0, out.pos);
+      return { mp3Blob, audio16k: trimmed };
+    }
+
+    // 長尺向けの事前案内
+    function maybeShowLongWarning(durationSec) {
+      if (durationSec > 30 * 60) {
+        toast(`長い音声 (${fmtHMS(durationSec)}) です。数分かかります`);
+      }
     }
 
     // ===== フィラー除去 (voice/ ツールと同等) =====
@@ -502,37 +698,68 @@
       busy = true;
       runBtn.disabled = true;
       resultBox.classList.add('hidden');
+      // 既存エラーバナーを除去
+      const oldErr = document.getElementById('runError');
+      if (oldErr) oldErr.remove();
+      let audio16k = null;
       try {
-        setProgress(2, '音声を読み込み中…');
-        const audioBuffer = await decodeAudio(currentFile);
-        const durLabel = fmtHMS(audioBuffer.duration);
-
-        // 1) MP3 変換
-        setProgress(5, `MP3に変換中… (長さ ${durLabel})`);
-        const monoOrig = toMono(audioBuffer);
         const kbps = parseInt(document.getElementById('kbps').value, 10) || 128;
-        mp3Blob = await encodeMP3(monoOrig, audioBuffer.sampleRate, kbps,
-          (f) => setProgress(5 + f * 25, `MP3に変換中… ${Math.round(f * 100)}%`));
+        setProgress(2, '音声を確認中…');
+
+        // ====== WAV ストリーミング経路を優先 ======
+        let fmt = null;
+        if (/\.wav$/i.test(currentFile.name)) {
+          try { fmt = await parseWavHeader(currentFile); } catch (_) { fmt = null; }
+        }
+
+        let localMp3Blob;
+        let durLabel;
+
+        if (fmt) {
+          durLabel = fmtHMS(fmt.duration);
+          maybeShowLongWarning(fmt.duration);
+          setProgress(5, `WAVを逐次変換中… (長さ ${durLabel})`);
+          const r = await processWavStream(currentFile, fmt, kbps, (frac) => {
+            setProgress(5 + frac * 60, `WAV を MP3 + 16kHz に逐次変換中… ${Math.round(frac * 100)}%`);
+          });
+          localMp3Blob = r.mp3Blob;
+          audio16k = r.audio16k;
+        } else {
+          // ====== Fallback (MP3 / M4A / OGG / FLAC など) ======
+          setProgress(5, '音声をデコード中…');
+          let audioBuffer = await decodeFallback(currentFile);
+          const dur = audioBuffer.duration;
+          durLabel = fmtHMS(dur);
+          maybeShowLongWarning(dur);
+          const origSr = audioBuffer.sampleRate;
+
+          setProgress(20, `MP3に変換中… (長さ ${durLabel})`);
+          let monoOrig = bufferToMono(audioBuffer);
+          // 16kHz を先に確保しておいて、AudioBuffer を即解放
+          const mono16k = resampleMono(monoOrig, origSr, 16000);
+          audioBuffer = null; // 即解放
+          localMp3Blob = await encodeMP3(monoOrig, origSr, kbps, (f) =>
+            setProgress(20 + f * 45, `MP3に変換中… ${Math.round(f * 100)}%`));
+          monoOrig = null; // 即解放
+          audio16k = mono16k;
+        }
+
+        mp3Blob = localMp3Blob;
         mp3Name = baseName(currentFile.name) + '.mp3';
 
-        // 2) Whisper 用に 16kHz モノラル
-        setProgress(32, '文字起こしの前処理中…');
-        const audio16k = await toMono16k(audioBuffer);
-
-        // 3) モデル準備 (初回のみDL) + 文字起こし
-        setProgress(35, '文字起こしモデルを準備中…');
+        // ====== 文字起こし ======
+        setProgress(68, '文字起こしモデルを準備中…');
         let modelReady = false;
         const langValue = document.getElementById('lang').value;
         let text = await transcribe(audio16k, langValue, (prog) => {
           if (modelReady) return;
-          if (prog >= 100) { modelReady = true; setProgress(78, '文字起こし中…'); }
-          else setProgress(35 + (prog / 100) * 40, `モデルを取得中… ${Math.round(prog)}%`);
+          if (prog >= 100) { modelReady = true; setProgress(82, '文字起こし中…'); }
+          else setProgress(68 + (prog / 100) * 14, `モデルを取得中… ${Math.round(prog)}%`);
         });
-        setProgress(92, '仕上げ中…');
+        audio16k = null; // 即解放
+        setProgress(94, '仕上げ中…');
 
-        // 4) フィラー除去
         if (document.getElementById('stripFillers').checked) text = stripFillers(text);
-
         transcriptEl.value = text || '(文字起こし結果が空でした)';
         setProgress(100, '完了');
         resultBox.classList.remove('hidden');
@@ -544,6 +771,7 @@
         progress.classList.add('hidden');
         showError(e);
       } finally {
+        audio16k = null;
         busy = false;
         runBtn.disabled = false;
       }
