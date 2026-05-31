@@ -1,0 +1,1472 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#4f46e5" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>QR コード作成 | ひゅうがのTR-Labo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky; top: 0; z-index: 20;
+    }
+    .brand {
+      max-width: 760px; margin: 0 auto; padding: 0.7rem 1rem;
+      display: flex; align-items: center; gap: 0.6rem;
+    }
+    .back-btn {
+      width: 36px; height: 36px; border-radius: 9px;
+      border: 1px solid #e2e8f0; background: #fff; color: #475569;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem; -webkit-tap-highlight-color: transparent;
+    }
+    .back-btn:active { background: #f1f5f9; }
+    .logo {
+      width: 34px; height: 34px; border-radius: 9px;
+      background: linear-gradient(135deg, #4f46e5, #7c3aed);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800; font-size: 0.78rem;
+      box-shadow: 0 4px 10px rgba(79,70,229,0.25);
+    }
+    .brand-name { font-weight: 700; font-size: 1rem; }
+
+    main { max-width: 760px; margin: 0 auto;
+      padding: 1.1rem 1rem calc(2rem + env(safe-area-inset-bottom)); }
+
+    .hero { margin-bottom: 1.1rem; }
+    .hero h1 { font-size: 1.35rem; line-height: 1.4; font-weight: 800; }
+    .hero h1 .accent { color: #4f46e5; }
+    .hero p { margin-top: 0.5rem; color: #475569; font-size: 0.9rem; line-height: 1.7; }
+
+    .card {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 16px;
+      padding: 1rem; margin-bottom: 1rem;
+      box-shadow: 0 1px 2px rgba(15,23,42,0.04);
+    }
+    .card h3 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+
+    details.card > summary {
+      list-style: none; cursor: pointer; font-size: 0.95rem;
+      display: flex; align-items: center; gap: 0.4rem;
+      -webkit-tap-highlight-color: transparent;
+    }
+    details.card > summary::-webkit-details-marker { display: none; }
+    details.card > summary::before {
+      content: '▶'; font-size: 0.7rem; color: #94a3b8; transition: transform .15s;
+    }
+    details.card[open] > summary::before { transform: rotate(90deg); }
+
+    /* タブ: コンテンツタイプ切替 */
+    .tabs {
+      display: flex; flex-wrap: wrap; gap: 0.35rem;
+      margin-bottom: 0.9rem;
+    }
+    .tab {
+      appearance: none; border: 1px solid #e2e8f0; background: #fff;
+      padding: 0.45rem 0.7rem; border-radius: 9px;
+      font: inherit; font-size: 0.82rem; cursor: pointer;
+      color: #475569; -webkit-tap-highlight-color: transparent;
+      transition: all .12s;
+    }
+    .tab:active { transform: translateY(1px); }
+    .tab.active {
+      background: linear-gradient(135deg, #4f46e5, #7c3aed);
+      color: #fff; border-color: transparent;
+      box-shadow: 0 2px 6px rgba(79,70,229,0.25);
+    }
+
+    .type-form { display: flex; flex-direction: column; gap: 0.55rem; }
+    .type-form.hidden { display: none; }
+
+    .opts { display: flex; flex-direction: column; gap: 0.8rem; }
+    .opt-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    .opt-row label.lbl { font-size: 0.82rem; color: #334155; font-weight: 600;
+      min-width: 6.5rem; }
+    .opt-row .sub { font-size: 0.78rem; color: #64748b; }
+    .check { display: inline-flex; align-items: center; gap: 0.45rem; cursor: pointer; }
+    .check input { width: 18px; height: 18px; accent-color: #4f46e5; flex: 0 0 auto; }
+    .check span { font-size: 0.86rem; }
+
+    input[type="text"], input[type="url"], input[type="email"],
+    input[type="tel"], input[type="number"], input[type="datetime-local"],
+    select, textarea {
+      font: inherit; font-size: 0.9rem; padding: 0.55rem 0.7rem;
+      border: 1px solid #cbd5e1; border-radius: 9px; background: #fff; color: #0f172a;
+      width: 100%; -webkit-appearance: none;
+    }
+    .type-form input, .type-form textarea, .type-form select { flex: 1 1 auto; }
+    textarea { min-height: 100px; resize: vertical; line-height: 1.5; }
+    select { background-image: none; }
+    input[type="color"] {
+      width: 44px; height: 36px; padding: 2px; border-radius: 7px;
+      border: 1px solid #cbd5e1; cursor: pointer; background: #fff;
+    }
+    input[type="range"] { flex: 1 1 120px; max-width: 200px; accent-color: #4f46e5; }
+    input[type="file"] { font-size: 0.82rem; }
+
+    .hint { color: #64748b; font-size: 0.78rem; line-height: 1.6; }
+
+    .btn {
+      appearance: none; border: 0; border-radius: 11px; padding: 0.7rem 1rem;
+      font: inherit; font-weight: 700; font-size: 0.9rem; cursor: pointer;
+      min-height: 44px; display: inline-flex; align-items: center;
+      justify-content: center; gap: 0.4rem; -webkit-tap-highlight-color: transparent;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff;
+      box-shadow: 0 4px 12px rgba(79,70,229,0.3); }
+    .btn-primary:active { transform: translateY(1px); }
+    .btn-secondary { background: #f1f5f9; color: #0f172a; border: 1px solid #e2e8f0; }
+    .btn-sm { min-height: 36px; padding: 0.4rem 0.7rem; font-size: 0.82rem; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+    /* QR プレビュー */
+    .qr-preview {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 280px; background:
+        repeating-conic-gradient(#f8fafc 0% 25%, #fff 0% 50%) 0 0 / 16px 16px;
+      border-radius: 12px; padding: 1rem;
+    }
+    .qr-preview canvas, .qr-preview svg {
+      max-width: 100%; height: auto !important; display: block;
+    }
+    .qr-preview .placeholder {
+      color: #94a3b8; font-size: 0.85rem; text-align: center; line-height: 1.6;
+    }
+
+    /* テンプレート / 履歴 行 */
+    .item-row {
+      display: flex; align-items: center; gap: 0.6rem;
+      padding: 0.55rem 0.7rem; background: #f8fafc; border: 1px solid #e2e8f0;
+      border-radius: 9px; margin-bottom: 0.45rem;
+    }
+    .item-row .item-thumb {
+      width: 40px; height: 40px; flex: 0 0 40px; background: #fff;
+      border: 1px solid #e2e8f0; border-radius: 6px; padding: 2px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .item-row .item-thumb img { max-width: 100%; max-height: 100%; }
+    .item-row .item-info { flex: 1 1 auto; min-width: 0; }
+    .item-row .item-name { font-size: 0.86rem; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-row .item-sub { font-size: 0.74rem; color: #64748b;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-row .item-actions { display: flex; gap: 0.3rem; flex: 0 0 auto; }
+
+    .alert { border-radius: 11px; padding: 0.7rem 0.85rem; font-size: 0.85rem;
+      line-height: 1.6; margin-bottom: 0.8rem; }
+    .alert.warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+    .alert.err  { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .alert.info { background: #f0f9ff; border: 1px solid #bae6fd; color: #075985; }
+    .alert.hidden { display: none; }
+
+    .footer-note { text-align: center; color: #64748b; font-size: 0.78rem;
+      margin-top: 0.5rem; line-height: 1.7; }
+
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%) translateY(20px);
+      bottom: calc(1.2rem + env(safe-area-inset-bottom));
+      background: #0f172a; color: #fff; padding: 0.6rem 1rem; border-radius: 11px;
+      font-size: 0.85rem; opacity: 0; pointer-events: none;
+      transition: opacity .2s, transform .2s; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">🔲 QR コード作成</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>QR コードを、<span class="accent">自由自在に</span>。</h1>
+      <p>URL / WiFi / 名刺 / 位置情報 / 予定 など 11 種類のデータ。色・形・グラデーション・ロゴ埋込まで全カスタマイズ。すべてブラウザ内で完結します。</p>
+    </section>
+
+    <div class="alert info">
+      🔒 入力内容は端末から一切送信されません。生成・保存すべてブラウザ内で完結。
+    </div>
+
+    <!-- コンテンツ -->
+    <div class="card">
+      <div class="tabs" id="tabs">
+        <button class="tab active" data-type="url">🔗 URL</button>
+        <button class="tab" data-type="text">📝 テキスト</button>
+        <button class="tab" data-type="email">✉️ メール</button>
+        <button class="tab" data-type="tel">📞 電話</button>
+        <button class="tab" data-type="sms">💬 SMS</button>
+        <button class="tab" data-type="wifi">📶 WiFi</button>
+        <button class="tab" data-type="vcard">👤 vCard</button>
+        <button class="tab" data-type="mecard">📇 MeCard</button>
+        <button class="tab" data-type="geo">📍 位置</button>
+        <button class="tab" data-type="event">📅 予定</button>
+        <button class="tab" data-type="social">🌐 ソーシャル</button>
+      </div>
+
+      <!-- URL -->
+      <div class="type-form" data-type="url">
+        <input type="url" id="urlValue" placeholder="https://example.com" />
+      </div>
+      <!-- テキスト -->
+      <div class="type-form hidden" data-type="text">
+        <textarea id="textValue" placeholder="任意のテキスト (改行可)"></textarea>
+      </div>
+      <!-- メール -->
+      <div class="type-form hidden" data-type="email">
+        <input id="emailTo" type="email" placeholder="宛先メールアドレス" />
+        <input id="emailSubject" type="text" placeholder="件名 (任意)" />
+        <textarea id="emailBody" placeholder="本文 (任意)"></textarea>
+      </div>
+      <!-- 電話 -->
+      <div class="type-form hidden" data-type="tel">
+        <input id="telNumber" type="tel" placeholder="03-1234-5678 / +81312345678" />
+      </div>
+      <!-- SMS -->
+      <div class="type-form hidden" data-type="sms">
+        <input id="smsNumber" type="tel" placeholder="電話番号" />
+        <textarea id="smsBody" placeholder="メッセージ (任意)"></textarea>
+      </div>
+      <!-- WiFi -->
+      <div class="type-form hidden" data-type="wifi">
+        <input id="wifiSsid" type="text" placeholder="SSID (ネットワーク名)" />
+        <input id="wifiPass" type="text" placeholder="パスワード" />
+        <div class="opt-row">
+          <label class="lbl" for="wifiEnc">暗号化</label>
+          <select id="wifiEnc">
+            <option value="WPA">WPA / WPA2 / WPA3</option>
+            <option value="WEP">WEP</option>
+            <option value="nopass">なし</option>
+          </select>
+        </div>
+        <label class="check"><input type="checkbox" id="wifiHidden" /><span>隠し SSID (Hidden)</span></label>
+      </div>
+      <!-- vCard -->
+      <div class="type-form hidden" data-type="vcard">
+        <div class="opt-row" style="gap:0.4rem;">
+          <input id="vcardLastName" placeholder="姓" style="flex:1 1 0;" />
+          <input id="vcardFirstName" placeholder="名" style="flex:1 1 0;" />
+        </div>
+        <input id="vcardOrg" placeholder="会社・組織 (任意)" />
+        <input id="vcardTitle" placeholder="役職 (任意)" />
+        <input id="vcardTel" type="tel" placeholder="電話番号 (任意)" />
+        <input id="vcardEmail" type="email" placeholder="メール (任意)" />
+        <input id="vcardUrl" type="url" placeholder="URL (任意)" />
+        <input id="vcardAddress" placeholder="住所 (任意)" />
+        <textarea id="vcardNote" placeholder="メモ (任意)"></textarea>
+      </div>
+      <!-- MeCard (日本の旧キャリア互換) -->
+      <div class="type-form hidden" data-type="mecard">
+        <input id="mecardName" placeholder="名前 (姓 名)" />
+        <input id="mecardKana" placeholder="ふりがな (任意)" />
+        <input id="mecardTel" type="tel" placeholder="電話番号" />
+        <input id="mecardEmail" type="email" placeholder="メール (任意)" />
+        <input id="mecardUrl" type="url" placeholder="URL (任意)" />
+        <input id="mecardAddress" placeholder="住所 (任意)" />
+        <textarea id="mecardNote" placeholder="メモ (任意)"></textarea>
+      </div>
+      <!-- 位置 -->
+      <div class="type-form hidden" data-type="geo">
+        <div class="opt-row" style="gap:0.4rem;">
+          <input id="geoLat" type="number" step="any" placeholder="緯度 (例: 35.6586)" style="flex:1 1 0;" />
+          <input id="geoLon" type="number" step="any" placeholder="経度 (例: 139.7454)" style="flex:1 1 0;" />
+        </div>
+        <label class="check">
+          <input type="checkbox" id="geoUseMaps" />
+          <span>Google Maps URL として生成する (geo: を読めない端末向け)</span>
+        </label>
+        <button class="btn btn-secondary btn-sm" id="geoCurrent" style="align-self:flex-start;">📍 現在地を取得</button>
+      </div>
+      <!-- カレンダー -->
+      <div class="type-form hidden" data-type="event">
+        <input id="eventTitle" placeholder="予定タイトル" />
+        <input id="eventLocation" placeholder="場所 (任意)" />
+        <div class="opt-row" style="gap:0.4rem;">
+          <input id="eventStart" type="datetime-local" style="flex:1 1 0;" />
+          <span>→</span>
+          <input id="eventEnd" type="datetime-local" style="flex:1 1 0;" />
+        </div>
+        <textarea id="eventDesc" placeholder="説明 (任意)"></textarea>
+      </div>
+      <!-- ソーシャル -->
+      <div class="type-form hidden" data-type="social">
+        <div class="opt-row">
+          <label class="lbl" for="socialPlatform">プラットフォーム</label>
+          <select id="socialPlatform">
+            <option value="twitter">Twitter / X</option>
+            <option value="instagram">Instagram</option>
+            <option value="facebook">Facebook</option>
+            <option value="line">LINE</option>
+            <option value="youtube">YouTube</option>
+            <option value="tiktok">TikTok</option>
+            <option value="github">GitHub</option>
+            <option value="paypay">PayPay 送金リンク</option>
+          </select>
+        </div>
+        <input id="socialHandle" placeholder="ユーザー名 または 完全な URL" />
+        <div class="hint" id="socialHint"></div>
+      </div>
+    </div>
+
+    <!-- プレビュー -->
+    <div class="card">
+      <div class="qr-preview" id="qrPreview">
+        <div class="placeholder">⬆️ 上のフォームに入力すると<br>ここに QR コードが表示されます</div>
+      </div>
+    </div>
+
+    <!-- デザイン -->
+    <details class="card" id="designCard">
+      <summary><b>🎨 デザイン</b> (色 / 形 / ロゴ / 誤り訂正)</summary>
+      <div class="opts" style="margin-top: 1rem;">
+        <!-- 前景 -->
+        <div class="opt-row">
+          <label class="lbl">前景色</label>
+          <select id="fgType" style="flex:0 0 110px;">
+            <option value="solid">単色</option>
+            <option value="linear">線形グラデ</option>
+            <option value="radial">放射グラデ</option>
+          </select>
+          <input type="color" id="fgColor1" value="#222222" />
+          <input type="color" id="fgColor2" value="#4f46e5" class="hidden" />
+          <span id="fgAngleWrap" class="hidden" style="display:none;">
+            <input type="range" id="fgAngle" min="0" max="360" value="0" style="width:90px;" />
+            <span id="fgAngleVal" class="sub">0°</span>
+          </span>
+        </div>
+        <!-- 背景 -->
+        <div class="opt-row">
+          <label class="lbl">背景色</label>
+          <input type="color" id="bgColor" value="#ffffff" />
+          <label class="check"><input type="checkbox" id="bgTransparent" /><span>透過</span></label>
+        </div>
+        <!-- ドット形状 -->
+        <div class="opt-row">
+          <label class="lbl">ドット形状</label>
+          <select id="dotStyle">
+            <option value="square">四角</option>
+            <option value="rounded">丸角</option>
+            <option value="dots">水玉</option>
+            <option value="classy">クラシー</option>
+            <option value="classy-rounded">クラシー丸</option>
+            <option value="extra-rounded">超丸</option>
+          </select>
+        </div>
+        <!-- コーナースクエア -->
+        <div class="opt-row">
+          <label class="lbl">外枠 (3角)</label>
+          <select id="cornerSquareStyle">
+            <option value="square">四角</option>
+            <option value="dot">丸</option>
+            <option value="extra-rounded">角丸</option>
+          </select>
+        </div>
+        <!-- コーナードット -->
+        <div class="opt-row">
+          <label class="lbl">外枠中心ドット</label>
+          <select id="cornerDotStyle">
+            <option value="square">四角</option>
+            <option value="dot">丸</option>
+          </select>
+        </div>
+        <!-- 誤り訂正 -->
+        <div class="opt-row">
+          <label class="lbl">誤り訂正</label>
+          <select id="errorCorrection">
+            <option value="L">L (約7% / 最少データ量)</option>
+            <option value="M" selected>M (約15% / 標準)</option>
+            <option value="Q">Q (約25% / ロゴ推奨)</option>
+            <option value="H">H (約30% / 最強)</option>
+          </select>
+        </div>
+        <!-- 余白 -->
+        <div class="opt-row">
+          <label class="lbl">余白</label>
+          <input type="range" id="qrMargin" min="0" max="40" value="10" />
+          <span id="qrMarginVal" class="sub">10 px</span>
+        </div>
+        <!-- ロゴ -->
+        <div class="opt-row">
+          <label class="lbl">ロゴ画像</label>
+          <input type="file" id="logoFile" accept="image/*" style="flex:1 1 auto;" />
+          <button class="btn btn-secondary btn-sm" id="logoClear">クリア</button>
+        </div>
+        <div class="opt-row">
+          <label class="lbl">ロゴサイズ</label>
+          <input type="range" id="logoSize" min="0.10" max="0.50" step="0.02" value="0.40" />
+          <span id="logoSizeVal" class="sub">40%</span>
+        </div>
+        <div class="opt-row">
+          <label class="lbl">ロゴ周囲</label>
+          <input type="range" id="logoMargin" min="0" max="20" value="4" />
+          <span id="logoMarginVal" class="sub">4 px</span>
+        </div>
+        <div class="opt-row">
+          <label class="lbl">&nbsp;</label>
+          <label class="check"><input type="checkbox" id="logoHideBg" checked /><span>ロゴ背面のドットを白く抜く</span></label>
+        </div>
+      </div>
+    </details>
+
+    <!-- 保存 -->
+    <div class="card">
+      <h3>💾 保存</h3>
+      <div class="opt-row" style="margin-bottom:0.6rem;">
+        <label class="lbl">サイズ</label>
+        <select id="exportSize">
+          <option value="256">256 × 256</option>
+          <option value="512" selected>512 × 512</option>
+          <option value="1024">1024 × 1024</option>
+          <option value="2048">2048 × 2048</option>
+        </select>
+        <span class="sub">(PNG / JPEG / WebP のとき)</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="downloadPng">PNG で保存</button>
+        <button class="btn btn-secondary" id="downloadSvg">SVG</button>
+        <button class="btn btn-secondary" id="downloadJpeg">JPEG</button>
+        <button class="btn btn-secondary" id="downloadWebp">WebP</button>
+        <button class="btn btn-secondary" id="copyClipboard">📋 コピー</button>
+        <button class="btn btn-secondary" id="shareQr" style="display:none;">📤 共有</button>
+      </div>
+    </div>
+
+    <!-- テンプレート -->
+    <details class="card">
+      <summary><b>⭐ デザインテンプレート</b></summary>
+      <div style="margin-top: 1rem;">
+        <div class="hint">現在のデザイン (色 / 形 / ロゴ等) に名前を付けて保存。入力内容は含まれません。</div>
+        <div class="opt-row" style="margin-top:0.5rem;">
+          <input type="text" id="templateName" placeholder="テンプレート名" style="flex:1 1 auto;" />
+          <button class="btn btn-secondary btn-sm" id="saveTemplate">保存</button>
+        </div>
+        <div id="templateList" style="margin-top:0.7rem;"></div>
+      </div>
+    </details>
+
+    <!-- 履歴 -->
+    <details class="card">
+      <summary><b>🕘 履歴</b> (直近 10 件、自動保存)</summary>
+      <div style="margin-top: 1rem;">
+        <div id="historyList"></div>
+        <div class="btn-row" style="margin-top:0.5rem;">
+          <button class="btn btn-secondary btn-sm" id="historyClear">履歴を全消去</button>
+        </div>
+      </div>
+    </details>
+
+    <!-- バルク生成 -->
+    <details class="card">
+      <summary><b>📦 バルク生成</b> (複数 URL → ZIP)</summary>
+      <div style="margin-top: 1rem;">
+        <div class="hint">URL を 1 行に 1 つ貼り付け → 現在のデザインで全部 PNG 化して ZIP でダウンロード</div>
+        <textarea id="bulkInput" placeholder="https://example.com/page1&#10;https://example.com/page2&#10;https://example.com/page3" style="margin-top:0.5rem;"></textarea>
+        <div class="opt-row" style="margin-top:0.5rem;">
+          <button class="btn btn-primary btn-sm" id="bulkRun">ZIP で生成</button>
+          <span class="sub" id="bulkStatus"></span>
+        </div>
+      </div>
+    </details>
+
+    <p class="footer-note">すべて端末内処理・サーバー送信なし<br>ひゅうがのTR-Labo</p>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- QR 描画ライブラリ + ZIP -->
+  <script src="https://cdn.jsdelivr.net/npm/qr-code-styling@1.6.0-rc.1/lib/qr-code-styling.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script>
+  /*
+   * QR コード作成ツール — 全処理ブラウザ内で完結
+   *
+   * モジュール構成:
+   *   1. 設定値    — マジックナンバー / CDN URL
+   *   2. DOM 参照
+   *   3. 状態       — currentType / qrInstance / logoDataUrl / settings / 履歴 / テンプレート
+   *   4. UI ユーティリティ — toast
+   *   5. フォーマッタ — escapeHtml / slug / debounce
+   *   6. ファイル保存 — triggerDownload / canShareFile / saveBlobAs / shareBlob / copyToClipboard
+   *   7. コンテンツエンコーダ — encodeUrl / encodeEmail / encodeWifi / encodeVCard / encodeMeCard / encodeGeo / encodeEvent / encodeSocial 等
+   *   8. WiFi/vCard エスケープ
+   *   9. QR ライフサイクル — getDesignSettings / buildQrOptions / renderQr / exportQr
+   *  10. UI 状態   — switchType / readForms / writeFormsFromContent / applyDesignToUI / readDesignFromUI / updateAuxUI
+   *  11. localStorage — 履歴 / テンプレート CRUD + 一覧描画
+   *  12. バルク生成 — runBulk
+   *  13. メインアクション — render / saveAs / share / copy / saveTemplate / loadTemplate
+   *  14. イベントハンドラ — setupHandlers
+   */
+  (function () {
+    'use strict';
+
+    // ===== 1. 設定値 =====
+    const TOAST_DURATION_MS    = 1800;
+    const DOWNLOAD_CLEANUP_MS  = 60 * 1000;
+    const RENDER_DEBOUNCE_MS   = 120;
+    const HISTORY_MAX          = 10;
+    const HISTORY_KEY          = 'tr.qr.history.v1';
+    const TEMPLATE_KEY         = 'tr.qr.templates.v1';
+    const BULK_MAX             = 200; // 暴走防止
+    const PREVIEW_SIZE         = 280;
+
+    // ===== 2. DOM 参照 =====
+    const $ = (id) => document.getElementById(id);
+    const tabs        = $('tabs');
+    const qrPreview   = $('qrPreview');
+    const toastEl     = $('toast');
+    // デザイン
+    const fgType         = $('fgType');
+    const fgColor1       = $('fgColor1');
+    const fgColor2       = $('fgColor2');
+    const fgAngleWrap    = $('fgAngleWrap');
+    const fgAngle        = $('fgAngle');
+    const fgAngleVal     = $('fgAngleVal');
+    const bgColor        = $('bgColor');
+    const bgTransparent  = $('bgTransparent');
+    const dotStyle       = $('dotStyle');
+    const cornerSquareStyle = $('cornerSquareStyle');
+    const cornerDotStyle = $('cornerDotStyle');
+    const errorCorrection = $('errorCorrection');
+    const qrMargin       = $('qrMargin');
+    const qrMarginVal    = $('qrMarginVal');
+    const logoFile       = $('logoFile');
+    const logoClear      = $('logoClear');
+    const logoSize       = $('logoSize');
+    const logoSizeVal    = $('logoSizeVal');
+    const logoMargin     = $('logoMargin');
+    const logoMarginVal  = $('logoMarginVal');
+    const logoHideBg     = $('logoHideBg');
+    // 出力
+    const exportSize     = $('exportSize');
+    const downloadPng    = $('downloadPng');
+    const downloadSvg    = $('downloadSvg');
+    const downloadJpeg   = $('downloadJpeg');
+    const downloadWebp   = $('downloadWebp');
+    const copyClipboard  = $('copyClipboard');
+    const shareQr        = $('shareQr');
+    // テンプレ / 履歴 / バルク
+    const templateName   = $('templateName');
+    const saveTemplate   = $('saveTemplate');
+    const templateList   = $('templateList');
+    const historyList    = $('historyList');
+    const historyClear   = $('historyClear');
+    const bulkInput      = $('bulkInput');
+    const bulkRun        = $('bulkRun');
+    const bulkStatus     = $('bulkStatus');
+    const socialHint     = $('socialHint');
+
+    // ===== 3. 状態 =====
+    let currentType = 'url';
+    let qrInstance  = null;
+    let logoDataUrl = '';      // ロゴ画像 (data URL)
+    let toastTimer  = null;
+    let renderTimer = null;
+    let lastEncoded = '';      // 直近の本文 (履歴保存用)
+
+    // ===== 4. UI ユーティリティ =====
+    function toast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove('show'), TOAST_DURATION_MS);
+    }
+
+    function debounce(fn, ms) {
+      let t = null;
+      return function debounced(...args) {
+        if (t) clearTimeout(t);
+        t = setTimeout(() => fn.apply(null, args), ms);
+      };
+    }
+
+    // ===== 5. フォーマッタ =====
+    function escapeHtml(s) {
+      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+      return String(s).replace(/[&<>"']/g, (c) => map[c]);
+    }
+
+    function slug(s, fallback) {
+      if (!s) return fallback;
+      const norm = String(s)
+        .replace(/^https?:\/\//i, '')
+        .replace(/[\\/:*?"<>|\s]+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 60);
+      return norm || fallback;
+    }
+
+    function fmtNow() {
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      return d.getFullYear() + pad(d.getMonth()+1) + pad(d.getDate())
+        + '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+    }
+
+    // ===== 6. ファイル保存ヘルパー (transcribe/index.html 由来) =====
+    function triggerDownload(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, DOWNLOAD_CLEANUP_MS);
+    }
+
+    function canShareFile(name, mime) {
+      if (!navigator.canShare) return false;
+      try {
+        const probe = new File([new Blob([])], name, { type: mime });
+        return navigator.canShare({ files: [probe] });
+      } catch (_) { return false; }
+    }
+
+    async function saveBlobAs(blob, name, mime) {
+      const pickerType = {
+        description: mime === 'image/svg+xml' ? 'SVG'
+                  : mime === 'image/png'      ? 'PNG'
+                  : mime === 'image/jpeg'     ? 'JPEG'
+                  : mime === 'image/webp'     ? 'WebP'
+                  : 'ファイル',
+        accept: { [mime]: ['.' + extOfMime(mime)] },
+      };
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({ suggestedName: name, types: [pickerType] });
+          const w = await handle.createWritable();
+          try {
+            await w.write(blob);
+            await w.close();
+            toast('保存しました');
+            return 'saved';
+          } catch (e) {
+            try { await w.abort(); } catch (_) {}
+            throw e;
+          }
+        } catch (e) {
+          if (e && e.name === 'AbortError') return 'cancelled';
+          console.warn('showSaveFilePicker failed:', e);
+        }
+      }
+      triggerDownload(blob, name);
+      return 'downloaded';
+    }
+
+    async function shareBlob(blob, name, mime) {
+      const file = new File([blob], name, { type: mime });
+      const data = { files: [file] }; // title/text は付けない (iOS で .txt 化を防ぐ)
+      if (navigator.canShare && navigator.canShare(data)) {
+        try {
+          await navigator.share(data);
+          toast('保存しました');
+          return true;
+        } catch (e) {
+          if (e && e.name === 'AbortError') return false;
+          console.warn('share failed, falling back to download:', e);
+        }
+      }
+      triggerDownload(blob, name);
+      toast('ダウンロードしました');
+      return false;
+    }
+
+    function extOfMime(mime) {
+      return mime === 'image/png'      ? 'png'
+           : mime === 'image/svg+xml'  ? 'svg'
+           : mime === 'image/jpeg'     ? 'jpg'
+           : mime === 'image/webp'     ? 'webp'
+           : 'bin';
+    }
+
+    async function copyBlobToClipboard(blob, mime) {
+      if (!navigator.clipboard || !window.ClipboardItem) {
+        toast('このブラウザはクリップボードコピー非対応');
+        return false;
+      }
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ [mime]: blob })]);
+        toast('コピーしました');
+        return true;
+      } catch (e) {
+        console.warn('clipboard write failed:', e);
+        toast('コピーに失敗しました');
+        return false;
+      }
+    }
+
+    // ===== 7. コンテンツエンコーダ =====
+    // 各 type の input を読んで QR に埋め込む文字列を返す。
+    // 必須入力が無ければ '' を返す (= プレビュー描画なし)。
+    function encodeContent(type) {
+      switch (type) {
+        case 'url':    return encodeUrl();
+        case 'text':   return $('textValue').value || '';
+        case 'email':  return encodeEmail();
+        case 'tel':    return encodeTel();
+        case 'sms':    return encodeSms();
+        case 'wifi':   return encodeWifi();
+        case 'vcard':  return encodeVCard();
+        case 'mecard': return encodeMeCard();
+        case 'geo':    return encodeGeo();
+        case 'event':  return encodeVEvent();
+        case 'social': return encodeSocial();
+        default:       return '';
+      }
+    }
+
+    function encodeUrl() {
+      const v = $('urlValue').value.trim();
+      if (!v) return '';
+      // スキームが無ければ https を補う
+      return /^[a-z][a-z0-9+.\-]*:/i.test(v) ? v : 'https://' + v;
+    }
+
+    function encodeEmail() {
+      const to = $('emailTo').value.trim();
+      if (!to) return '';
+      const sub = $('emailSubject').value;
+      const body = $('emailBody').value;
+      const params = [];
+      if (sub) params.push('subject=' + encodeURIComponent(sub));
+      if (body) params.push('body=' + encodeURIComponent(body));
+      return 'mailto:' + to + (params.length ? '?' + params.join('&') : '');
+    }
+
+    function encodeTel() {
+      const v = $('telNumber').value.trim();
+      if (!v) return '';
+      return 'tel:' + v.replace(/\s+/g, '');
+    }
+
+    function encodeSms() {
+      const num = $('smsNumber').value.trim();
+      if (!num) return '';
+      const body = $('smsBody').value;
+      const clean = num.replace(/\s+/g, '');
+      return 'sms:' + clean + (body ? '?body=' + encodeURIComponent(body) : '');
+    }
+
+    // ===== 8. WiFi/vCard 特殊文字エスケープ =====
+    // WIFI: 形式は \ ; , : " をエスケープ
+    function escapeWifi(s) {
+      return String(s).replace(/([\\;,":])/g, '\\$1');
+    }
+    // vCard / MeCard は ; , \ をエスケープ (改行は \n)
+    function escapeVCard(s) {
+      return String(s).replace(/\\/g, '\\\\')
+                      .replace(/;/g, '\\;')
+                      .replace(/,/g, '\\,')
+                      .replace(/\n/g, '\\n');
+    }
+    // iCalendar TEXT 値は \ , ; をエスケープ、改行は \n に
+    function escapeIcal(s) {
+      return String(s).replace(/\\/g, '\\\\')
+                      .replace(/;/g, '\\;')
+                      .replace(/,/g, '\\,')
+                      .replace(/\r?\n/g, '\\n');
+    }
+
+    function encodeWifi() {
+      const ssid = $('wifiSsid').value;
+      if (!ssid) return '';
+      const pass = $('wifiPass').value;
+      const enc  = $('wifiEnc').value; // WPA / WEP / nopass
+      const hidden = $('wifiHidden').checked;
+      const parts = ['WIFI:'];
+      parts.push('T:' + (enc === 'nopass' ? 'nopass' : enc) + ';');
+      parts.push('S:' + escapeWifi(ssid) + ';');
+      if (enc !== 'nopass' && pass) parts.push('P:' + escapeWifi(pass) + ';');
+      if (hidden) parts.push('H:true;');
+      parts.push(';');
+      return parts.join('');
+    }
+
+    function encodeVCard() {
+      const ln = $('vcardLastName').value.trim();
+      const fn = $('vcardFirstName').value.trim();
+      if (!ln && !fn) return '';
+      const org   = $('vcardOrg').value;
+      const title = $('vcardTitle').value;
+      const tel   = $('vcardTel').value;
+      const email = $('vcardEmail').value;
+      const url   = $('vcardUrl').value;
+      const addr  = $('vcardAddress').value;
+      const note  = $('vcardNote').value;
+
+      // RFC 6350 vCard 3.0 (互換性が一番良い)
+      const lines = ['BEGIN:VCARD', 'VERSION:3.0'];
+      lines.push('N:' + escapeVCard(ln) + ';' + escapeVCard(fn) + ';;;');
+      lines.push('FN:' + escapeVCard((ln + ' ' + fn).trim()));
+      if (org)   lines.push('ORG:' + escapeVCard(org));
+      if (title) lines.push('TITLE:' + escapeVCard(title));
+      if (tel)   lines.push('TEL;TYPE=CELL:' + tel.replace(/\s+/g, ''));
+      if (email) lines.push('EMAIL:' + email);
+      if (url)   lines.push('URL:' + url);
+      if (addr)  lines.push('ADR:;;' + escapeVCard(addr) + ';;;;');
+      if (note)  lines.push('NOTE:' + escapeVCard(note));
+      lines.push('END:VCARD');
+      return lines.join('\n');
+    }
+
+    function encodeMeCard() {
+      const name = $('mecardName').value.trim();
+      if (!name) return '';
+      const kana  = $('mecardKana').value;
+      const tel   = $('mecardTel').value;
+      const email = $('mecardEmail').value;
+      const url   = $('mecardUrl').value;
+      const addr  = $('mecardAddress').value;
+      const note  = $('mecardNote').value;
+      // MECARD:N:山田 太郎;SOUND:ヤマダ タロウ;TEL:...;EMAIL:...;URL:...;ADR:...;NOTE:...;;
+      const parts = ['MECARD:'];
+      parts.push('N:' + escapeVCard(name) + ';');
+      if (kana)  parts.push('SOUND:' + escapeVCard(kana) + ';');
+      if (tel)   parts.push('TEL:' + tel.replace(/\s+/g, '') + ';');
+      if (email) parts.push('EMAIL:' + email + ';');
+      if (url)   parts.push('URL:' + url + ';');
+      if (addr)  parts.push('ADR:' + escapeVCard(addr) + ';');
+      if (note)  parts.push('NOTE:' + escapeVCard(note) + ';');
+      parts.push(';');
+      return parts.join('');
+    }
+
+    function encodeGeo() {
+      const lat = parseFloat($('geoLat').value);
+      const lon = parseFloat($('geoLon').value);
+      if (!isFinite(lat) || !isFinite(lon)) return '';
+      const useMaps = $('geoUseMaps').checked;
+      if (useMaps) {
+        return 'https://www.google.com/maps?q=' + lat + ',' + lon;
+      }
+      return 'geo:' + lat + ',' + lon;
+    }
+
+    // datetime-local "2026-05-30T14:00" → "20260530T140000" (ローカル時刻、TZ なし floating)
+    function icalDate(localStr) {
+      if (!localStr) return '';
+      const m = localStr.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+      if (!m) return '';
+      return m[1] + m[2] + m[3] + 'T' + m[4] + m[5] + (m[6] || '00');
+    }
+
+    function encodeVEvent() {
+      const title = $('eventTitle').value;
+      const start = icalDate($('eventStart').value);
+      if (!title || !start) return '';
+      const end   = icalDate($('eventEnd').value);
+      const loc   = $('eventLocation').value;
+      const desc  = $('eventDesc').value;
+      const lines = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//TR-Labo QR//JP',
+        'BEGIN:VEVENT',
+        'UID:' + Date.now() + '@tr-labo',
+        'DTSTAMP:' + icalDate(new Date().toISOString().slice(0, 16)),
+        'SUMMARY:' + escapeIcal(title),
+        'DTSTART:' + start,
+      ];
+      if (end)  lines.push('DTEND:' + end);
+      if (loc)  lines.push('LOCATION:' + escapeIcal(loc));
+      if (desc) lines.push('DESCRIPTION:' + escapeIcal(desc));
+      lines.push('END:VEVENT', 'END:VCALENDAR');
+      return lines.join('\n');
+    }
+
+    const SOCIAL_TEMPLATES = {
+      twitter:   { fmt: (h) => 'https://twitter.com/' + h.replace(/^@/, ''), hint: '@ なしでユーザー名 (例: jack)' },
+      instagram: { fmt: (h) => 'https://instagram.com/' + h.replace(/^@/, ''), hint: 'ユーザー名 (例: instagram)' },
+      facebook:  { fmt: (h) => 'https://www.facebook.com/' + h, hint: 'Facebook ユーザー名 / ページ ID' },
+      line:      { fmt: (h) => 'https://line.me/ti/p/' + h, hint: 'LINE ID (例: ~lineapp)' },
+      youtube:   { fmt: (h) => 'https://www.youtube.com/' + (h.startsWith('@') ? h : '@' + h), hint: 'チャンネルハンドル (例: @youtube)' },
+      tiktok:    { fmt: (h) => 'https://www.tiktok.com/@' + h.replace(/^@/, ''), hint: 'ユーザー名 (@ 無しでも可)' },
+      github:    { fmt: (h) => 'https://github.com/' + h.replace(/^@/, ''), hint: 'GitHub ユーザー名' },
+      paypay:    { fmt: (h) => h.startsWith('http') ? h : 'https://qr.paypay.ne.jp/' + h, hint: 'PayPay 受取 QR URL もしくは ID' },
+    };
+
+    function encodeSocial() {
+      const plat = $('socialPlatform').value;
+      const handle = $('socialHandle').value.trim();
+      if (!handle) return '';
+      // URL が直接貼られたらそのまま
+      if (/^https?:\/\//i.test(handle)) return handle;
+      const tmpl = SOCIAL_TEMPLATES[plat];
+      return tmpl ? tmpl.fmt(handle) : handle;
+    }
+
+    function updateSocialHint() {
+      const plat = $('socialPlatform').value;
+      const t = SOCIAL_TEMPLATES[plat];
+      socialHint.textContent = t ? '入力例: ' + t.hint : '';
+    }
+
+    // ===== 9. QR ライフサイクル =====
+    function getDesignSettings() {
+      const fgT = fgType.value;
+      const dots = fgT === 'solid'
+        ? { type: dotStyle.value, color: fgColor1.value }
+        : {
+            type: dotStyle.value,
+            gradient: {
+              type: fgT, // 'linear' or 'radial'
+              rotation: (parseInt(fgAngle.value, 10) || 0) * Math.PI / 180,
+              colorStops: [
+                { offset: 0, color: fgColor1.value },
+                { offset: 1, color: fgColor2.value },
+              ],
+            },
+          };
+      const corners = fgT === 'solid'
+        ? { color: fgColor1.value }
+        : { gradient: dots.gradient };
+
+      return {
+        dotsOptions: dots,
+        cornersSquareOptions: Object.assign({ type: cornerSquareStyle.value }, corners),
+        cornersDotOptions:    Object.assign({ type: cornerDotStyle.value }, corners),
+        backgroundOptions: bgTransparent.checked
+          ? { color: 'transparent' }
+          : { color: bgColor.value },
+        imageOptions: {
+          hideBackgroundDots: logoHideBg.checked,
+          imageSize: parseFloat(logoSize.value) || 0.4,
+          margin: parseInt(logoMargin.value, 10) || 0,
+          crossOrigin: 'anonymous',
+        },
+        qrOptions: {
+          errorCorrectionLevel: errorCorrection.value,
+        },
+        margin: parseInt(qrMargin.value, 10) || 0,
+      };
+    }
+
+    function buildQrOptions(data, size) {
+      const d = getDesignSettings();
+      return Object.assign({
+        width:  size,
+        height: size,
+        type:   'svg',  // SVG 描画ベースの方がプレビューが綺麗 (export 時は別途 PNG 化)
+        data:   data,
+        image:  logoDataUrl || undefined,
+      }, d);
+    }
+
+    function ensureInstance(data, size) {
+      const opts = buildQrOptions(data, size);
+      if (!qrInstance) {
+        qrInstance = new QRCodeStyling(opts);
+        qrPreview.innerHTML = '';
+        qrInstance.append(qrPreview);
+      } else {
+        qrInstance.update(opts);
+      }
+    }
+
+    function showPlaceholder(msg) {
+      qrPreview.innerHTML =
+        '<div class="placeholder">' + escapeHtml(msg) + '</div>';
+      // QR 無し → コピー / 共有不可
+      shareQr.style.display = 'none';
+    }
+
+    function renderQr() {
+      const data = encodeContent(currentType);
+      if (!data) {
+        showPlaceholder('⬆️ 上のフォームに入力すると\nここに QR コードが表示されます');
+        lastEncoded = '';
+        return;
+      }
+      try {
+        ensureInstance(data, PREVIEW_SIZE);
+        lastEncoded = data;
+        // 共有ボタンの可否
+        shareQr.style.display = canShareFile('qr.png', 'image/png') ? '' : 'none';
+        // 履歴に追加 (debounce 後の確定タイミング)
+        pushHistory(currentType, data);
+      } catch (e) {
+        showPlaceholder('エラー: ' + (e.message || e));
+        console.error(e);
+      }
+    }
+
+    /** 出力用に指定サイズ・形式で再ビルドした QR の Blob を返す */
+    async function exportQr(extension, sizePx) {
+      // 常に最新フォーム値を読む (lastEncoded だと前の値が残ることがある)
+      const data = encodeContent(currentType);
+      if (!data) throw new Error('QR の内容が空です。フォームを入力してください');
+      const opts = buildQrOptions(data, sizePx);
+      // SVG 出力は type:'svg' で、それ以外は 'canvas' の方が getRawData が安定
+      opts.type = extension === 'svg' ? 'svg' : 'canvas';
+      const tmp = new QRCodeStyling(opts);
+      const blob = await tmp.getRawData(extension);
+      // getRawData は環境により Blob / Buffer を返すので統一
+      if (blob instanceof Blob) return blob;
+      const mime = mimeOfExt(extension);
+      return new Blob([blob], { type: mime });
+    }
+
+    function mimeOfExt(ext) {
+      return ext === 'svg'  ? 'image/svg+xml'
+           : ext === 'jpeg' ? 'image/jpeg'
+           : ext === 'webp' ? 'image/webp'
+           : 'image/png';
+    }
+
+    // ===== 10. UI 状態 =====
+    function switchType(type) {
+      currentType = type;
+      Array.from(tabs.querySelectorAll('.tab')).forEach((b) => {
+        b.classList.toggle('active', b.dataset.type === type);
+      });
+      Array.from(document.querySelectorAll('.type-form')).forEach((f) => {
+        f.classList.toggle('hidden', f.dataset.type !== type);
+      });
+      if (type === 'social') updateSocialHint();
+      renderQr();
+    }
+
+    function updateAuxUI() {
+      // 値ラベルを同期
+      qrMarginVal.textContent  = qrMargin.value + ' px';
+      logoSizeVal.textContent  = Math.round(parseFloat(logoSize.value) * 100) + '%';
+      logoMarginVal.textContent = logoMargin.value + ' px';
+      fgAngleVal.textContent   = fgAngle.value + '°';
+      // グラデ UI の表示切替
+      const isGrad = fgType.value !== 'solid';
+      fgColor2.classList.toggle('hidden', !isGrad);
+      const showAngle = fgType.value === 'linear';
+      fgAngleWrap.style.display = showAngle ? '' : 'none';
+      // 透過時の bgColor 無効化
+      bgColor.disabled = bgTransparent.checked;
+      bgColor.style.opacity = bgTransparent.checked ? '0.4' : '';
+    }
+
+    /** デザイン設定を素の object に */
+    function readDesignSnapshot() {
+      return {
+        fgType: fgType.value,
+        fgColor1: fgColor1.value,
+        fgColor2: fgColor2.value,
+        fgAngle: fgAngle.value,
+        bgColor: bgColor.value,
+        bgTransparent: bgTransparent.checked,
+        dotStyle: dotStyle.value,
+        cornerSquareStyle: cornerSquareStyle.value,
+        cornerDotStyle: cornerDotStyle.value,
+        errorCorrection: errorCorrection.value,
+        qrMargin: qrMargin.value,
+        logoDataUrl: logoDataUrl,
+        logoSize: logoSize.value,
+        logoMargin: logoMargin.value,
+        logoHideBg: logoHideBg.checked,
+      };
+    }
+
+    function applyDesignSnapshot(s) {
+      if (!s) return;
+      const setIf = (el, k) => { if (s[k] != null) el.value = s[k]; };
+      const checkIf = (el, k) => { if (s[k] != null) el.checked = !!s[k]; };
+      setIf(fgType, 'fgType');
+      setIf(fgColor1, 'fgColor1');
+      setIf(fgColor2, 'fgColor2');
+      setIf(fgAngle, 'fgAngle');
+      setIf(bgColor, 'bgColor');
+      checkIf(bgTransparent, 'bgTransparent');
+      setIf(dotStyle, 'dotStyle');
+      setIf(cornerSquareStyle, 'cornerSquareStyle');
+      setIf(cornerDotStyle, 'cornerDotStyle');
+      setIf(errorCorrection, 'errorCorrection');
+      setIf(qrMargin, 'qrMargin');
+      setIf(logoSize, 'logoSize');
+      setIf(logoMargin, 'logoMargin');
+      checkIf(logoHideBg, 'logoHideBg');
+      if (s.logoDataUrl != null) logoDataUrl = s.logoDataUrl;
+      updateAuxUI();
+      scheduleRender();
+    }
+
+    // ===== 11. localStorage I/O =====
+    function safeParse(json, fallback) {
+      try { const v = JSON.parse(json); return v == null ? fallback : v; }
+      catch (_) { return fallback; }
+    }
+
+    function loadHistory()    { return safeParse(localStorage.getItem(HISTORY_KEY), []); }
+    function saveHistory(arr) { try { localStorage.setItem(HISTORY_KEY, JSON.stringify(arr)); } catch (_) {} }
+    function loadTemplates()    { return safeParse(localStorage.getItem(TEMPLATE_KEY), []); }
+    function saveTemplates(arr) { try { localStorage.setItem(TEMPLATE_KEY, JSON.stringify(arr)); } catch (_) {} }
+
+    let pushHistoryTimer = null;
+    function pushHistory(type, data) {
+      // 連続入力時はスパムを避けるため debounce
+      if (pushHistoryTimer) clearTimeout(pushHistoryTimer);
+      pushHistoryTimer = setTimeout(() => {
+        const arr = loadHistory();
+        const head = arr[0];
+        if (head && head.type === type && head.data === data) return;
+        arr.unshift({ type, data, at: Date.now() });
+        if (arr.length > HISTORY_MAX) arr.length = HISTORY_MAX;
+        saveHistory(arr);
+        renderHistoryList();
+      }, 800);
+    }
+
+    function renderHistoryList() {
+      const arr = loadHistory();
+      if (arr.length === 0) {
+        historyList.innerHTML = '<div class="hint">まだ履歴はありません</div>';
+        return;
+      }
+      historyList.innerHTML = arr.map((item, i) => {
+        const preview = item.data.length > 60 ? item.data.slice(0, 60) + '…' : item.data;
+        return '<div class="item-row">'
+          + '<div class="item-info">'
+          +   '<div class="item-name">[' + escapeHtml(item.type) + '] ' + escapeHtml(preview) + '</div>'
+          +   '<div class="item-sub">' + new Date(item.at).toLocaleString('ja-JP') + '</div>'
+          + '</div>'
+          + '<div class="item-actions">'
+          +   '<button class="btn btn-secondary btn-sm" data-hist-load="' + i + '">復元</button>'
+          +   '<button class="btn btn-secondary btn-sm" data-hist-del="' + i + '">×</button>'
+          + '</div>'
+          + '</div>';
+      }).join('');
+    }
+
+    function loadHistoryItem(i) {
+      const arr = loadHistory();
+      const it = arr[i];
+      if (!it) return;
+      // フォームに値を流し込んで再レンダリング
+      writeContentToForm(it.type, it.data);
+      switchType(it.type);
+      toast('履歴から復元しました');
+    }
+
+    function deleteHistoryItem(i) {
+      const arr = loadHistory();
+      arr.splice(i, 1);
+      saveHistory(arr);
+      renderHistoryList();
+    }
+
+    /** data 文字列から各タイプのフォーム値を逆算 (簡易) */
+    function writeContentToForm(type, data) {
+      switch (type) {
+        case 'url':  $('urlValue').value = data; break;
+        case 'text': $('textValue').value = data; break;
+        case 'email': {
+          const m = data.match(/^mailto:([^?]*)(\?(.*))?$/);
+          if (m) {
+            $('emailTo').value = decodeURIComponent(m[1] || '');
+            const params = new URLSearchParams(m[3] || '');
+            $('emailSubject').value = params.get('subject') || '';
+            $('emailBody').value    = params.get('body') || '';
+          }
+          break;
+        }
+        case 'tel': $('telNumber').value = data.replace(/^tel:/, ''); break;
+        case 'sms': {
+          const m = data.match(/^sms:([^?]*)(\?body=(.*))?$/);
+          if (m) {
+            $('smsNumber').value = decodeURIComponent(m[1] || '');
+            $('smsBody').value   = decodeURIComponent(m[3] || '');
+          }
+          break;
+        }
+        case 'wifi': {
+          // 軽い逆パース (完全網羅ではない)
+          const get = (k) => {
+            const m = data.match(new RegExp(k + ':((?:\\\\.|[^;])*);'));
+            return m ? m[1].replace(/\\(.)/g, '$1') : '';
+          };
+          $('wifiSsid').value = get('S');
+          $('wifiPass').value = get('P');
+          const t = get('T');
+          $('wifiEnc').value  = (t === 'WEP' || t === 'WPA' || t === 'nopass') ? t : 'WPA';
+          $('wifiHidden').checked = /H:true/i.test(data);
+          break;
+        }
+        default:
+          // vCard / mecard / geo / event / social は単に再描画用文字列だけ保持し、フォーム逆算はしない
+          break;
+      }
+    }
+
+    // テンプレート
+    function saveCurrentTemplate() {
+      const name = templateName.value.trim();
+      if (!name) { toast('テンプレート名を入力してください'); return; }
+      const arr = loadTemplates();
+      const existingIdx = arr.findIndex((t) => t.name === name);
+      const snapshot = readDesignSnapshot();
+      const entry = { name, design: snapshot, at: Date.now() };
+      if (existingIdx >= 0) arr[existingIdx] = entry;
+      else arr.unshift(entry);
+      saveTemplates(arr);
+      templateName.value = '';
+      renderTemplateList();
+      toast('テンプレートを保存しました');
+    }
+
+    function renderTemplateList() {
+      const arr = loadTemplates();
+      if (arr.length === 0) {
+        templateList.innerHTML = '<div class="hint">テンプレートはまだありません</div>';
+        return;
+      }
+      templateList.innerHTML = arr.map((t, i) =>
+        '<div class="item-row">'
+        + '<div class="item-info">'
+        +   '<div class="item-name">' + escapeHtml(t.name) + '</div>'
+        +   '<div class="item-sub">' + new Date(t.at).toLocaleString('ja-JP') + '</div>'
+        + '</div>'
+        + '<div class="item-actions">'
+        +   '<button class="btn btn-secondary btn-sm" data-tpl-load="' + i + '">適用</button>'
+        +   '<button class="btn btn-secondary btn-sm" data-tpl-del="' + i + '">×</button>'
+        + '</div>'
+        + '</div>'
+      ).join('');
+    }
+
+    function loadTemplate(i) {
+      const arr = loadTemplates();
+      const t = arr[i];
+      if (!t) return;
+      applyDesignSnapshot(t.design);
+      toast('テンプレート「' + t.name + '」を適用');
+    }
+
+    function deleteTemplate(i) {
+      const arr = loadTemplates();
+      arr.splice(i, 1);
+      saveTemplates(arr);
+      renderTemplateList();
+    }
+
+    // ===== 12. バルク生成 =====
+    async function runBulk() {
+      if (typeof JSZip === 'undefined') {
+        toast('ZIP ライブラリが読み込めていません');
+        return;
+      }
+      const lines = bulkInput.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      if (lines.length === 0) { toast('URL を1行ずつ貼り付けてください'); return; }
+      if (lines.length > BULK_MAX) {
+        toast('最大 ' + BULK_MAX + ' 件まで対応 (' + lines.length + ' 件あります)');
+        return;
+      }
+      const size = parseInt(exportSize.value, 10) || 512;
+      const design = getDesignSettings();
+      bulkRun.disabled = true;
+      const zip = new JSZip();
+      try {
+        for (let i = 0; i < lines.length; i++) {
+          bulkStatus.textContent = (i + 1) + ' / ' + lines.length + ' 生成中…';
+          const url = /^[a-z][a-z0-9+.\-]*:/i.test(lines[i]) ? lines[i] : 'https://' + lines[i];
+          const opts = Object.assign({
+            width: size, height: size, type: 'canvas',
+            data: url, image: logoDataUrl || undefined,
+          }, design);
+          const inst = new QRCodeStyling(opts);
+          const blob = await inst.getRawData('png');
+          const data = blob instanceof Blob ? blob : new Blob([blob], { type: 'image/png' });
+          const fname = String(i + 1).padStart(3, '0') + '_' + slug(url, 'qr') + '.png';
+          zip.file(fname, data);
+          // UI に譲る
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        bulkStatus.textContent = 'ZIP 圧縮中…';
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const fname = 'qr_bulk_' + fmtNow() + '.zip';
+        await saveBlobAs(zipBlob, fname, 'application/zip');
+        bulkStatus.textContent = '完了 (' + lines.length + ' 件)';
+      } catch (e) {
+        console.error(e);
+        bulkStatus.textContent = 'エラー: ' + (e.message || e);
+      } finally {
+        bulkRun.disabled = false;
+      }
+    }
+
+    // ===== 13. メインアクション =====
+    const scheduleRender = debounce(renderQr, RENDER_DEBOUNCE_MS);
+
+    async function saveAs(extension) {
+      try {
+        const size = parseInt(exportSize.value, 10) || 512;
+        const blob = await exportQr(extension, size);
+        const mime = mimeOfExt(extension);
+        const name = 'qr_' + fmtNow() + '.' + (extension === 'jpeg' ? 'jpg' : extension);
+        await saveBlobAs(blob, name, mime);
+      } catch (e) {
+        console.error(e);
+        toast(e.message || 'エラー');
+      }
+    }
+
+    async function shareAction() {
+      try {
+        const size = parseInt(exportSize.value, 10) || 512;
+        const blob = await exportQr('png', size);
+        const name = 'qr_' + fmtNow() + '.png';
+        await shareBlob(blob, name, 'image/png');
+      } catch (e) {
+        console.error(e);
+        toast(e.message || 'エラー');
+      }
+    }
+
+    async function copyAction() {
+      try {
+        const size = parseInt(exportSize.value, 10) || 512;
+        const blob = await exportQr('png', size);
+        await copyBlobToClipboard(blob, 'image/png');
+      } catch (e) {
+        console.error(e);
+        toast(e.message || 'エラー');
+      }
+    }
+
+    async function onLogoFileChange(e) {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      try {
+        logoDataUrl = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = () => reject(r.error || new Error('読み込み失敗'));
+          r.readAsDataURL(f);
+        });
+        scheduleRender();
+      } catch (err) {
+        toast('ロゴ画像を読み込めませんでした');
+      }
+    }
+
+    function onLogoClear() {
+      logoDataUrl = '';
+      logoFile.value = '';
+      scheduleRender();
+    }
+
+    function onGetCurrentLocation() {
+      if (!navigator.geolocation) { toast('この端末では位置情報が使えません'); return; }
+      toast('位置情報を取得中…');
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          $('geoLat').value = pos.coords.latitude.toFixed(6);
+          $('geoLon').value = pos.coords.longitude.toFixed(6);
+          scheduleRender();
+        },
+        (err) => { toast('取得失敗: ' + err.message); }
+      );
+    }
+
+    // ===== 14. イベントハンドラ =====
+    function setupHandlers() {
+      // タブ切替
+      tabs.addEventListener('click', (e) => {
+        const t = e.target.closest('.tab');
+        if (!t) return;
+        switchType(t.dataset.type);
+      });
+
+      // すべての入力で再レンダリング (debounce 越し)
+      const allInputs = document.querySelectorAll(
+        '.type-form input, .type-form textarea, .type-form select, #designCard input, #designCard select'
+      );
+      allInputs.forEach((el) => {
+        el.addEventListener('input', () => { updateAuxUI(); scheduleRender(); });
+        el.addEventListener('change', () => { updateAuxUI(); scheduleRender(); });
+      });
+      $('socialPlatform').addEventListener('change', updateSocialHint);
+
+      // ロゴ
+      logoFile.addEventListener('change', onLogoFileChange);
+      logoClear.addEventListener('click', onLogoClear);
+
+      // 位置現在地
+      $('geoCurrent').addEventListener('click', onGetCurrentLocation);
+
+      // 保存
+      downloadPng.addEventListener('click',  () => saveAs('png'));
+      downloadSvg.addEventListener('click',  () => saveAs('svg'));
+      downloadJpeg.addEventListener('click', () => saveAs('jpeg'));
+      downloadWebp.addEventListener('click', () => saveAs('webp'));
+      copyClipboard.addEventListener('click', copyAction);
+      shareQr.addEventListener('click', shareAction);
+
+      // テンプレート
+      saveTemplate.addEventListener('click', saveCurrentTemplate);
+      templateList.addEventListener('click', (e) => {
+        const btnL = e.target.closest('[data-tpl-load]');
+        const btnD = e.target.closest('[data-tpl-del]');
+        if (btnL) loadTemplate(parseInt(btnL.dataset.tplLoad, 10));
+        if (btnD) deleteTemplate(parseInt(btnD.dataset.tplDel, 10));
+      });
+
+      // 履歴
+      historyList.addEventListener('click', (e) => {
+        const btnL = e.target.closest('[data-hist-load]');
+        const btnD = e.target.closest('[data-hist-del]');
+        if (btnL) loadHistoryItem(parseInt(btnL.dataset.histLoad, 10));
+        if (btnD) deleteHistoryItem(parseInt(btnD.dataset.histDel, 10));
+      });
+      historyClear.addEventListener('click', () => {
+        if (!confirm('履歴を全消去しますか?')) return;
+        saveHistory([]);
+        renderHistoryList();
+      });
+
+      // バルク
+      bulkRun.addEventListener('click', runBulk);
+    }
+
+    // 起動
+    function init() {
+      if (typeof QRCodeStyling === 'undefined') {
+        qrPreview.innerHTML = '<div class="placeholder" style="color:#991b1b;">'
+          + 'QR ライブラリの読み込みに失敗しました。ネットワークを確認してリロードしてください。'
+          + '</div>';
+        return;
+      }
+      setupHandlers();
+      updateSocialHint();
+      updateAuxUI();
+      renderTemplateList();
+      renderHistoryList();
+      // 初期プレビューは空
+      showPlaceholder('⬆️ 上のフォームに入力すると\nここに QR コードが表示されます');
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
+  })();
+  </script>
+</body>
+</html>
