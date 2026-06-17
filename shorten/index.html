@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#10b981" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>URL 短縮 | ひゅうがのTR-Labo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky; top: 0; z-index: 20;
+    }
+    .brand {
+      max-width: 760px; margin: 0 auto; padding: 0.7rem 1rem;
+      display: flex; align-items: center; gap: 0.6rem;
+    }
+    .back-btn {
+      width: 36px; height: 36px; border-radius: 9px;
+      border: 1px solid #e2e8f0; background: #fff; color: #475569;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem; -webkit-tap-highlight-color: transparent;
+    }
+    .back-btn:active { background: #f1f5f9; }
+    .logo {
+      width: 34px; height: 34px; border-radius: 9px;
+      background: linear-gradient(135deg, #10b981, #059669);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800; font-size: 0.78rem;
+      box-shadow: 0 4px 10px rgba(16,185,129,0.25);
+    }
+    .brand-name { font-weight: 700; font-size: 1rem; }
+
+    main { max-width: 760px; margin: 0 auto;
+      padding: 1.1rem 1rem calc(2rem + env(safe-area-inset-bottom)); }
+
+    .hero { margin-bottom: 1.1rem; }
+    .hero h1 { font-size: 1.35rem; line-height: 1.4; font-weight: 800; }
+    .hero h1 .accent { color: #059669; }
+    .hero p { margin-top: 0.5rem; color: #475569; font-size: 0.9rem; line-height: 1.7; }
+
+    .card {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 16px;
+      padding: 1rem; margin-bottom: 1rem;
+      box-shadow: 0 1px 2px rgba(15,23,42,0.04);
+    }
+    .card h3 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+
+    .field { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.85rem; }
+    .field:last-child { margin-bottom: 0; }
+    .field label.lbl { font-size: 0.82rem; color: #334155; font-weight: 600; }
+
+    input[type="text"], input[type="url"] {
+      font: inherit; font-size: 0.9rem; padding: 0.6rem 0.7rem;
+      border: 1px solid #cbd5e1; border-radius: 9px; background: #fff; color: #0f172a;
+      width: 100%; -webkit-appearance: none;
+    }
+    input:focus { outline: none; border-color: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,0.15); }
+
+    /* カスタムエイリアス: is.gd/____ 形式 */
+    .alias-wrap {
+      display: flex; align-items: stretch;
+      border: 1px solid #cbd5e1; border-radius: 9px; overflow: hidden; background: #fff;
+    }
+    .alias-wrap:focus-within { border-color: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,0.15); }
+    .alias-prefix {
+      display: flex; align-items: center; padding: 0 0.6rem;
+      background: #f1f5f9; color: #64748b; font-size: 0.86rem; white-space: nowrap;
+      border-right: 1px solid #e2e8f0;
+    }
+    .alias-wrap input {
+      border: 0; border-radius: 0; box-shadow: none !important; flex: 1 1 auto; min-width: 0;
+    }
+    .alias-wrap input:focus { box-shadow: none; }
+
+    .hint { color: #64748b; font-size: 0.78rem; line-height: 1.6; }
+
+    .btn {
+      appearance: none; border: 0; border-radius: 11px; padding: 0.7rem 1rem;
+      font: inherit; font-weight: 700; font-size: 0.9rem; cursor: pointer;
+      min-height: 44px; display: inline-flex; align-items: center;
+      justify-content: center; gap: 0.4rem; -webkit-tap-highlight-color: transparent;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: linear-gradient(135deg, #10b981, #059669); color: #fff;
+      box-shadow: 0 4px 12px rgba(16,185,129,0.3); width: 100%; }
+    .btn-primary:active { transform: translateY(1px); }
+    .btn-secondary { background: #f1f5f9; color: #0f172a; border: 1px solid #e2e8f0; }
+    .btn-sm { min-height: 36px; padding: 0.4rem 0.7rem; font-size: 0.82rem; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+    .spinner {
+      width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* 結果 */
+    .result-url {
+      display: flex; align-items: center; gap: 0.5rem;
+      background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 11px;
+      padding: 0.7rem 0.85rem; margin-bottom: 0.8rem;
+    }
+    .result-url a {
+      flex: 1 1 auto; min-width: 0; font-size: 1.05rem; font-weight: 700; color: #047857;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .result-long { font-size: 0.76rem; color: #64748b; line-height: 1.6;
+      word-break: break-all; margin-bottom: 0.8rem; }
+
+    /* QR */
+    .qr-preview {
+      display: flex; align-items: center; justify-content: center;
+      background: repeating-conic-gradient(#f8fafc 0% 25%, #fff 0% 50%) 0 0 / 16px 16px;
+      border-radius: 12px; padding: 1rem; margin-bottom: 0.8rem;
+    }
+    .qr-preview canvas { max-width: 100%; height: auto; display: block; border-radius: 4px; }
+
+    /* 履歴 行 */
+    .item-row {
+      display: flex; align-items: center; gap: 0.6rem;
+      padding: 0.55rem 0.7rem; background: #f8fafc; border: 1px solid #e2e8f0;
+      border-radius: 9px; margin-bottom: 0.45rem;
+    }
+    .item-row .item-info { flex: 1 1 auto; min-width: 0; }
+    .item-row .item-name { font-size: 0.86rem; font-weight: 600; color: #047857;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-row .item-sub { font-size: 0.74rem; color: #64748b;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-row .item-actions { display: flex; gap: 0.3rem; flex: 0 0 auto; }
+    .empty-note { color: #94a3b8; font-size: 0.84rem; text-align: center; padding: 0.6rem 0; }
+
+    .section-bar { display: flex; align-items: center; justify-content: space-between;
+      gap: 0.6rem; margin-bottom: 0.6rem; }
+    .section-bar h3 { margin-bottom: 0; }
+
+    .alert { border-radius: 11px; padding: 0.7rem 0.85rem; font-size: 0.85rem;
+      line-height: 1.6; margin-bottom: 0.8rem; }
+    .alert.info { background: #f0f9ff; border: 1px solid #bae6fd; color: #075985; }
+    .alert.err  { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .alert.hidden { display: none; }
+
+    .footer-note { text-align: center; color: #64748b; font-size: 0.78rem;
+      margin-top: 0.5rem; line-height: 1.7; }
+
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%) translateY(20px);
+      bottom: calc(1.2rem + env(safe-area-inset-bottom));
+      background: #0f172a; color: #fff; padding: 0.6rem 1rem; border-radius: 11px;
+      font-size: 0.85rem; opacity: 0; pointer-events: none;
+      transition: opacity .2s, transform .2s; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">🔗 URL 短縮</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>長い URL を、<span class="accent">すっきり短く</span>。</h1>
+      <p>貼り付けてボタンを押すだけ。カスタムエイリアス・QR コード・コピー / 共有・履歴に対応しています。</p>
+    </section>
+
+    <div class="alert info">
+      ⚠️ 短縮 URL の生成には <strong>is.gd</strong> の公開 API を使用します。入力した URL は is.gd へ送信されます（短縮の性質上、避けられません）。
+    </div>
+
+    <!-- 入力 -->
+    <div class="card">
+      <div class="field">
+        <label class="lbl" for="urlInput">短縮したい URL</label>
+        <input type="url" id="urlInput" placeholder="https://example.com/very/long/path" autocomplete="off" inputmode="url" />
+      </div>
+      <div class="field">
+        <label class="lbl" for="aliasInput">カスタムエイリアス（任意）</label>
+        <div class="alias-wrap">
+          <span class="alias-prefix">is.gd/</span>
+          <input type="text" id="aliasInput" placeholder="my-link" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        </div>
+        <span class="hint">5〜30 文字の半角英数字・アンダースコア。空欄ならランダムな短縮 URL になります。</span>
+      </div>
+      <div id="errBox" class="alert err hidden"></div>
+      <button class="btn btn-primary" id="shortenBtn">短縮する</button>
+    </div>
+
+    <!-- 結果 -->
+    <div class="card hidden" id="resultCard">
+      <h3>短縮 URL</h3>
+      <div class="result-url">
+        <a id="resultLink" href="#" target="_blank" rel="noopener noreferrer"></a>
+      </div>
+      <div class="result-long" id="resultLong"></div>
+      <div class="btn-row" style="margin-bottom: 0.9rem;">
+        <button class="btn btn-secondary btn-sm" id="copyBtn">📋 コピー</button>
+        <button class="btn btn-secondary btn-sm hidden" id="shareBtn">📤 共有</button>
+        <a class="btn btn-secondary btn-sm" id="openBtn" target="_blank" rel="noopener noreferrer">↗ 開く</a>
+      </div>
+      <div class="qr-preview">
+        <canvas id="qrCanvas"></canvas>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-secondary btn-sm" id="qrDownloadBtn">⬇ QR を保存（PNG）</button>
+      </div>
+    </div>
+
+    <!-- 履歴 -->
+    <div class="card">
+      <div class="section-bar">
+        <h3>履歴</h3>
+        <button class="btn btn-secondary btn-sm hidden" id="clearHistoryBtn">すべて削除</button>
+      </div>
+      <div id="historyList"></div>
+    </div>
+
+    <p class="footer-note">© ひゅうがのTR-Labo ／ 短縮 API: is.gd</p>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    /* ===== 設定 ===== */
+    const HISTORY_KEY = 'tr.shorten.history.v1';
+    const HISTORY_MAX = 20;
+    const API_BASE = 'https://is.gd/create.php';
+    const ALIAS_RE = /^[A-Za-z0-9_]{5,30}$/;
+
+    /* ===== DOM ===== */
+    const $ = (id) => document.getElementById(id);
+    const urlInput = $('urlInput');
+    const aliasInput = $('aliasInput');
+    const shortenBtn = $('shortenBtn');
+    const errBox = $('errBox');
+    const resultCard = $('resultCard');
+    const resultLink = $('resultLink');
+    const resultLong = $('resultLong');
+    const copyBtn = $('copyBtn');
+    const shareBtn = $('shareBtn');
+    const openBtn = $('openBtn');
+    const qrCanvas = $('qrCanvas');
+    const qrDownloadBtn = $('qrDownloadBtn');
+    const historyList = $('historyList');
+    const clearHistoryBtn = $('clearHistoryBtn');
+    const toastEl = $('toast');
+
+    /* ===== 状態 ===== */
+    let currentShort = '';
+
+    /* ===== UI ユーティリティ ===== */
+    let toastTimer = null;
+    function toast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1900);
+    }
+    function showError(msg) {
+      errBox.textContent = msg;
+      errBox.classList.remove('hidden');
+    }
+    function clearError() { errBox.classList.add('hidden'); errBox.textContent = ''; }
+
+    /* ===== フォーマッタ ===== */
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+    function fmtNow(ts) {
+      const d = new Date(ts);
+      const p = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    function normalizeUrl(raw) {
+      let v = raw.trim();
+      if (!v) return '';
+      if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(v)) v = 'https://' + v;
+      try { new URL(v); } catch (_) { return ''; }
+      return v;
+    }
+
+    /* ===== localStorage CRUD ===== */
+    function safeParse(str, fallback) {
+      try { const v = JSON.parse(str); return v == null ? fallback : v; }
+      catch (_) { return fallback; }
+    }
+    function loadHistory() { return safeParse(localStorage.getItem(HISTORY_KEY), []); }
+    function saveHistory(arr) {
+      try { localStorage.setItem(HISTORY_KEY, JSON.stringify(arr)); } catch (_) {}
+    }
+    function pushHistory(entry) {
+      let arr = loadHistory().filter((x) => x.short !== entry.short);
+      arr.unshift(entry);
+      if (arr.length > HISTORY_MAX) arr = arr.slice(0, HISTORY_MAX);
+      saveHistory(arr);
+      renderHistory();
+    }
+    function removeHistory(short) {
+      saveHistory(loadHistory().filter((x) => x.short !== short));
+      renderHistory();
+    }
+
+    /* ===== QR ===== */
+    function renderQr(text) {
+      if (!window.QRCode) return;
+      QRCode.toCanvas(qrCanvas, text, { width: 220, margin: 1,
+        color: { dark: '#0f172a', light: '#ffffff' } }, (err) => {
+        if (err) console.error(err);
+      });
+    }
+
+    /* ===== コピー / 共有 ===== */
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('コピーしました');
+      } catch (_) {
+        // フォールバック
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); toast('コピーしました'); }
+        catch (e) { toast('コピーに失敗しました'); }
+        document.body.removeChild(ta);
+      }
+    }
+
+    /* ===== is.gd API 呼び出し ===== */
+    const ERR_MSG = {
+      1: 'URL が正しくありません。入力内容をご確認ください。',
+      2: 'このエイリアスは使用できません（既に使われている、または禁止された語です）。',
+      3: 'アクセスが集中しています。少し時間をおいて再度お試しください。',
+      4: 'is.gd 側で一時的な問題が発生しています。後ほどお試しください。',
+    };
+
+    function buildApiUrl(longUrl, alias) {
+      let u = `${API_BASE}?format=json&url=${encodeURIComponent(longUrl)}`;
+      if (alias) u += `&shorturl=${encodeURIComponent(alias)}`;
+      return u;
+    }
+
+    // CORS で取得。失敗時は JSONP にフォールバック。
+    function createShortUrl(longUrl, alias) {
+      const apiUrl = buildApiUrl(longUrl, alias);
+      return fetch(apiUrl, { method: 'GET' })
+        .then((res) => res.json())
+        .catch(() => jsonpFallback(longUrl, alias));
+    }
+
+    function jsonpFallback(longUrl, alias) {
+      return new Promise((resolve, reject) => {
+        const cb = 'isgd_cb_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+        const script = document.createElement('script');
+        const timer = setTimeout(() => { cleanup(); reject(new Error('timeout')); }, 12000);
+        function cleanup() {
+          clearTimeout(timer);
+          delete window[cb];
+          if (script.parentNode) script.parentNode.removeChild(script);
+        }
+        window[cb] = (data) => { cleanup(); resolve(data); };
+        script.onerror = () => { cleanup(); reject(new Error('network')); };
+        script.src = buildApiUrl(longUrl, alias) + '&callback=' + cb;
+        document.body.appendChild(script);
+      });
+    }
+
+    /* ===== 結果表示 ===== */
+    function showResult(shortUrl, longUrl) {
+      currentShort = shortUrl;
+      resultLink.textContent = shortUrl;
+      resultLink.href = shortUrl;
+      openBtn.href = shortUrl;
+      resultLong.textContent = '元 URL: ' + longUrl;
+      resultCard.classList.remove('hidden');
+      renderQr(shortUrl);
+      resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    /* ===== メイン処理 ===== */
+    async function doShorten() {
+      clearError();
+      const longUrl = normalizeUrl(urlInput.value);
+      if (!longUrl) { showError('有効な URL を入力してください。'); urlInput.focus(); return; }
+
+      const alias = aliasInput.value.trim();
+      if (alias && !ALIAS_RE.test(alias)) {
+        showError('カスタムエイリアスは 5〜30 文字の半角英数字・アンダースコアで入力してください。');
+        aliasInput.focus();
+        return;
+      }
+
+      shortenBtn.disabled = true;
+      const originalLabel = shortenBtn.textContent;
+      shortenBtn.innerHTML = '<span class="spinner"></span> 短縮中...';
+
+      try {
+        const data = await createShortUrl(longUrl, alias);
+        if (data && data.shorturl) {
+          showResult(data.shorturl, longUrl);
+          pushHistory({ long: longUrl, short: data.shorturl, alias: alias || '', at: Date.now() });
+          toast('短縮しました');
+        } else if (data && data.errorcode != null) {
+          showError(ERR_MSG[data.errorcode] || (data.errormessage || '短縮に失敗しました。'));
+        } else {
+          showError('短縮に失敗しました。時間をおいて再度お試しください。');
+        }
+      } catch (e) {
+        showError('通信に失敗しました。ネットワーク接続をご確認のうえ、再度お試しください。');
+      } finally {
+        shortenBtn.disabled = false;
+        shortenBtn.textContent = originalLabel;
+      }
+    }
+
+    /* ===== 履歴描画 ===== */
+    function renderHistory() {
+      const arr = loadHistory();
+      if (!arr.length) {
+        historyList.innerHTML = '<div class="empty-note">まだ履歴はありません。</div>';
+        clearHistoryBtn.classList.add('hidden');
+        return;
+      }
+      clearHistoryBtn.classList.remove('hidden');
+      historyList.innerHTML = arr.map((x) => `
+        <div class="item-row" data-short="${escapeHtml(x.short)}">
+          <div class="item-info">
+            <div class="item-name">${escapeHtml(x.short)}</div>
+            <div class="item-sub">${escapeHtml(x.long)} ・ ${fmtNow(x.at)}</div>
+          </div>
+          <div class="item-actions">
+            <button class="btn btn-secondary btn-sm" data-act="copy">📋</button>
+            <button class="btn btn-secondary btn-sm" data-act="show">QR</button>
+            <button class="btn btn-secondary btn-sm" data-act="del">🗑</button>
+          </div>
+        </div>`).join('');
+    }
+
+    /* ===== イベント ===== */
+    shortenBtn.addEventListener('click', doShorten);
+    urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doShorten(); });
+    aliasInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doShorten(); });
+
+    copyBtn.addEventListener('click', () => { if (currentShort) copyText(currentShort); });
+    shareBtn.addEventListener('click', async () => {
+      if (!currentShort) return;
+      try { await navigator.share({ url: currentShort }); }
+      catch (_) { /* キャンセル等は無視 */ }
+    });
+    if (navigator.share) shareBtn.classList.remove('hidden');
+
+    qrDownloadBtn.addEventListener('click', () => {
+      if (!currentShort) return;
+      const a = document.createElement('a');
+      a.href = qrCanvas.toDataURL('image/png');
+      a.download = 'qr-' + (currentShort.split('/').pop() || 'shorturl') + '.png';
+      a.click();
+      toast('QR を保存しました');
+    });
+
+    historyList.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      const row = btn.closest('.item-row');
+      const short = row && row.getAttribute('data-short');
+      if (!short) return;
+      const entry = loadHistory().find((x) => x.short === short);
+      const act = btn.getAttribute('data-act');
+      if (act === 'copy') copyText(short);
+      else if (act === 'show' && entry) showResult(entry.short, entry.long);
+      else if (act === 'del') removeHistory(short);
+    });
+
+    clearHistoryBtn.addEventListener('click', () => {
+      if (confirm('履歴をすべて削除しますか？')) {
+        saveHistory([]);
+        renderHistory();
+        toast('履歴を削除しました');
+      }
+    });
+
+    /* ===== 初期化 ===== */
+    renderHistory();
+  })();
+  </script>
+</body>
+</html>
