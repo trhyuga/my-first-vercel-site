@@ -50,13 +50,32 @@ window.PDFApp = (function () {
     legacyAnchorDownload(blob, filename);
   }
 
-  function safeFilename(name, fallback) {
+  // Truncate a string so its UTF-8 byte length fits within maxBytes,
+  // never splitting a multibyte character. Filesystem name limits (ext4 /
+  // APFS / NTFS) are 255 *bytes*, not characters — a 180-char Japanese name
+  // can be 540 bytes and gets rejected on save/extract.
+  function truncateBytes(str, maxBytes) {
+    const enc = new TextEncoder();
+    if (enc.encode(str).length <= maxBytes) return str;
+    let lo = 0, hi = str.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (enc.encode(str.slice(0, mid)).length <= maxBytes) lo = mid; else hi = mid - 1;
+    }
+    return str.slice(0, lo);
+  }
+
+  // Cap at bytes (default 200) so the result plus a suffix like ".pdf" or
+  // "_page_001.pdf" still clears the 255-byte filesystem limit.
+  function safeFilename(name, fallback, maxBytes = 200) {
     let out = (name || fallback || 'output').trim();
     // Strip control chars and Windows-illegal chars; trim trailing dots/spaces.
     out = out.replace(/[\x00-\x1f\\/:*?"<>|]/g, '_');
     out = out.replace(/[. ]+$/, '');
     if (!out) out = fallback || 'output';
-    if (out.length > 180) out = out.slice(0, 180);
+    out = truncateBytes(out, maxBytes);
+    out = out.replace(/[. ]+$/, '');
+    if (!out) out = fallback || 'output';
     return out;
   }
 
