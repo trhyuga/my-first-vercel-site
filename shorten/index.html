@@ -188,7 +188,7 @@
     </section>
 
     <div class="alert info">
-      ⚠️ 短縮 URL の生成には <strong>is.gd</strong> の公開 API を使用します。入力した URL は is.gd へ送信されます（短縮の性質上、避けられません）。
+      ⚠️ 短縮 URL の生成には <strong>is.gd → v.gd → spoo.me</strong> の公開 API を順に使用します。入力した URL はそのサービスへ送信されます（短縮の性質上、避けられません）。
     </div>
 
     <!-- 入力 -->
@@ -238,7 +238,7 @@
       <div id="historyList"></div>
     </div>
 
-    <p class="footer-note">© ひゅうがのTR-Labo ／ 短縮 API: is.gd</p>
+    <p class="footer-note">© ひゅうがのTR-Labo ／ 短縮 API: is.gd・v.gd・spoo.me</p>
   </main>
 
   <div class="toast" id="toast"></div>
@@ -251,8 +251,8 @@
     /* ===== 設定 ===== */
     const HISTORY_KEY = 'tr.shorten.history.v1';
     const HISTORY_MAX = 20;
-    const API_BASE = 'https://is.gd/create.php';
     const ALIAS_RE = /^[A-Za-z0-9_]{5,30}$/;
+    const JSONP_TIMEOUT = 8000;
 
     /* ===== DOM ===== */
     const $ = (id) => document.getElementById(id);
@@ -354,43 +354,93 @@
       }
     }
 
-    /* ===== is.gd API 呼び出し ===== */
+    /* ===== 短縮 API 呼び出し ===== */
+    // is.gd / v.gd の errorcode に対応する日本語メッセージ。
     const ERR_MSG = {
       1: 'URL が正しくありません。入力内容をご確認ください。',
       2: 'このエイリアスは使用できません（既に使われている、または禁止された語です）。',
       3: 'アクセスが集中しています。少し時間をおいて再度お試しください。',
-      4: 'is.gd 側で一時的な問題が発生しています。後ほどお試しください。',
+      4: 'サービス側で一時的な問題が発生しています。後ほどお試しください。',
     };
 
-    function buildApiUrl(longUrl, alias) {
-      let u = `${API_BASE}?format=json&url=${encodeURIComponent(longUrl)}`;
-      if (alias) u += `&shorturl=${encodeURIComponent(alias)}`;
-      return u;
-    }
+    // 優先順: is.gd → v.gd → spoo.me（C→A→B）。
+    // is.gd/v.gd は CORS ヘッダを返さないため fetch は使わず JSONP 一本。
+    // 二重リクエストを避けてレート制限を踏みにくくする。
+    const PROVIDERS = [
+      { name: 'is.gd',   fn: (url, alias) => isgdJsonp('https://is.gd/create.php', url, alias) },
+      { name: 'v.gd',    fn: (url, alias) => isgdJsonp('https://v.gd/create.php', url, alias) },
+      { name: 'spoo.me', fn: (url, alias) => spooMe(url, alias) },
+    ];
 
-    // CORS で取得。失敗時は JSONP にフォールバック。
-    function createShortUrl(longUrl, alias) {
-      const apiUrl = buildApiUrl(longUrl, alias);
-      return fetch(apiUrl, { method: 'GET' })
-        .then((res) => res.json())
-        .catch(() => jsonpFallback(longUrl, alias));
-    }
-
-    function jsonpFallback(longUrl, alias) {
+    // is.gd / v.gd 共通の JSONP 呼び出し。
+    function isgdJsonp(base, longUrl, alias) {
       return new Promise((resolve, reject) => {
-        const cb = 'isgd_cb_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+        const cb = 'sgd_cb_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
         const script = document.createElement('script');
-        const timer = setTimeout(() => { cleanup(); reject(new Error('timeout')); }, 12000);
+        const timer = setTimeout(() => { cleanup(); reject({ type: 'timeout' }); }, JSONP_TIMEOUT);
         function cleanup() {
           clearTimeout(timer);
-          delete window[cb];
+          try { delete window[cb]; } catch (_) { window[cb] = undefined; }
           if (script.parentNode) script.parentNode.removeChild(script);
         }
-        window[cb] = (data) => { cleanup(); resolve(data); };
-        script.onerror = () => { cleanup(); reject(new Error('network')); };
-        script.src = buildApiUrl(longUrl, alias) + '&callback=' + cb;
+        window[cb] = (data) => {
+          cleanup();
+          if (data && data.shorturl) resolve({ short: data.shorturl });
+          else reject({ type: 'api', code: data && data.errorcode, message: data && data.errormessage });
+        };
+        script.onerror = () => { cleanup(); reject({ type: 'network' }); };
+        let u = `${base}?format=json&url=${encodeURIComponent(longUrl)}`;
+        if (alias) u += `&shorturl=${encodeURIComponent(alias)}`;
+        u += `&callback=${cb}`;
+        script.src = u;
         document.body.appendChild(script);
       });
+    }
+
+    // 独立系プロバイダ spoo.me（CORS 対応の POST）。is.gd 系がダウン/制限でも使える。
+    async function spooMe(longUrl, alias) {
+      const body = new URLSearchParams();
+      body.set('url', longUrl);
+      if (alias) body.set('alias', alias);
+      let res;
+      try {
+        res = await fetch('https://spoo.me/', {
+          method: 'POST',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body.toString(),
+        });
+      } catch (_) {
+        throw { type: 'network' };
+      }
+      const data = await res.json().catch(() => null);
+      if (res.ok && data && data.short_url) return { short: data.short_url };
+      throw { type: 'api', code: res.status, message: data && (data.error || data.message) };
+    }
+
+    // 各プロバイダを順に試し、最初に成功したものを返す。全滅なら最後のエラーを投げる。
+    async function createShortUrl(longUrl, alias) {
+      let lastErr = { type: 'network' };
+      for (const p of PROVIDERS) {
+        try {
+          const r = await p.fn(longUrl, alias);
+          if (r && r.short) return { short: r.short, provider: p.name };
+        } catch (e) {
+          lastErr = e || lastErr;
+        }
+      }
+      throw lastErr;
+    }
+
+    // エラーオブジェクトを日本語メッセージへ。
+    function errMessage(e) {
+      if (!e) return '短縮に失敗しました。時間をおいて再度お試しください。';
+      if (e.type === 'timeout') return '応答がありませんでした。時間をおいて再度お試しください。';
+      if (e.type === 'network') return '通信に失敗しました。ネットワーク接続をご確認のうえ、再度お試しください。';
+      if (e.type === 'api') {
+        if (ERR_MSG[e.code]) return ERR_MSG[e.code];
+        if (e.message) return String(e.message);
+      }
+      return '短縮に失敗しました。時間をおいて再度お試しください。';
     }
 
     /* ===== 結果表示 ===== */
@@ -423,18 +473,12 @@
       shortenBtn.innerHTML = '<span class="spinner"></span> 短縮中...';
 
       try {
-        const data = await createShortUrl(longUrl, alias);
-        if (data && data.shorturl) {
-          showResult(data.shorturl, longUrl);
-          pushHistory({ long: longUrl, short: data.shorturl, alias: alias || '', at: Date.now() });
-          toast('短縮しました');
-        } else if (data && data.errorcode != null) {
-          showError(ERR_MSG[data.errorcode] || (data.errormessage || '短縮に失敗しました。'));
-        } else {
-          showError('短縮に失敗しました。時間をおいて再度お試しください。');
-        }
+        const { short, provider } = await createShortUrl(longUrl, alias);
+        showResult(short, longUrl);
+        pushHistory({ long: longUrl, short, alias: alias || '', at: Date.now() });
+        toast(provider === 'is.gd' ? '短縮しました' : `短縮しました（${provider}）`);
       } catch (e) {
-        showError('通信に失敗しました。ネットワーク接続をご確認のうえ、再度お試しください。');
+        showError(errMessage(e));
       } finally {
         shortenBtn.disabled = false;
         shortenBtn.textContent = originalLabel;
