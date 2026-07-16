@@ -38,6 +38,14 @@
         <label for="range">ページ範囲 (例: 1-3, 5, 8-10)</label>
         <input type="text" id="range" value="1" />
       </div>
+      <div class="field" id="namingField" style="display:none;">
+        <label>ZIP内のファイル名</label>
+        <div class="radio-row">
+          <label><input type="radio" name="naming" value="name" checked><span>🧑 宛名で命名（山田太郎.pdf）</span></label>
+          <label><input type="radio" name="naming" value="seq"><span>🔢 連番のみ（page_001.pdf）</span></label>
+        </div>
+        <p class="info-hint" id="namingHint">各ページの「◯◯様」を読み取って名前を付けます。読み取れないページは連番になります。</p>
+      </div>
       <div class="field">
         <label for="fname">出力ファイル名</label>
         <input type="text" id="fname" value="split" />
@@ -47,14 +55,15 @@
     </div>
 
     <div id="msg"></div>
-    <p class="info-hint">範囲抽出は抽出した分だけ1つのPDFにまとめ、1ページずつは複数ファイルを<b>ZIP</b>で出力します。ZIP内は <code>page_001.pdf</code> のような連番名で、解凍時にパスが長すぎて開けなくなるのを防ぎます。</p>
+    <p class="info-hint">範囲抽出は抽出した分だけ1つのPDFにまとめ、1ページずつは複数ファイルを<b>ZIP</b>で出力します。1ページずつでは各ページの<b>宛名（◯◯様）</b>を読み取ってファイル名にできます。読み取れない場合や連番モードでは <code>page_001.pdf</code> のような短い名前になり、解凍時にパスが長すぎて開けなくなるのを防ぎます。</p>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
   <script src="../shared.js"></script>
   <script>
-    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted, appendPrintButton } = PDFApp;
+    const { fmtSize, download, safeFilename, bindDropzone, showError, clearBox, refuseIfEncrypted, appendPrintButton, setupPdfJs } = PDFApp;
     const dz = document.getElementById('dz');
     const fi = document.getElementById('fi');
     const controls = document.getElementById('controls');
@@ -66,6 +75,7 @@
     const srcSize = document.getElementById('srcSize');
     const rangeInput = document.getElementById('range');
     const rangeField = document.getElementById('rangeField');
+    const namingField = document.getElementById('namingField');
 
     let currentFile = null;
 
@@ -77,9 +87,59 @@
       return b || 'split';
     }
 
+    // pdf.js のテキストアイテムを、y 座標でグループ化して視覚的な行に復元する。
+    // 各行は左→右、行は上→下の読み順。宛名抽出の精度を上げるため。
+    function pageToLines(content) {
+      const rows = [];
+      for (const it of content.items) {
+        if (!it || !it.str || !it.str.trim()) continue;
+        const x = it.transform ? it.transform[4] : 0;
+        const y = it.transform ? it.transform[5] : 0;
+        let row = null;
+        for (const r of rows) { if (Math.abs(r.y - y) <= 2) { row = r; break; } }
+        if (!row) { row = { y, items: [] }; rows.push(row); }
+        row.items.push({ x, str: it.str });
+      }
+      rows.sort((a, b) => b.y - a.y);
+      return rows.map(r => r.items.sort((a, b) => a.x - b.x).map(i => i.str).join('').replace(/\s+/g, ' ').trim());
+    }
+
+    // 汎用敬称・複合語を宛名として誤検出しないための除外語。
+    const NAME_STOP = /(お客|皆|各位|会員|関係者|担当|御中|一同|貴社|貴店|貴行|人事|総務)/;
+    // 宛名として妥当な文字（漢字・かな・カナ・英字・中黒・空白）。
+    const NAME_CHARS = '\\u4e00-\\u9fff\\u3040-\\u309f\\u30a0-\\u30ff\\u30fc\\uff66-\\uff9fA-Za-z\\uff21-\\uff5a\\u3000 ・･.';
+    // 「様」の直後が行末/空白/句読点のときだけ採用 → 「様式」「仕様」等の複合語を除外。
+    const ADDRESSEE_RE = new RegExp('([' + NAME_CHARS + ']{1,24}?)[ \\u3000]*様(?=[\\s\\u3000、。)\\]）」]|$)');
+
+    // 1ページ分の行配列から宛名（◯◯様 の ◯◯）を1件返す。無ければ null。
+    function findAddressee(lines) {
+      for (const line of lines) {
+        const m = line.match(ADDRESSEE_RE);
+        if (!m) continue;
+        let name = m[1].replace(/[\s　・･.]+/g, '').trim();
+        // 日本語名の先頭に紛れ込んだ英数字コード/IDを除去（外国人名はそのまま）。
+        if (/[一-鿿぀-ゟ゠-ヿｦ-ﾟ]/.test(name)) name = name.replace(/^[A-Za-z0-9]+/, '');
+        if (name.length < 1 || name.length > 20) continue;
+        if (NAME_STOP.test(name)) continue;
+        // 少なくとも1文字は名前らしい文字を含むこと（記号/数字のみを除外）。
+        if (!/[一-鿿぀-ゟ゠-ヿｦ-ﾟA-Za-z]/.test(name)) continue;
+        return name;
+      }
+      return null;
+    }
+
+    function showSuccess(text) {
+      const el = document.createElement('div');
+      el.className = 'success';
+      el.textContent = text;
+      msg.innerHTML = '';
+      msg.appendChild(el);
+    }
+
     function updateModeUI() {
       const mode = document.querySelector('input[name="mode"]:checked').value;
       rangeField.style.display = mode === 'range' ? 'flex' : 'none';
+      namingField.style.display = mode === 'each' ? 'flex' : 'none';
     }
     document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', updateModeUI));
 
@@ -147,19 +207,58 @@
           download(blob, base + '.pdf');
           appendPrintButton(msg, blob);
         } else {
-          // ZIP 内は連番ファイル名のみ・フォルダ無しにしてパスを最短化。
+          // ZIP 内はフォルダ無し・短いファイル名にしてパスを最短化。
           // (解凍時に ZIP 名のフォルダが自動生成されるので散らからない)
+          const useName = (document.querySelector('input[name="naming"]:checked') || {}).value === 'name';
           const zip = new JSZip();
           const width = Math.max(3, String(total).length);
+
+          // 宛名命名モードでは pdf.js でテキストを読むため別途ロード。
+          let textDoc = null;
+          if (useName) {
+            setupPdfJs();
+            try { textDoc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise; }
+            catch (_) { textDoc = null; }
+          }
+
+          const usedNames = new Map(); // 同名の重複回避（_2, _3…）
+          let namedCount = 0;
           for (let i = 0; i < total; i++) {
             const out = await PDFLib.PDFDocument.create();
             const [p] = await out.copyPages(src, [i]);
             out.addPage(p);
             const bytesOut = await out.save();
-            zip.file(`page_${String(i + 1).padStart(width, '0')}.pdf`, bytesOut);
+
+            const num = String(i + 1).padStart(width, '0');
+            let entry = `page_${num}.pdf`; // 既定 / フォールバック
+            if (useName && textDoc) {
+              let name = null;
+              try {
+                const page = await textDoc.getPage(i + 1);
+                const content = await page.getTextContent();
+                name = findAddressee(pageToLines(content));
+              } catch (_) { name = null; }
+              if (name) {
+                let safe = pathSafeBase(name, 40);
+                const key = safe.toLowerCase();
+                const n = (usedNames.get(key) || 0) + 1;
+                usedNames.set(key, n);
+                entry = n > 1 ? `${safe}_${n}.pdf` : `${safe}.pdf`;
+                namedCount++;
+              }
+            }
+            zip.file(entry, bytesOut);
           }
           const blob = await zip.generateAsync({ type: 'blob' });
           download(blob, zipBase + '.zip');
+
+          if (useName) {
+            const fallback = total - namedCount;
+            showSuccess(
+              `${total}ページを分割しました。宛名で命名: ${namedCount}件` +
+              (fallback > 0 ? ` / 宛名が読み取れず連番: ${fallback}件` : '') + '。'
+            );
+          }
         }
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
