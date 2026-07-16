@@ -47,7 +47,7 @@
     </div>
 
     <div id="msg"></div>
-    <p class="info-hint">範囲抽出は抽出した分だけ1つのPDFにまとめ、1ページずつは複数ファイルを<b>ZIP</b>で出力します。</p>
+    <p class="info-hint">範囲抽出は抽出した分だけ1つのPDFにまとめ、1ページずつは複数ファイルを<b>ZIP</b>で出力します。ZIP内は <code>page_001.pdf</code> のような連番名で、解凍時にパスが長すぎて開けなくなるのを防ぎます。</p>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
@@ -68,6 +68,14 @@
     const rangeField = document.getElementById('rangeField');
 
     let currentFile = null;
+
+    // 解凍時の Windows パス長対策。安全化した名前を max 文字に丸め、
+    // 末尾の区切り文字を落として見苦しくならないようにする。
+    function pathSafeBase(name, max) {
+      let b = safeFilename(name, 'split');
+      if (b.length > max) b = b.slice(0, max).replace(/[ _.\-]+$/, '');
+      return b || 'split';
+    }
 
     function updateModeUI() {
       const mode = document.querySelector('input[name="mode"]:checked').value;
@@ -123,6 +131,11 @@
         const total = src.getPageCount();
         const mode = document.querySelector('input[name="mode"]:checked').value;
         const base = safeFilename(fname.value, 'split');
+        // Windows の MAX_PATH(260) 対策。オフィスステーション等が出す
+        // 長いファイル名だと、ZIP 名・内部フォルダ・各ページ名で同じ長い名前が
+        // 何重にも連結され、解凍時に「パスが長すぎて開けません」になる。
+        // ZIP 名は短く抑え、中身は連番のみにしてパスを最小化する。
+        const zipBase = pathSafeBase(base, 60);
 
         if (mode === 'range') {
           const pages = parseRange(rangeInput.value, total);
@@ -134,22 +147,19 @@
           download(blob, base + '.pdf');
           appendPrintButton(msg, blob);
         } else {
-          // Pack the per-page PDFs inside a folder so they unpack tidily
-          // instead of scattering N files into Downloads.
+          // ZIP 内は連番ファイル名のみ・フォルダ無しにしてパスを最短化。
+          // (解凍時に ZIP 名のフォルダが自動生成されるので散らからない)
           const zip = new JSZip();
-          // Reserve headroom for the "_page_NNN.pdf" suffix so each entry name
-          // stays under the 255-byte filesystem limit even with long names.
-          const zipBase = safeFilename(base, 'split', 200 - 24);
-          const folder = zip.folder(zipBase);
+          const width = Math.max(3, String(total).length);
           for (let i = 0; i < total; i++) {
             const out = await PDFLib.PDFDocument.create();
             const [p] = await out.copyPages(src, [i]);
             out.addPage(p);
             const bytesOut = await out.save();
-            folder.file(`${zipBase}_page_${String(i + 1).padStart(3, '0')}.pdf`, bytesOut);
+            zip.file(`page_${String(i + 1).padStart(width, '0')}.pdf`, bytesOut);
           }
           const blob = await zip.generateAsync({ type: 'blob' });
-          download(blob, base + '.zip');
+          download(blob, zipBase + '.zip');
         }
       } catch (e) {
         showError(msg, '失敗: ' + (e.message || e));
