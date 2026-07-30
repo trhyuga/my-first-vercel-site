@@ -169,9 +169,18 @@
             <option value="encode">再エンコード（確実・時間がかかる）</option>
           </select>
         </div>
+        <div class="opt-row">
+          <label class="lbl" for="scale">画質（再エンコード時）</label>
+          <select id="scale">
+            <option value="0" selected>元のまま</option>
+            <option value="1920">1080p まで縮小</option>
+            <option value="1280">720p まで縮小</option>
+          </select>
+        </div>
         <div class="hint">
           <b>おまかせ</b>: iPhone / カメラの MOV (H.264・HEVC) はそのままコピーするので一瞬で終わり、画質も劣化しません。コピーできない形式は自動で再エンコードに切り替えます。<br>
           <b>再エンコード</b>: どんな形式でも H.264 の MP4 にし直します。互換性は最高ですが、動画の長さに応じて時間がかかります。<br>
+          <b>画質</b>: 再エンコード時だけ効きます。<b>重い動画でタブが落ちる場合は 720p にすると通ります</b>（元より大きくはなりません）。<br>
           PC の Chrome / Edge は保存ボタンでファイル名・保存場所を指定できます。iPhone / iPad は「📤 共有して保存」→「ファイルに保存」で保存先を選べます。
         </div>
       </div>
@@ -180,6 +189,7 @@
     <!-- 実行 -->
     <div class="card" id="runCard" style="display:none;">
       <div class="filemeta" id="filemeta"></div>
+      <div class="alert warn" id="sizeWarn" style="display:none; margin:0.7rem 0 0;"></div>
       <div class="btn-row" style="margin-top:0.7rem;">
         <button class="btn btn-primary" id="runBtn">▶ MP4 に変換</button>
       </div>
@@ -221,8 +231,8 @@
    *   5. フォーマッタ — fmtBytes / fmtHMS / baseName / escapeHtml / inputExt
    *   6. ファイル保存ヘルパー — triggerDownload / saveBlobAs / shareBlob
    *   7. 動画メタ取得 — probeVideoMeta (再生用 <video> から長さ・解像度)
-   *   8. ffmpeg ローダ — loadFF (same-origin 同梱コアをロード) / toUint8
-   *   9. 変換コア — transcode (copy → 失敗時 encode へ自動フォールバック)
+   *   8. ffmpeg ローダ — loadFF (same-origin 同梱コアをロード)
+   *   9. 変換コア — mountInput / runOne / transcode (copy → 失敗時 encode へ自動フォールバック)
    *  10. UI 状態   — setFile / setBusy / showError / showResult
    *  11. メインアクション — run / saveResult / shareResult
    *  12. イベントハンドラ — setupHandlers
@@ -230,11 +240,21 @@
    * 変換方針:
    *   - copy: `-c copy -movflags +faststart`。H.264/HEVC+AAC の MOV を無劣化・高速で MP4 化。
    *           失敗（コピー不可なコーデック等）したら instance を作り直して encode で再挑戦。
-   *   - encode: libx264 + aac で確実に MP4 化（低速）。
+   *   - encode: libx264 + aac で確実に MP4 化（低速）。任意で長辺を縮小できる。
    *   ffmpeg.wasm は 0.12 系「単一スレッド」ビルドをリポジトリに同梱し same-origin で配信。
    *   SharedArrayBuffer / COOP・COEP が不要なので、素の静的配信 (Vercel) でも iOS Safari でも
    *   そのまま動く。core/worker は module worker として same-origin から読み込む。
-   *   出力は MEMFS 上に一括生成されるため、保存前に Blob 化する。
+   *
+   * メモリ設計（重いファイルでタブが落ちるのを防ぐ要点）:
+   *   wasm のヒープ上限は 2GB 固定（このビルドの maximum=32768 pages）。素直に実装すると
+   *     入力の arrayBuffer(JS) + MEMFS へのコピー(wasm) + 出力(wasm) + 出力(JS)
+   *   で入力サイズの約 4 倍を消費し、大きい動画で確実にタブが落ちる。そこで:
+   *     1. 入力は WORKERFS で File を「マウント」する。ffmpeg が必要な部分だけ
+   *        FileReaderSync で遅延読み込みするので、入力はヒープにも JS にも載らない。
+   *        （WORKERFS が使えない環境では従来の writeFile にフォールバック）
+   *     2. 出力を読み終えたら Blob を作る前に terminate() して wasm ヒープを丸ごと解放する。
+   *     3. それでも出力 1 本ぶんはメモリに載るため、原理的に不可能なサイズは
+   *        変換を始める前に断って、白画面のクラッシュではなく理由の説明を出す。
    */
   (function () {
     'use strict';
@@ -245,21 +265,45 @@
     const WASM_URL = new URL('./vendor/core/ffmpeg-core.wasm', document.baseURI).href;
     const MP4_MIME            = 'video/mp4';
     const MP4_PICKER_TYPE     = { description: 'MP4 動画', accept: { [MP4_MIME]: ['.mp4'] } };
-    const LARGE_FILE_WARN     = 400 * 1024 * 1024; // これ以上はメモリ注意の toast
     const TOAST_DURATION_MS   = 2400;
     const DOWNLOAD_CLEANUP_MS = 60 * 1000;
     const PROGRESS_FADE_MS    = 600;
+    const MOUNT_DIR           = '/mnt';  // WORKERFS のマウント先
     // 再エンコード設定（互換性重視: H.264 High + yuv420p + AAC）
     const ENCODE_ARGS = [
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-b:a', '192k',
     ];
 
+    // --- メモリしきい値 ---
+    // 実測 (358MB の MOV をコピー変換): ピークはブラウザ全体で入力の約 2.5 倍。
+    // 内訳は 出力(wasm ヒープ) + 出力(JS 側のコピー) + エンジン自体。
+    const MB = 1024 * 1024;
+    // iOS はタブごとのメモリ上限が厳しく、PC より早く落ちる
+    const IS_IOS = /iP(hone|ad|od)/.test(navigator.platform || '') ||
+                   /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    // これを超えたら「落ちるかもしれない」と事前に伝える（実行は止めない）
+    const SOFT_WARN_BYTES = (IS_IOS ? 350 : 800) * MB;
+    // コピーは出力≒入力サイズ。出力は wasm ヒープ (上限 2GB) に載せる必要があるため、
+    // これ以上のコピーはどの端末でも成功しない。
+    const COPY_HARD_LIMIT = 1400 * MB;
+    // WORKERFS はメモリを節約できるが遅い (実測 約2倍)。小さいファイルは従来どおり
+    // メモリに読み込んだ方が速いので、大きいときだけマウント経路を使う。
+    const MOUNT_MIN_BYTES = 32 * MB;
+    // wasm/JS のメモリ不足を表すメッセージ（コーデック非対応などの通常エラーと区別する）
+    const MEM_ERROR_RE = /out of memory|memory access|enlarge memory|allocation failed|oom/i;
+    const MEM_ADVICE =
+      'メモリが足りませんでした。「再エンコード」に切り替えて画質を 720p にすると、' +
+      '容量が小さくなるので変換できます。他のタブを閉じてから試すのも有効です。';
+
     // ===== 2. DOM 参照 =====
     const $ = (id) => document.getElementById(id);
     const dz         = $('dz');
     const fi         = $('fi');
-    const modeSelect = $('mode');
+    const modeSelect  = $('mode');
+    const scaleSelect = $('scale');
+    const sizeWarn    = $('sizeWarn');
     const runCard    = $('runCard');
     const filemeta   = $('filemeta');
     const runBtn     = $('runBtn');
@@ -426,10 +470,6 @@
     }
 
     // ===== 8. ffmpeg ローダ =====
-    async function toUint8(file) {
-      return new Uint8Array(await file.arrayBuffer());
-    }
-
     /**
      * ロード済み ffmpeg インスタンスを 1 つ作って返す。
      * 呼ぶたびに新しい instance を作るので MEMFS/メモリ/worker は毎回クリーン。
@@ -448,22 +488,74 @@
     }
 
     // ===== 9. 変換コア =====
-    /** 1 回分の変換を実行して MP4 Blob を返す。args は入出力の間に挟むコーデック指定。 */
+    /**
+     * 入力ファイルを ffmpeg から読める場所に用意して、そのパスを返す。
+     * 第一候補は WORKERFS マウント（ファイルをメモリに載せない）。
+     * 使えなければ writeFile にフォールバックする（メモリを食うが動く）。
+     */
+    async function mountInput(ff, file, inName) {
+      // 小さいファイルは素直に書き込む方が速い
+      if (file.size < MOUNT_MIN_BYTES) {
+        await ff.writeFile(inName, new Uint8Array(await file.arrayBuffer()));
+        return { path: inName, mounted: false };
+      }
+      try {
+        // WORKERFS はノード名に file.name を使うので、ASCII 名に包み直して
+        // パスを確実にする。File を Blob 参照で包むだけなので中身は読み込まれない。
+        const wrapped = new File([file], inName, { type: file.type || 'video/quicktime' });
+        await ff.createDir(MOUNT_DIR);
+        const ok = await ff.mount('WORKERFS', { files: [wrapped] }, MOUNT_DIR);
+        if (ok !== false) return { path: MOUNT_DIR + '/' + inName, mounted: true };
+      } catch (e) {
+        console.warn('WORKERFS mount failed, falling back to writeFile:', e);
+      }
+      // フォールバック: ファイル全体をメモリ経由で MEMFS に書く
+      await ff.writeFile(inName, new Uint8Array(await file.arrayBuffer()));
+      return { path: inName, mounted: false };
+    }
+
+    /**
+     * 1 回分の変換を実行して MP4 Blob を返す。args は入出力の間に挟むコーデック指定。
+     * 出力を読んだ直後に terminate() して wasm ヒープを解放してから Blob を作る
+     * （Blob 生成時に出力 2 本ぶんのメモリを抱えないようにするため）。
+     */
     async function runOne(ff, file, inName, out, args, onProgress) {
       const prog = ({ progress }) => { if (progress >= 0 && progress <= 1) onProgress(progress); };
       ff.on('progress', prog);
+      let u8 = null;
       try {
-        await ff.writeFile(inName, await toUint8(file));
+        const { path } = await mountInput(ff, file, inName);
         // -nostdin -y は 0.12 が自動付与
-        const code = await ff.exec(['-i', inName, ...args, '-movflags', '+faststart', out]);
+        const code = await ff.exec(['-i', path, ...args, '-movflags', '+faststart', out]);
         if (code !== 0) throw new Error('ffmpeg が異常終了しました (code ' + code + ')');
         const data = await ff.readFile(out);
-        const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+        u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
         if (!u8.length) throw new Error('出力が空でした');
-        return new Blob([u8.buffer], { type: MP4_MIME });
       } finally {
         ff.off('progress', prog);
       }
+      // Blob を作る前に wasm 側のメモリを丸ごと返す
+      try { ff.terminate(); } catch (_) {}
+      const blob = new Blob([u8], { type: MP4_MIME });
+      u8 = null;
+      return blob;
+    }
+
+    /**
+     * 再エンコード用の引数。長辺を maxSide まで縮小する。
+     *
+     * 縮小判定は ffmpeg 側の式で行う。ブラウザが再生できない形式 (HEVC や ProRes など) では
+     * 解像度を JS から取得できず、JS 側で判定すると「重い 4K 動画なのに縮小されない」という
+     * 一番困るケースを踏むため。式の意味:
+     *   横長なら 幅 = min(元の幅, maxSide) / 縦を自動 (-2)、縦長ならその逆。
+     *   min を使うので元より大きくはならず、trunc(../2)*2 で H.264 が要求する偶数に揃える。
+     * 式中のカンマはシングルクォートで保護している (ffmpeg のフィルタ記法)。
+     */
+    function encodeArgs(maxSide) {
+      if (!maxSide) return ENCODE_ARGS;
+      const even = (v) => `trunc(min(${v},${maxSide})/2)*2`;
+      const vf = `scale=w='if(gte(iw,ih),${even('iw')},-2)':h='if(gte(iw,ih),-2,${even('ih')})'`;
+      return ENCODE_ARGS.concat(['-vf', vf]);
     }
 
     /**
@@ -472,7 +564,7 @@
      * mode==='encode': 最初から再エンコード。
      * @returns {Promise<{blob:Blob, reencoded:boolean}>}
      */
-    async function transcode(file, mode, onStatus) {
+    async function transcode(file, mode, maxSide, onStatus) {
       const inName = 'input' + inputExt(file.name);
       const out    = 'output.mp4';
       const dur    = (currentMeta && currentMeta.duration) || 0;
@@ -490,7 +582,12 @@
             mkProg('コピー変換中…（無劣化）', 10, 98));
           return { blob, reencoded: false };
         } catch (copyErr) {
-          console.warn('copy path failed, will re-encode:', copyErr);
+          console.warn('copy path failed:', copyErr);
+          // メモリ不足なら、同じ解像度で再エンコードしても結局落ちるだけなので
+          // 自動フォールバックせず、対処法を伝えて終わる。
+          if (MEM_ERROR_RE.test(String(copyErr && copyErr.message || copyErr))) {
+            throw new Error(MEM_ADVICE);
+          }
         } finally {
           try { ff.terminate(); } catch (_) {}
         }
@@ -500,7 +597,7 @@
         const ff2 = await loadFF(onStatus);
         try {
           onStatus(8, '動画を読み込み中…');
-          const blob = await runOne(ff2, file, inName, out, ENCODE_ARGS,
+          const blob = await runOne(ff2, file, inName, out, encodeArgs(maxSide),
             mkProg('再エンコード中…', 10, 98));
           return { blob, reencoded: true };
         } finally {
@@ -512,7 +609,7 @@
       const ff = await loadFF(onStatus);
       try {
         onStatus(8, '動画を読み込み中…');
-        const blob = await runOne(ff, file, inName, out, ENCODE_ARGS,
+        const blob = await runOne(ff, file, inName, out, encodeArgs(maxSide),
           mkProg('再エンコード中…', 10, 98));
         return { blob, reencoded: true };
       } finally {
@@ -532,10 +629,7 @@
       progress.classList.add('hidden');
       pbar.style.width = '0%';
       removeError();
-
-      if (file.size > LARGE_FILE_WARN) {
-        toast(`大きな動画 (${fmtBytes(file.size)}) です。端末のメモリ次第では失敗することがあります`);
-      }
+      updateSizeWarning();
 
       // メタ情報 (長さ・解像度) を裏で取得して表示に足す
       const meta = await probeVideoMeta(file);
@@ -551,10 +645,46 @@
       }
     }
 
+    /**
+     * 重いファイルの事前警告。変換前に出しておくことで、いきなりタブが落ちる代わりに
+     * 「なぜ危ないか・どうすれば通るか」を先に伝える。
+     */
+    function updateSizeWarning() {
+      if (!currentFile) { sizeWarn.style.display = 'none'; return; }
+      const size = currentFile.size;
+      const copyMode = modeSelect.value !== 'encode';
+
+      if (copyMode && size > COPY_HARD_LIMIT) {
+        sizeWarn.className = 'alert err';
+        sizeWarn.innerHTML =
+          `⚠️ この動画 (${fmtBytes(size)}) は<b>コピー変換では大きすぎます</b>。` +
+          'ブラウザの変換エンジンは合計 2GB までしか扱えず、コピーは元と同じサイズの' +
+          '出力を作るため確実に失敗します。<br>' +
+          '<b>「再エンコード」に切り替え、画質を 1080p か 720p に下げてください。</b>' +
+          '容量が大幅に小さくなるので変換できます（時間はかかります）。';
+        sizeWarn.style.display = '';
+        return;
+      }
+      if (size > SOFT_WARN_BYTES) {
+        sizeWarn.className = 'alert warn';
+        sizeWarn.innerHTML =
+          `⚠️ 大きな動画 (${fmtBytes(size)}) です。` +
+          (IS_IOS
+            ? 'iPhone / iPad はタブのメモリ上限が厳しいため、途中で真っ白になって失敗することがあります。'
+            : '端末のメモリ次第では失敗することがあります。') +
+          '<br>失敗する場合は<b>「再エンコード」＋画質 720p</b> にすると通りやすくなります。' +
+          '他のタブを閉じておくのも効果があります。';
+        sizeWarn.style.display = '';
+        return;
+      }
+      sizeWarn.style.display = 'none';
+    }
+
     function setBusy(isBusy) {
       busy = isBusy;
       runBtn.disabled = isBusy;
       modeSelect.disabled = isBusy;
+      scaleSelect.disabled = isBusy;
       dz.style.pointerEvents = isBusy ? 'none' : '';
       dz.style.opacity       = isBusy ? '0.6'  : '';
     }
@@ -612,14 +742,23 @@
       if (!currentFile || busy) return;
       const file = currentFile;
       const mode = modeSelect.value === 'encode' ? 'encode' : 'copy';
+      const maxSide = parseInt(scaleSelect.value, 10) || 0;
       const suggestedName = baseName(file.name) + '.mp4';
+
+      // 原理的に不可能なサイズは、始めずに理由を出す（タブが落ちるのを防ぐ）
+      if (mode === 'copy' && file.size > COPY_HARD_LIMIT) {
+        showError(new Error(
+          `この動画 (${fmtBytes(file.size)}) はコピー変換には大きすぎます。` +
+          '「再エンコード」に切り替えて画質を 720p か 1080p に下げてください。'));
+        return;
+      }
 
       setBusy(true);
       clearResult();
       removeError();
       try {
         setProgress(2, '準備中…');
-        const { blob, reencoded } = await transcode(file, mode, setProgress);
+        const { blob, reencoded } = await transcode(file, mode, maxSide, setProgress);
         setProgress(100, '完了');
         showResult(blob, suggestedName, reencoded);
         toast(reencoded ? '再エンコードで変換しました' : '無劣化で変換しました');
@@ -628,7 +767,7 @@
         console.error(e);
         setProgress(0, '');
         progress.classList.add('hidden');
-        showError(e);
+        showError(MEM_ERROR_RE.test(String(e && e.message || e)) ? new Error(MEM_ADVICE) : e);
       } finally {
         setBusy(false);
       }
@@ -664,6 +803,9 @@
         const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
         if (f) setFile(f);
       });
+
+      // 変換方法を変えると「大きすぎる」判定も変わるので警告を出し直す
+      modeSelect.addEventListener('change', updateSizeWarning);
 
       runBtn.addEventListener('click', run);
       saveBtn.addEventListener('click', saveResult);
