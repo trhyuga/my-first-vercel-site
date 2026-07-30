@@ -207,9 +207,9 @@
 
   <div class="toast" id="toast"></div>
 
-  <!-- ffmpeg.wasm (UMD グローバル FFmpeg) -->
-  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
-  <script>
+  <!-- ffmpeg.wasm 0.12 (single-thread) — リポジトリ同梱で same-origin 配信 -->
+  <script type="module">
+  import { FFmpeg } from './vendor/ffmpeg/index.js';
   /*
    * MOV→MP4 変換ツール — 全処理ブラウザ内で完結
    *
@@ -221,7 +221,7 @@
    *   5. フォーマッタ — fmtBytes / fmtHMS / baseName / escapeHtml / inputExt
    *   6. ファイル保存ヘルパー — triggerDownload / saveBlobAs / shareBlob
    *   7. 動画メタ取得 — probeVideoMeta (再生用 <video> から長さ・解像度)
-   *   8. ffmpeg ローダ — ensureFFmpegLib / createLoadedFFmpeg (CDN フォールバック)
+   *   8. ffmpeg ローダ — loadFF (same-origin 同梱コアをロード) / toUint8
    *   9. 変換コア — transcode (copy → 失敗時 encode へ自動フォールバック)
    *  10. UI 状態   — setFile / setBusy / showError / showResult
    *  11. メインアクション — run / saveResult / shareResult
@@ -231,22 +231,18 @@
    *   - copy: `-c copy -movflags +faststart`。H.264/HEVC+AAC の MOV を無劣化・高速で MP4 化。
    *           失敗（コピー不可なコーデック等）したら instance を作り直して encode で再挑戦。
    *   - encode: libx264 + aac で確実に MP4 化（低速）。
-   *   ffmpeg.wasm は単一スレッド版 0.11 系を使用（SharedArrayBuffer 不要＝COOP/COEP なしの
-   *   静的配信でそのまま動く）。出力は MEMFS 上に一括生成されるため、保存前に Blob 化する。
+   *   ffmpeg.wasm は 0.12 系「単一スレッド」ビルドをリポジトリに同梱し same-origin で配信。
+   *   SharedArrayBuffer / COOP・COEP が不要なので、素の静的配信 (Vercel) でも iOS Safari でも
+   *   そのまま動く。core/worker は module worker として same-origin から読み込む。
+   *   出力は MEMFS 上に一括生成されるため、保存前に Blob 化する。
    */
   (function () {
     'use strict';
 
     // ===== 1. 設定値 =====
-    const FFMPEG_LIB_URLS = [
-      'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js',
-      'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js',
-    ];
-    // core は js/wasm/worker が同一ディレクトリに揃っている必要があるため、URL は「基点」で持つ
-    const CORE_URLS = [
-      'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-      'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-    ];
+    // 変換エンジン (0.12 単一スレッド) は同梱ファイルを same-origin で読む。
+    const CORE_URL = new URL('./vendor/core/ffmpeg-core.js',  document.baseURI).href;
+    const WASM_URL = new URL('./vendor/core/ffmpeg-core.wasm', document.baseURI).href;
     const MP4_MIME            = 'video/mp4';
     const MP4_PICKER_TYPE     = { description: 'MP4 動画', accept: { [MP4_MIME]: ['.mp4'] } };
     const LARGE_FILE_WARN     = 400 * 1024 * 1024; // これ以上はメモリ注意の toast
@@ -430,121 +426,97 @@
     }
 
     // ===== 8. ffmpeg ローダ =====
-    function loadScript(src) {
-      return new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = src;
-        s.onload = resolve;
-        s.onerror = () => reject(new Error('script load failed: ' + src));
-        document.head.appendChild(s);
-      });
-    }
-
-    async function ensureFFmpegLib() {
-      if (window.FFmpeg && window.FFmpeg.createFFmpeg) return;
-      for (const url of FFMPEG_LIB_URLS) {
-        try { await loadScript(url); } catch (_) {}
-        if (window.FFmpeg && window.FFmpeg.createFFmpeg) return;
-      }
-      throw new Error('変換エンジン(ライブラリ)を読み込めませんでした。ネットワークを確認してください。');
+    async function toUint8(file) {
+      return new Uint8Array(await file.arrayBuffer());
     }
 
     /**
      * ロード済み ffmpeg インスタンスを 1 つ作って返す。
-     * core の CDN を順に試す。呼ぶたびに新しい instance を作るので MEMFS/メモリは毎回クリーン。
+     * 呼ぶたびに新しい instance を作るので MEMFS/メモリ/worker は毎回クリーン。
+     * 単一スレッド版なので SharedArrayBuffer 不要、core/worker はすべて same-origin。
      */
-    async function createLoadedFFmpeg(onStatus) {
-      await ensureFFmpegLib();
-      const { createFFmpeg } = window.FFmpeg;
-      let lastErr = null;
-      for (const corePath of CORE_URLS) {
-        const ff = createFFmpeg({ log: false, corePath });
-        try {
-          if (onStatus) onStatus(4, '変換エンジンを読み込み中…（初回は数十MB・以降はキャッシュ）');
-          await ff.load();
-          return ff;
-        } catch (e) {
-          lastErr = e;
-          console.warn('ffmpeg core load failed:', corePath, e);
-        }
+    async function loadFF(onStatus) {
+      const ff = new FFmpeg();
+      if (onStatus) onStatus(4, '変換エンジンを準備中…（初回のみ読み込み・以降はキャッシュ）');
+      try {
+        await ff.load({ coreURL: CORE_URL, wasmURL: WASM_URL });
+      } catch (e) {
+        try { ff.terminate(); } catch (_) {}
+        throw new Error('変換エンジンを読み込めませんでした（ブラウザが未対応の可能性があります）: ' + (e && e.message || e));
       }
-      throw new Error('変換エンジン(コア)を読み込めませんでした: ' + (lastErr && lastErr.message || ''));
+      return ff;
     }
 
     // ===== 9. 変換コア =====
-    function readOutput(ff, name) {
-      const data = ff.FS('readFile', name);
-      if (!data || data.length === 0) throw new Error('出力が空でした');
-      return new Blob([data.buffer], { type: MP4_MIME });
-    }
-
-    function safeExit(ff) {
-      try { ff.exit(); } catch (_) {} // wasm メモリ解放。既に落ちていても無視。
-    }
-
-    async function runEncode(ff, inName, out, dur, onStatus) {
-      ff.setProgress(({ ratio }) => {
-        if (ratio >= 0 && ratio <= 1) {
-          const durLabel = dur ? ` (${fmtHMS(ratio * dur)} / ${fmtHMS(dur)})` : '';
-          onStatus(10 + ratio * 88, `再エンコード中…${durLabel}`);
-        }
-      });
-      await ff.run('-i', inName, ...ENCODE_ARGS, '-movflags', '+faststart', out);
+    /** 1 回分の変換を実行して MP4 Blob を返す。args は入出力の間に挟むコーデック指定。 */
+    async function runOne(ff, file, inName, out, args, onProgress) {
+      const prog = ({ progress }) => { if (progress >= 0 && progress <= 1) onProgress(progress); };
+      ff.on('progress', prog);
+      try {
+        await ff.writeFile(inName, await toUint8(file));
+        // -nostdin -y は 0.12 が自動付与
+        const code = await ff.exec(['-i', inName, ...args, '-movflags', '+faststart', out]);
+        if (code !== 0) throw new Error('ffmpeg が異常終了しました (code ' + code + ')');
+        const data = await ff.readFile(out);
+        const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+        if (!u8.length) throw new Error('出力が空でした');
+        return new Blob([u8.buffer], { type: MP4_MIME });
+      } finally {
+        ff.off('progress', prog);
+      }
     }
 
     /**
      * file → MP4 Blob。
-     * mode==='copy': まずストリームコピーを試し、ダメなら instance を作り直して再エンコード。
+     * mode==='copy': まずストリームコピー (無劣化) を試し、ダメなら instance を作り直して再エンコード。
      * mode==='encode': 最初から再エンコード。
      * @returns {Promise<{blob:Blob, reencoded:boolean}>}
      */
     async function transcode(file, mode, onStatus) {
-      const { fetchFile } = window.FFmpeg;
       const inName = 'input' + inputExt(file.name);
       const out    = 'output.mp4';
       const dur    = (currentMeta && currentMeta.duration) || 0;
+      const mkProg = (label, lo, hi) => (p) => {
+        const l = dur ? `${label} (${fmtHMS(p * dur)} / ${fmtHMS(dur)})` : label;
+        onStatus(lo + p * (hi - lo), l);
+      };
 
       // ---- copy 経路 ----
       if (mode === 'copy') {
-        let ff = await createLoadedFFmpeg(onStatus);
+        const ff = await loadFF(onStatus);
         try {
           onStatus(8, '動画を読み込み中…');
-          ff.FS('writeFile', inName, await fetchFile(file));
-          ff.setProgress(({ ratio }) => {
-            if (ratio >= 0 && ratio <= 1) onStatus(10 + ratio * 88, 'コピー変換中…（無劣化）');
-          });
-          await ff.run('-i', inName, '-c', 'copy', '-movflags', '+faststart', out);
-          const blob = readOutput(ff, out);
+          const blob = await runOne(ff, file, inName, out, ['-c', 'copy'],
+            mkProg('コピー変換中…（無劣化）', 10, 98));
           return { blob, reencoded: false };
         } catch (copyErr) {
           console.warn('copy path failed, will re-encode:', copyErr);
-          safeExit(ff); // コピー失敗で wasm が中断状態になり得るので破棄
+        } finally {
+          try { ff.terminate(); } catch (_) {}
         }
         // ---- copy 失敗 → 新しい instance で再エンコード ----
         onStatus(6, 'コピーできない形式でした。再エンコードに切り替えます…');
         toast('コピー不可の形式のため再エンコードします');
-        const ff2 = await createLoadedFFmpeg(onStatus);
+        const ff2 = await loadFF(onStatus);
         try {
           onStatus(8, '動画を読み込み中…');
-          ff2.FS('writeFile', inName, await fetchFile(file));
-          await runEncode(ff2, inName, out, dur, onStatus);
-          const blob = readOutput(ff2, out);
+          const blob = await runOne(ff2, file, inName, out, ENCODE_ARGS,
+            mkProg('再エンコード中…', 10, 98));
           return { blob, reencoded: true };
         } finally {
-          safeExit(ff2);
+          try { ff2.terminate(); } catch (_) {}
         }
       }
 
       // ---- encode 経路 ----
-      const ff = await createLoadedFFmpeg(onStatus);
+      const ff = await loadFF(onStatus);
       try {
         onStatus(8, '動画を読み込み中…');
-        ff.FS('writeFile', inName, await fetchFile(file));
-        await runEncode(ff, inName, out, dur, onStatus);
-        const blob = readOutput(ff, out);
+        const blob = await runOne(ff, file, inName, out, ENCODE_ARGS,
+          mkProg('再エンコード中…', 10, 98));
         return { blob, reencoded: true };
       } finally {
-        safeExit(ff);
+        try { ff.terminate(); } catch (_) {}
       }
     }
 
