@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0ea5e9" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>MOV→MP4 変換 | ひゅうがのTR-Labo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', 'Hiragino Sans', 'Noto Sans JP', Arial, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      min-height: 100dvh;
+    }
+    a { color: inherit; text-decoration: none; }
+
+    header.site {
+      background: rgba(255,255,255,0.88);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e2e8f0;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+      position: sticky; top: 0; z-index: 20;
+    }
+    .brand {
+      max-width: 760px; margin: 0 auto; padding: 0.7rem 1rem;
+      display: flex; align-items: center; gap: 0.6rem;
+    }
+    .back-btn {
+      width: 36px; height: 36px; border-radius: 9px;
+      border: 1px solid #e2e8f0; background: #fff; color: #475569;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.1rem; -webkit-tap-highlight-color: transparent;
+    }
+    .back-btn:active { background: #f1f5f9; }
+    .logo {
+      width: 34px; height: 34px; border-radius: 9px;
+      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800; font-size: 0.78rem;
+      box-shadow: 0 4px 10px rgba(14,165,233,0.25);
+    }
+    .brand-name { font-weight: 700; font-size: 1rem; }
+
+    main { max-width: 760px; margin: 0 auto;
+      padding: 1.1rem 1rem calc(2rem + env(safe-area-inset-bottom)); }
+
+    .hero { margin-bottom: 1.1rem; }
+    .hero h1 { font-size: 1.35rem; line-height: 1.4; font-weight: 800; }
+    .hero h1 .accent { color: #0ea5e9; }
+    .hero p { margin-top: 0.5rem; color: #475569; font-size: 0.9rem; line-height: 1.7; }
+
+    .card {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 16px;
+      padding: 1rem; margin-bottom: 1rem;
+      box-shadow: 0 1px 2px rgba(15,23,42,0.04);
+    }
+
+    .dropzone {
+      border: 2px dashed #cbd5e1; border-radius: 16px; background: #fff;
+      padding: 1.6rem 1rem; text-align: center; cursor: pointer;
+      transition: border-color .15s, background .15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .dropzone:active, .dropzone.drag { border-color: #0ea5e9; background: #f0f9ff; }
+    .dropzone .icon { font-size: 2rem; }
+    .dropzone p { margin-top: 0.4rem; font-size: 0.92rem; }
+    .dropzone .sub { color: #64748b; font-size: 0.78rem; margin-top: 0.3rem; }
+
+    .opts { display: flex; flex-direction: column; gap: 0.8rem; }
+    .opt-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    .opt-row label.lbl { font-size: 0.86rem; color: #334155; font-weight: 600; }
+    select {
+      font: inherit; font-size: 0.88rem; padding: 0.4rem 0.6rem;
+      border: 1px solid #cbd5e1; border-radius: 9px; background: #fff; color: #0f172a;
+    }
+    .hint { color: #64748b; font-size: 0.78rem; line-height: 1.6; }
+
+    .btn {
+      appearance: none; border: 0; border-radius: 11px; padding: 0.7rem 1rem;
+      font: inherit; font-weight: 700; font-size: 0.92rem; cursor: pointer;
+      min-height: 48px; display: inline-flex; align-items: center;
+      justify-content: center; gap: 0.4rem; -webkit-tap-highlight-color: transparent;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: linear-gradient(135deg, #0ea5e9, #06b6d4); color: #fff;
+      box-shadow: 0 4px 12px rgba(14,165,233,0.3); }
+    .btn-primary:active { transform: translateY(1px); }
+    .btn-secondary { background: #f1f5f9; color: #0f172a; border: 1px solid #e2e8f0; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+
+    .progress { margin-top: 0.8rem; }
+    .progress.hidden { display: none; }
+    .pbar-track { height: 8px; background: #e2e8f0; border-radius: 99px; overflow: hidden; }
+    .pbar-fill { height: 100%; width: 0%; background: linear-gradient(90deg,#0ea5e9,#06b6d4);
+      border-radius: 99px; transition: width .2s; }
+    .pstatus { margin-top: 0.45rem; font-size: 0.82rem; color: #475569; }
+
+    .filemeta { font-size: 0.85rem; color: #334155; }
+    .filemeta b { color: #0f172a; }
+
+    .result.hidden { display: none; }
+    .result h3 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+    video.preview {
+      width: 100%; max-height: 46vh; border-radius: 11px; background: #000;
+      margin: 0.2rem 0 0.9rem; display: block;
+    }
+
+    .alert { border-radius: 11px; padding: 0.7rem 0.85rem; font-size: 0.85rem;
+      line-height: 1.6; margin-bottom: 0.8rem; }
+    .alert.warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+    .alert.err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .alert.info { background: #f0f9ff; border: 1px solid #bae6fd; color: #075985; }
+    .alert.hidden { display: none; }
+
+    .footer-note { text-align: center; color: #64748b; font-size: 0.78rem;
+      margin-top: 0.5rem; line-height: 1.7; }
+
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%) translateY(20px);
+      bottom: calc(1.2rem + env(safe-area-inset-bottom));
+      background: #0f172a; color: #fff; padding: 0.6rem 1rem; border-radius: 11px;
+      font-size: 0.85rem; opacity: 0; pointer-events: none;
+      transition: opacity .2s, transform .2s; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="brand">
+      <a class="back-btn" href="../" aria-label="戻る">←</a>
+      <div class="logo">TR</div>
+      <div class="brand-name">🎬 MOV→MP4 変換</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1><span class="accent">MOV</span> を、<span class="accent">MP4</span> へ。</h1>
+      <p>iPhone やカメラの MOV 動画をドロップすると、端末内で MP4 に変換します。サーバーには一切送信されません。</p>
+    </section>
+
+    <div class="alert info" id="privacyNote">
+      🔒 <b>動画はこの端末から一切送信されません。</b> すべてブラウザ内で処理します。
+    </div>
+
+    <!-- ドロップゾーン -->
+    <div class="dropzone" id="dz">
+      <input type="file" id="fi" accept=".mov,.m4v,.avi,.mkv,.webm,.mp4,video/quicktime,video/*" hidden />
+      <div class="icon">🎬</div>
+      <p><b>タップして動画を選択 / ドラッグ&ドロップ</b></p>
+      <div class="sub">MOV 推奨 (M4V / AVI / MKV / WebM 等も可)</div>
+    </div>
+
+    <!-- オプション -->
+    <div class="card">
+      <div class="opts">
+        <div class="opt-row">
+          <label class="lbl" for="mode">変換方法</label>
+          <select id="mode">
+            <option value="copy" selected>おまかせ（高速・無劣化コピー）</option>
+            <option value="encode">再エンコード（確実・時間がかかる）</option>
+          </select>
+        </div>
+        <div class="hint">
+          <b>おまかせ</b>: iPhone / カメラの MOV (H.264・HEVC) はそのままコピーするので一瞬で終わり、画質も劣化しません。コピーできない形式は自動で再エンコードに切り替えます。<br>
+          <b>再エンコード</b>: どんな形式でも H.264 の MP4 にし直します。互換性は最高ですが、動画の長さに応じて時間がかかります。<br>
+          PC の Chrome / Edge は保存ボタンでファイル名・保存場所を指定できます。iPhone / iPad は「📤 共有して保存」→「ファイルに保存」で保存先を選べます。
+        </div>
+      </div>
+    </div>
+
+    <!-- 実行 -->
+    <div class="card" id="runCard" style="display:none;">
+      <div class="filemeta" id="filemeta"></div>
+      <div class="btn-row" style="margin-top:0.7rem;">
+        <button class="btn btn-primary" id="runBtn">▶ MP4 に変換</button>
+      </div>
+      <div class="progress hidden" id="progress">
+        <div class="pbar-track"><div class="pbar-fill" id="pbar"></div></div>
+        <div class="pstatus" id="pstatus"></div>
+      </div>
+    </div>
+
+    <!-- MP4 結果 -->
+    <div class="card result hidden" id="result">
+      <h3>✅ MP4 変換完了</h3>
+      <video class="preview" id="preview" controls playsinline></video>
+      <div class="filemeta" id="resultmeta" style="margin:0 0 0.9rem;"></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="shareBtn" style="display:none;">📤 共有して保存</button>
+        <button class="btn btn-primary" id="saveBtn" style="display:none;">⬇ 保存（場所を選ぶ）</button>
+        <button class="btn btn-secondary" id="dlBtn">⬇ ダウンロード</button>
+      </div>
+      <div class="hint" id="saveHint" style="margin-top:0.6rem;"></div>
+    </div>
+
+    <p class="footer-note">すべて端末内処理・動画のサーバー送信なし<br>変換エンジン: ffmpeg.wasm ／ ひゅうがのTR-Labo</p>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- ffmpeg.wasm (UMD グローバル FFmpeg) -->
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+  <script>
+  /*
+   * MOV→MP4 変換ツール — 全処理ブラウザ内で完結
+   *
+   * モジュール構成 (このファイル内、上から):
+   *   1. 設定値      — CDN・しきい値をここに集約
+   *   2. DOM 参照
+   *   3. 状態
+   *   4. UI ユーティリティ — toast / setProgress
+   *   5. フォーマッタ — fmtBytes / fmtHMS / baseName / escapeHtml / inputExt
+   *   6. ファイル保存ヘルパー — triggerDownload / saveBlobAs / shareBlob
+   *   7. 動画メタ取得 — probeVideoMeta (再生用 <video> から長さ・解像度)
+   *   8. ffmpeg ローダ — ensureFFmpegLib / createLoadedFFmpeg (CDN フォールバック)
+   *   9. 変換コア — transcode (copy → 失敗時 encode へ自動フォールバック)
+   *  10. UI 状態   — setFile / setBusy / showError / showResult
+   *  11. メインアクション — run / saveResult / shareResult
+   *  12. イベントハンドラ — setupHandlers
+   *
+   * 変換方針:
+   *   - copy: `-c copy -movflags +faststart`。H.264/HEVC+AAC の MOV を無劣化・高速で MP4 化。
+   *           失敗（コピー不可なコーデック等）したら instance を作り直して encode で再挑戦。
+   *   - encode: libx264 + aac で確実に MP4 化（低速）。
+   *   ffmpeg.wasm は単一スレッド版 0.11 系を使用（SharedArrayBuffer 不要＝COOP/COEP なしの
+   *   静的配信でそのまま動く）。出力は MEMFS 上に一括生成されるため、保存前に Blob 化する。
+   */
+  (function () {
+    'use strict';
+
+    // ===== 1. 設定値 =====
+    const FFMPEG_LIB_URLS = [
+      'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js',
+      'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js',
+    ];
+    // core は js/wasm/worker が同一ディレクトリに揃っている必要があるため、URL は「基点」で持つ
+    const CORE_URLS = [
+      'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+      'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+    ];
+    const MP4_MIME            = 'video/mp4';
+    const MP4_PICKER_TYPE     = { description: 'MP4 動画', accept: { [MP4_MIME]: ['.mp4'] } };
+    const LARGE_FILE_WARN     = 400 * 1024 * 1024; // これ以上はメモリ注意の toast
+    const TOAST_DURATION_MS   = 2400;
+    const DOWNLOAD_CLEANUP_MS = 60 * 1000;
+    const PROGRESS_FADE_MS    = 600;
+    // 再エンコード設定（互換性重視: H.264 High + yuv420p + AAC）
+    const ENCODE_ARGS = [
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '192k',
+    ];
+
+    // ===== 2. DOM 参照 =====
+    const $ = (id) => document.getElementById(id);
+    const dz         = $('dz');
+    const fi         = $('fi');
+    const modeSelect = $('mode');
+    const runCard    = $('runCard');
+    const filemeta   = $('filemeta');
+    const runBtn     = $('runBtn');
+    const progress   = $('progress');
+    const pbar       = $('pbar');
+    const pstatus    = $('pstatus');
+    const resultBox  = $('result');
+    const preview    = $('preview');
+    const resultmeta = $('resultmeta');
+    const dlBtn      = $('dlBtn');
+    const saveBtn    = $('saveBtn');
+    const shareBtn   = $('shareBtn');
+    const saveHint   = $('saveHint');
+    const toastEl    = $('toast');
+
+    // ===== 3. 状態 =====
+    let currentFile   = null;
+    let currentMeta   = null; // {duration,width,height} or null
+    let outBlob       = null;
+    let outName       = '';
+    let previewUrl    = null;
+    let busy          = false;
+    let toastTimer    = null;
+
+    // ===== 4. UI ユーティリティ =====
+    function toast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove('show'), TOAST_DURATION_MS);
+    }
+
+    function setProgress(pct, label) {
+      progress.classList.remove('hidden');
+      if (pct != null) pbar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+      if (label != null) pstatus.textContent = label;
+    }
+
+    function hideProgressSoon() {
+      setTimeout(() => progress.classList.add('hidden'), PROGRESS_FADE_MS);
+    }
+
+    // ===== 5. フォーマッタ =====
+    function fmtBytes(n) {
+      if (!isFinite(n) || n < 0) return '0 B';
+      if (n < 1024) return Math.round(n) + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+      return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    }
+
+    function fmtHMS(sec) {
+      if (!isFinite(sec) || sec < 0) sec = 0;
+      sec = Math.round(sec);
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      const pad2 = (x) => String(x).padStart(2, '0');
+      return h > 0 ? `${h}:${pad2(m)}:${pad2(s)}` : `${m}:${pad2(s)}`;
+    }
+
+    function baseName(name) {
+      const stripped = name.replace(/\.[^.]+$/, '');
+      return stripped || name;
+    }
+
+    // ffmpeg の MEMFS 入力名。元の拡張子を残すとデマクサ推定が効くので活用しつつ、
+    // ASCII 英数字以外は落として安全なファイル名にする。
+    function inputExt(name) {
+      const m = /\.([A-Za-z0-9]{1,5})$/.exec(name);
+      return m ? '.' + m[1].toLowerCase() : '.mov';
+    }
+
+    function escapeHtml(s) {
+      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+      return String(s).replace(/[&<>"']/g, (c) => map[c]);
+    }
+
+    // ===== 6. ファイル保存ヘルパー =====
+    function triggerDownload(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, DOWNLOAD_CLEANUP_MS);
+    }
+
+    function canShareFile(name, mime) {
+      if (!navigator.canShare) return false;
+      try {
+        const probe = new File([new Blob([])], name, { type: mime });
+        return navigator.canShare({ files: [probe] });
+      } catch (_) {
+        return false;
+      }
+    }
+
+    async function saveBlobAs(blob, name, pickerType) {
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({ suggestedName: name, types: [pickerType] });
+          const w = await handle.createWritable();
+          try {
+            await w.write(blob);
+            await w.close();
+            toast('保存しました');
+            return 'saved';
+          } catch (e) {
+            try { await w.abort(); } catch (_) {}
+            throw e;
+          }
+        } catch (e) {
+          if (e && e.name === 'AbortError') return 'cancelled';
+          console.warn('showSaveFilePicker failed, falling back to download:', e);
+        }
+      }
+      triggerDownload(blob, name);
+      return 'downloaded';
+    }
+
+    async function shareBlob(blob, name, mime) {
+      const file = new File([blob], name, { type: mime });
+      const data = { files: [file] }; // title/text は付けない (iOS で .txt 化する罠回避)
+      if (navigator.canShare && navigator.canShare(data)) {
+        try {
+          await navigator.share(data);
+          toast('保存しました');
+          return true;
+        } catch (e) {
+          if (e && e.name === 'AbortError') return false;
+          console.warn('share failed, falling back to download:', e);
+        }
+      }
+      triggerDownload(blob, name);
+      toast('ダウンロードしました');
+      return false;
+    }
+
+    // ===== 7. 動画メタ取得 =====
+    function probeVideoMeta(file) {
+      return new Promise((resolve) => {
+        const url = URL.createObjectURL(file);
+        const v = document.createElement('video');
+        v.preload = 'metadata';
+        let done = false;
+        const finish = (meta) => {
+          if (done) return;
+          done = true;
+          URL.revokeObjectURL(url);
+          resolve(meta);
+        };
+        v.onloadedmetadata = () => finish({
+          duration: isFinite(v.duration) ? v.duration : 0,
+          width: v.videoWidth || 0,
+          height: v.videoHeight || 0,
+        });
+        v.onerror = () => finish(null); // ブラウザが再生できない形式 (ProRes 等) は null
+        setTimeout(() => finish(null), 4000); // 保険
+        v.src = url;
+      });
+    }
+
+    // ===== 8. ffmpeg ローダ =====
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('script load failed: ' + src));
+        document.head.appendChild(s);
+      });
+    }
+
+    async function ensureFFmpegLib() {
+      if (window.FFmpeg && window.FFmpeg.createFFmpeg) return;
+      for (const url of FFMPEG_LIB_URLS) {
+        try { await loadScript(url); } catch (_) {}
+        if (window.FFmpeg && window.FFmpeg.createFFmpeg) return;
+      }
+      throw new Error('変換エンジン(ライブラリ)を読み込めませんでした。ネットワークを確認してください。');
+    }
+
+    /**
+     * ロード済み ffmpeg インスタンスを 1 つ作って返す。
+     * core の CDN を順に試す。呼ぶたびに新しい instance を作るので MEMFS/メモリは毎回クリーン。
+     */
+    async function createLoadedFFmpeg(onStatus) {
+      await ensureFFmpegLib();
+      const { createFFmpeg } = window.FFmpeg;
+      let lastErr = null;
+      for (const corePath of CORE_URLS) {
+        const ff = createFFmpeg({ log: false, corePath });
+        try {
+          if (onStatus) onStatus(4, '変換エンジンを読み込み中…（初回は数十MB・以降はキャッシュ）');
+          await ff.load();
+          return ff;
+        } catch (e) {
+          lastErr = e;
+          console.warn('ffmpeg core load failed:', corePath, e);
+        }
+      }
+      throw new Error('変換エンジン(コア)を読み込めませんでした: ' + (lastErr && lastErr.message || ''));
+    }
+
+    // ===== 9. 変換コア =====
+    function readOutput(ff, name) {
+      const data = ff.FS('readFile', name);
+      if (!data || data.length === 0) throw new Error('出力が空でした');
+      return new Blob([data.buffer], { type: MP4_MIME });
+    }
+
+    function safeExit(ff) {
+      try { ff.exit(); } catch (_) {} // wasm メモリ解放。既に落ちていても無視。
+    }
+
+    async function runEncode(ff, inName, out, dur, onStatus) {
+      ff.setProgress(({ ratio }) => {
+        if (ratio >= 0 && ratio <= 1) {
+          const durLabel = dur ? ` (${fmtHMS(ratio * dur)} / ${fmtHMS(dur)})` : '';
+          onStatus(10 + ratio * 88, `再エンコード中…${durLabel}`);
+        }
+      });
+      await ff.run('-i', inName, ...ENCODE_ARGS, '-movflags', '+faststart', out);
+    }
+
+    /**
+     * file → MP4 Blob。
+     * mode==='copy': まずストリームコピーを試し、ダメなら instance を作り直して再エンコード。
+     * mode==='encode': 最初から再エンコード。
+     * @returns {Promise<{blob:Blob, reencoded:boolean}>}
+     */
+    async function transcode(file, mode, onStatus) {
+      const { fetchFile } = window.FFmpeg;
+      const inName = 'input' + inputExt(file.name);
+      const out    = 'output.mp4';
+      const dur    = (currentMeta && currentMeta.duration) || 0;
+
+      // ---- copy 経路 ----
+      if (mode === 'copy') {
+        let ff = await createLoadedFFmpeg(onStatus);
+        try {
+          onStatus(8, '動画を読み込み中…');
+          ff.FS('writeFile', inName, await fetchFile(file));
+          ff.setProgress(({ ratio }) => {
+            if (ratio >= 0 && ratio <= 1) onStatus(10 + ratio * 88, 'コピー変換中…（無劣化）');
+          });
+          await ff.run('-i', inName, '-c', 'copy', '-movflags', '+faststart', out);
+          const blob = readOutput(ff, out);
+          return { blob, reencoded: false };
+        } catch (copyErr) {
+          console.warn('copy path failed, will re-encode:', copyErr);
+          safeExit(ff); // コピー失敗で wasm が中断状態になり得るので破棄
+        }
+        // ---- copy 失敗 → 新しい instance で再エンコード ----
+        onStatus(6, 'コピーできない形式でした。再エンコードに切り替えます…');
+        toast('コピー不可の形式のため再エンコードします');
+        const ff2 = await createLoadedFFmpeg(onStatus);
+        try {
+          onStatus(8, '動画を読み込み中…');
+          ff2.FS('writeFile', inName, await fetchFile(file));
+          await runEncode(ff2, inName, out, dur, onStatus);
+          const blob = readOutput(ff2, out);
+          return { blob, reencoded: true };
+        } finally {
+          safeExit(ff2);
+        }
+      }
+
+      // ---- encode 経路 ----
+      const ff = await createLoadedFFmpeg(onStatus);
+      try {
+        onStatus(8, '動画を読み込み中…');
+        ff.FS('writeFile', inName, await fetchFile(file));
+        await runEncode(ff, inName, out, dur, onStatus);
+        const blob = readOutput(ff, out);
+        return { blob, reencoded: true };
+      } finally {
+        safeExit(ff);
+      }
+    }
+
+    // ===== 10. UI 状態 =====
+    async function setFile(file) {
+      if (busy) return;
+      currentFile = file;
+      currentMeta = null;
+      clearResult();
+      runCard.style.display = '';
+      filemeta.innerHTML = `🎬 <b>${escapeHtml(file.name)}</b> — ${fmtBytes(file.size)}`;
+      runBtn.disabled = false;
+      progress.classList.add('hidden');
+      pbar.style.width = '0%';
+      removeError();
+
+      if (file.size > LARGE_FILE_WARN) {
+        toast(`大きな動画 (${fmtBytes(file.size)}) です。端末のメモリ次第では失敗することがあります`);
+      }
+
+      // メタ情報 (長さ・解像度) を裏で取得して表示に足す
+      const meta = await probeVideoMeta(file);
+      if (currentFile !== file) return; // その間に別ファイルが選ばれていたら破棄
+      currentMeta = meta;
+      if (meta && (meta.duration || meta.width)) {
+        const parts = [];
+        if (meta.width && meta.height) parts.push(`${meta.width}×${meta.height}`);
+        if (meta.duration) parts.push(fmtHMS(meta.duration));
+        filemeta.innerHTML =
+          `🎬 <b>${escapeHtml(file.name)}</b> — ${fmtBytes(file.size)}` +
+          (parts.length ? ` ・ ${parts.join(' ・ ')}` : '');
+      }
+    }
+
+    function setBusy(isBusy) {
+      busy = isBusy;
+      runBtn.disabled = isBusy;
+      modeSelect.disabled = isBusy;
+      dz.style.pointerEvents = isBusy ? 'none' : '';
+      dz.style.opacity       = isBusy ? '0.6'  : '';
+    }
+
+    function removeError() {
+      const existing = document.getElementById('runError');
+      if (existing) existing.remove();
+    }
+
+    function showError(e) {
+      removeError();
+      const div = document.createElement('div');
+      div.id = 'runError';
+      div.className = 'alert err';
+      div.textContent = '⚠️ エラー: ' + (e && e.message ? e.message : String(e));
+      runCard.appendChild(div);
+    }
+
+    function clearResult() {
+      outBlob = null;
+      outName = '';
+      resultBox.classList.add('hidden');
+      if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+      preview.removeAttribute('src');
+      preview.load && preview.load();
+    }
+
+    function showResult(blob, name, reencoded) {
+      outBlob = blob;
+      outName = name;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = URL.createObjectURL(blob);
+      preview.src = previewUrl;
+
+      const tag = reencoded ? '再エンコード' : '無劣化コピー';
+      resultmeta.innerHTML = `🎬 <b>${escapeHtml(name)}</b> — ${fmtBytes(blob.size)} ・ ${tag}`;
+
+      // 保存 UI: デスクトップは保存ダイアログ、iOS は共有シート
+      const hasPicker = !!window.showSaveFilePicker;
+      const canShare  = canShareFile(name, MP4_MIME);
+      saveBtn.style.display  = hasPicker ? '' : 'none';
+      shareBtn.style.display = (!hasPicker && canShare) ? '' : 'none';
+      if (hasPicker) {
+        saveHint.textContent = '「保存（場所を選ぶ）」でファイル名と保存場所を指定できます。';
+      } else if (canShare) {
+        saveHint.innerHTML = '📤 「共有して保存」をタップ → 共有シートで <b>「ファイルに保存」</b> を選ぶと、フォルダとファイル名を指定して保存できます。';
+      } else {
+        saveHint.textContent = '';
+      }
+      resultBox.classList.remove('hidden');
+    }
+
+    // ===== 11. メインアクション =====
+    async function run() {
+      if (!currentFile || busy) return;
+      const file = currentFile;
+      const mode = modeSelect.value === 'encode' ? 'encode' : 'copy';
+      const suggestedName = baseName(file.name) + '.mp4';
+
+      setBusy(true);
+      clearResult();
+      removeError();
+      try {
+        setProgress(2, '準備中…');
+        const { blob, reencoded } = await transcode(file, mode, setProgress);
+        setProgress(100, '完了');
+        showResult(blob, suggestedName, reencoded);
+        toast(reencoded ? '再エンコードで変換しました' : '無劣化で変換しました');
+        hideProgressSoon();
+      } catch (e) {
+        console.error(e);
+        setProgress(0, '');
+        progress.classList.add('hidden');
+        showError(e);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function saveResult() {
+      if (!outBlob) return;
+      await saveBlobAs(outBlob, outName, MP4_PICKER_TYPE);
+    }
+
+    async function shareResult() {
+      if (!outBlob) return;
+      await shareBlob(outBlob, outName, MP4_MIME);
+    }
+
+    function downloadResult() {
+      if (!outBlob) return;
+      triggerDownload(outBlob, outName);
+      toast('ダウンロードを開始しました');
+    }
+
+    // ===== 12. イベントハンドラ =====
+    function setupHandlers() {
+      dz.addEventListener('click', () => { if (!busy) fi.click(); });
+      fi.addEventListener('change', () => { if (fi.files[0]) setFile(fi.files[0]); });
+      ['dragenter', 'dragover'].forEach((ev) =>
+        dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('drag'); })
+      );
+      ['dragleave', 'drop'].forEach((ev) =>
+        dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('drag'); })
+      );
+      dz.addEventListener('drop', (e) => {
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) setFile(f);
+      });
+
+      runBtn.addEventListener('click', run);
+      saveBtn.addEventListener('click', saveResult);
+      shareBtn.addEventListener('click', shareResult);
+      dlBtn.addEventListener('click', downloadResult);
+    }
+
+    setupHandlers();
+  })();
+  </script>
+</body>
+</html>
